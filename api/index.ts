@@ -3,7 +3,7 @@ let app: any = null;
 async function getApp() {
   if (app) return app;
 
-  const { createApp } = await import("../server/_core/index");
+  const { createApp } = await import("../server/_core/index.ts");
   app = createApp({ serveClient: false });
   return app;
 }
