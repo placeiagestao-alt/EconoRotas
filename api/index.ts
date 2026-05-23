@@ -1,6 +1,11 @@
 import { createApp } from "../server/_core/index";
 
-const app = createApp({ serveClient: false });
+let app: ReturnType<typeof createApp> | null = null;
+
+function getApp() {
+  app ??= createApp({ serveClient: false });
+  return app;
+}
 
 function normalizeVercelRewriteUrl(req: { url?: string }) {
   const currentUrl = new URL(req.url || "/", "http://vercel.local");
@@ -21,5 +26,21 @@ function normalizeVercelRewriteUrl(req: { url?: string }) {
 
 export default function handler(req: any, res: any) {
   normalizeVercelRewriteUrl(req);
-  return app(req, res);
+
+  try {
+    return getApp()(req, res);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Serverless function failed";
+
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.end(
+      JSON.stringify({
+        ok: false,
+        app: "EconoRotas",
+        error: message,
+      })
+    );
+  }
 }
