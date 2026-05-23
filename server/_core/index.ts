@@ -146,7 +146,7 @@ export function createApp(options: { serveClient?: boolean } = {}): Express {
   return app;
 }
 
-async function startServer() {
+export async function startServer() {
   const app = createApp({ serveClient: process.env.NODE_ENV !== "development" });
   const server = createServer(app);
 
@@ -168,8 +168,4 @@ async function startServer() {
   server.listen(port, () => {
     console.log(`Server running on port ${port}`);
   });
-}
-
-if (!process.env.VERCEL) {
-  startServer().catch(console.error);
 }
