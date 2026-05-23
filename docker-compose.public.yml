@@ -1,0 +1,21 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: econorotas-caddy
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - econorotas_caddy_data:/data
+      - econorotas_caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  econorotas_caddy_data:
+  econorotas_caddy_config:

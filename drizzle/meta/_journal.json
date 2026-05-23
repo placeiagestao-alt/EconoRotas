@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1778824435653,
+      "tag": "0000_cheerful_puck",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1778824579464,
+      "tag": "0001_slim_joystick",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1778824638663,
+      "tag": "0002_productive_vin_gonzales",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1779414097946,
+      "tag": "0003_vengeful_prowler",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1779432000000,
+      "tag": "0004_password_login",
+      "breakpoints": true
+    }
+  ]
+}

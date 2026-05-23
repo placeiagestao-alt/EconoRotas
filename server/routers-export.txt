@@ -1,0 +1,42 @@
+  history: router({
+    list: protectedProcedure.input(z.object({ limit: z.number().default(50), offset: z.number().default(0) }))
+      .query(({ ctx, input }) =>
+        db.getUserRouteHistory(ctx.user.id, input.limit, input.offset)
+      ),
+    getByRoute: protectedProcedure.input(z.object({ routeId: z.number() }))
+      .query(({ ctx, input }) =>
+        db.getRouteHistory(input.routeId, ctx.user.id)
+      ),
+    create: protectedProcedure.input(z.object({
+      routeId: z.number(),
+      actualDistance: z.number().optional(),
+      actualTime: z.number().optional(),
+    }))
+      .mutation(({ ctx, input }) =>
+        db.createHistory(ctx.user.id, input)
+      ),
+    update: protectedProcedure.input(z.object({
+      id: z.number(),
+      status: z.enum(["in_progress", "completed", "cancelled"]).optional(),
+      actualDistance: z.number().optional(),
+      actualTime: z.number().optional(),
+      storageKey: z.string().optional(),
+    }))
+      .mutation(({ ctx, input }) => {
+        const { id, ...data } = input;
+        return db.updateHistory(id, ctx.user.id, data);
+      }),
+    export: protectedProcedure.input(z.object({
+      format: z.enum(["pdf", "csv"]),
+      fileName: z.string().min(1),
+    }))
+      .mutation(async ({ ctx, input }) => {
+        const { exportHistoryToS3 } = await import("./export");
+        return exportHistoryToS3(
+          ctx.user.id,
+          input.format,
+          input.fileName,
+          ctx.user.name || "Usuário"
+        );
+      }),
+  }),

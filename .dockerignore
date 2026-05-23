@@ -1,0 +1,17 @@
+node_modules
+.pnpm-store
+dist
+android
+.data
+.manus
+.manus-logs
+.codex-artifacts
+.env
+.env.local
+.env.android
+.env.android-production
+.env.production
+*.log
+coverage
+build
+.git

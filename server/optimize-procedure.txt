@@ -1,0 +1,40 @@
+    optimize: protectedProcedure.input(z.object({
+      id: z.number(),
+      mode: z.enum(["shortest_distance", "shortest_time", "balanced"]).optional(),
+    }))
+      .mutation(async ({ ctx, input }) => {
+        const route = await db.getRouteById(input.id, ctx.user.id);
+        if (!route) throw new Error("Route not found");
+
+        const routeStops = await db.getRouteStops(input.id);
+        if (routeStops.length === 0) throw new Error("Route has no stops");
+
+        const locations: Location[] = routeStops.map(stop => ({
+          latitude: parseFloat(String(stop.latitude || 0)),
+          longitude: parseFloat(String(stop.longitude || 0)),
+          address: stop.address,
+        }));
+
+        const validation = validateLocations(locations);
+        if (!validation.valid) throw new Error(validation.error);
+
+        const mode = input.mode || route.mode;
+        const optimized = optimizeRoute(locations, mode);
+
+        await db.updateRoute(input.id, ctx.user.id, {
+          totalDistance: optimized.totalDistance,
+          totalTime: optimized.totalTime,
+          status: "optimized",
+        });
+
+        await db.deleteRouteStops(input.id);
+        const updatedStops = optimized.waypoints.map(wp => ({
+          address: wp.address || "",
+          latitude: wp.latitude,
+          longitude: wp.longitude,
+          sequence: wp.sequence,
+        }));
+        await db.createStops(input.id, updatedStops);
+
+        return optimized;
+      }),

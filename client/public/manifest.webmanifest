@@ -1,0 +1,10 @@
+{
+  "name": "EconoRotas",
+  "short_name": "EconoRotas",
+  "description": "Gestao e otimizacao de rotas com OpenStreetMap.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0f172a"
+}
