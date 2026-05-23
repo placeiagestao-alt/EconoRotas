@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import type { Express } from "express";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
@@ -66,7 +67,7 @@ function validateProductionEnvironment() {
   if (!ENV.isProduction) return;
 
   const missing = [];
-  if (!ENV.databaseUrl) missing.push("DATABASE_URL");
+  if (!ENV.databaseUrl && !ENV.allowEphemeralDb) missing.push("DATABASE_URL");
   if (!ENV.cookieSecret) missing.push("JWT_SECRET");
 
   if (missing.length > 0) {
@@ -84,12 +85,12 @@ function validateProductionEnvironment() {
   }
 }
 
-async function startServer() {
+export function createApp(options: { serveClient?: boolean } = {}): Express {
   validateProductionEnvironment();
 
   const app = express();
-  const server = createServer(app);
   const allowedOrigins = parseAllowedOrigins();
+  const shouldServeClient = options.serveClient ?? true;
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
@@ -137,11 +138,21 @@ async function startServer() {
       createContext,
     })
   );
+
+  if (shouldServeClient && process.env.NODE_ENV !== "development") {
+    serveStatic(app);
+  }
+
+  return app;
+}
+
+async function startServer() {
+  const app = createApp({ serveClient: process.env.NODE_ENV !== "development" });
+  const server = createServer(app);
+
   // development mode uses Vite, production mode uses static files
   if (process.env.NODE_ENV === "development") {
     await setupVite(app, server);
-  } else {
-    serveStatic(app);
   }
 
   const preferredPort = parseInt(process.env.PORT || "3000");
@@ -158,4 +169,6 @@ async function startServer() {
   });
 }
 
-startServer().catch(console.error);
+if (!process.env.VERCEL) {
+  startServer().catch(console.error);
+}

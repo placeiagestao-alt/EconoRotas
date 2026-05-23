@@ -33,7 +33,7 @@ const memory = {
 
 function shouldPersistLocalDb() {
   return (
-    !ENV.isProduction &&
+    (!ENV.isProduction || ENV.allowEphemeralDb) &&
     process.env.NODE_ENV !== "test" &&
     process.env.VITEST !== "true"
   );
@@ -82,7 +82,7 @@ function persistLocalDb() {
 }
 
 function shouldUseMemoryDb() {
-  if (ENV.isProduction) return false;
+  if (ENV.isProduction && !ENV.allowEphemeralDb) return false;
   loadLocalDb();
   return true;
 }

@@ -8,6 +8,7 @@ export const ENV = {
   publicAppUrl: process.env.PUBLIC_APP_URL ?? "",
   allowedOrigins: process.env.ALLOWED_ORIGINS ?? "",
   isProduction: process.env.NODE_ENV === "production",
+  allowEphemeralDb: process.env.ALLOW_EPHEMERAL_DB === "true",
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
 };
