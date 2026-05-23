@@ -1,9 +1,10 @@
-import { createApp } from "../server/_core/index";
+let app: any = null;
 
-let app: ReturnType<typeof createApp> | null = null;
+async function getApp() {
+  if (app) return app;
 
-function getApp() {
-  app ??= createApp({ serveClient: false });
+  const { createApp } = await import("../server/_core/index");
+  app = createApp({ serveClient: false });
   return app;
 }
 
@@ -24,11 +25,12 @@ function normalizeVercelRewriteUrl(req: { url?: string }) {
   req.url = query ? `${normalizedPath}?${query}` : normalizedPath;
 }
 
-export default function handler(req: any, res: any) {
+export default async function handler(req: any, res: any) {
   normalizeVercelRewriteUrl(req);
 
   try {
-    return getApp()(req, res);
+    const expressApp = await getApp();
+    return expressApp(req, res);
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Serverless function failed";
