@@ -2,4 +2,24 @@ import { createApp } from "../server/_core/index";
 
 const app = createApp({ serveClient: false });
 
-export default app;
+function normalizeVercelRewriteUrl(req: { url?: string }) {
+  const currentUrl = new URL(req.url || "/", "http://vercel.local");
+  const route = currentUrl.searchParams.get("__route");
+
+  if (!route) return;
+
+  const path = currentUrl.searchParams.get("path")?.replace(/^\/+/, "") ?? "";
+  const prefix = route === "manus-storage" ? "/manus-storage" : "/api";
+
+  currentUrl.searchParams.delete("__route");
+  currentUrl.searchParams.delete("path");
+
+  const normalizedPath = path ? `${prefix}/${path}` : prefix;
+  const query = currentUrl.searchParams.toString();
+  req.url = query ? `${normalizedPath}?${query}` : normalizedPath;
+}
+
+export default function handler(req: any, res: any) {
+  normalizeVercelRewriteUrl(req);
+  return app(req, res);
+}
