@@ -62,3 +62,12 @@ Resposta esperada:
 ```json
 {"ok":true,"app":"EconoRotas","environment":"production"}
 ```
+
+## Android
+
+Para gerar APK apontando para a Vercel, configure `.env.android-production` assim:
+
+```env
+VITE_API_BASE_URL=https://econo-rotas.vercel.app
+VITE_ENABLE_DEV_LOGIN=false
+```
