@@ -1,5 +1,7 @@
 export default function handler(_req: any, res: any) {
-  const isVercel = process.env.VERCEL === "1";
+  const isVercel = Boolean(
+    process.env.VERCEL || process.env.VERCEL_URL || process.env.NOW_REGION
+  );
   const hasPersistentDb = Boolean(process.env.DATABASE_URL);
   const allowEphemeralDb = process.env.ALLOW_EPHEMERAL_DB === "true" || isVercel;
   const hasJwtSecret = Boolean(process.env.JWT_SECRET);

@@ -1,4 +1,6 @@
-const isVercel = process.env.VERCEL === "1";
+const isVercel = Boolean(
+  process.env.VERCEL || process.env.VERCEL_URL || process.env.NOW_REGION
+);
 
 export const ENV = {
   appId: process.env.VITE_APP_ID ?? "",
