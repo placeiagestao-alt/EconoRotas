@@ -1,12 +1,6 @@
-let app: any = null;
+import { createApp } from "../server/_core/index";
 
-async function getApp() {
-  if (app) return app;
-
-  const { createApp } = await import("../server/_core/index");
-  app = createApp({ serveClient: false });
-  return app;
-}
+const app = createApp({ serveClient: false });
 
 function normalizeVercelRewriteUrl(req: { url?: string }) {
   const currentUrl = new URL(req.url || "/", "http://vercel.local");
@@ -29,8 +23,7 @@ export default async function handler(req: any, res: any) {
   normalizeVercelRewriteUrl(req);
 
   try {
-    const expressApp = await getApp();
-    return expressApp(req, res);
+    return app(req, res);
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Serverless function failed";
