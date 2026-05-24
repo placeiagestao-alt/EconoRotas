@@ -2,7 +2,7 @@ export default function handler(_req: any, res: any) {
   const isVercel = process.env.VERCEL === "1";
   const hasPersistentDb = Boolean(process.env.DATABASE_URL);
   const allowEphemeralDb = process.env.ALLOW_EPHEMERAL_DB === "true" || isVercel;
-  const hasJwtSecret = Boolean(process.env.JWT_SECRET) || isVercel;
+  const hasJwtSecret = Boolean(process.env.JWT_SECRET);
 
   res.statusCode = hasJwtSecret && (hasPersistentDb || allowEphemeralDb) ? 200 : 500;
   res.setHeader("Content-Type", "application/json; charset=utf-8");

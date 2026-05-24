@@ -1,10 +1,8 @@
 const isVercel = process.env.VERCEL === "1";
-const defaultDemoSecret =
-  "econorotas_vercel_demo_session_secret_2026_placeia_gestao_64_chars";
 
 export const ENV = {
   appId: process.env.VITE_APP_ID ?? "",
-  cookieSecret: process.env.JWT_SECRET ?? (isVercel ? defaultDemoSecret : ""),
+  cookieSecret: process.env.JWT_SECRET ?? "",
   databaseUrl: process.env.DATABASE_URL ?? "",
   oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
   ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
