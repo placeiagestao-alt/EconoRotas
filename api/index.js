@@ -2672,7 +2672,7 @@ function createApp(options = {}) {
   return app2;
 }
 
-// api/index.ts
+// server/_vercel/index.ts
 var app = createApp({ serveClient: false });
 function normalizeVercelRewriteUrl(req) {
   const currentUrl = new URL(req.url || "/", "http://vercel.local");

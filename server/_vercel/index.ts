@@ -1,4 +1,4 @@
-import { createApp } from "../server/_core/index";
+import { createApp } from "../_core/index";
 
 const app = createApp({ serveClient: false });
 
