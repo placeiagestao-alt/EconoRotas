@@ -2,9 +2,12 @@ const isVercel = Boolean(
   process.env.VERCEL || process.env.VERCEL_URL || process.env.NOW_REGION
 );
 
+const demoCookieSecret =
+  "econorotas-vercel-demo-session-secret-change-before-production";
+
 export const ENV = {
   appId: process.env.VITE_APP_ID ?? "",
-  cookieSecret: process.env.JWT_SECRET ?? "",
+  cookieSecret: process.env.JWT_SECRET ?? (isVercel ? demoCookieSecret : ""),
   databaseUrl: process.env.DATABASE_URL ?? "",
   databaseSsl: process.env.DATABASE_SSL ?? "",
   databaseSslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? "",
