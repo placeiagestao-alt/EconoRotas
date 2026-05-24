@@ -1287,7 +1287,8 @@ var SDKServer = class {
       {
         openId,
         appId: ENV.appId || "econorotas",
-        name: options.name || ""
+        name: options.name || "",
+        email: options.email ?? null
       },
       options
     );
@@ -1300,7 +1301,8 @@ var SDKServer = class {
     return new SignJWT({
       openId: payload.openId,
       appId: payload.appId,
-      name: payload.name
+      name: payload.name,
+      email: payload.email ?? null
     }).setProtectedHeader({ alg: "HS256", typ: "JWT" }).setExpirationTime(expirationSeconds).sign(secretKey);
   }
   async verifySession(cookieValue) {
@@ -1313,7 +1315,7 @@ var SDKServer = class {
       const { payload } = await jwtVerify(cookieValue, secretKey, {
         algorithms: ["HS256"]
       });
-      const { openId, appId, name } = payload;
+      const { openId, appId, name, email } = payload;
       if (!isNonEmptyString(openId) || !isNonEmptyString(appId) || !isNonEmptyString(name)) {
         console.warn("[Auth] Session payload missing required fields");
         return null;
@@ -1321,7 +1323,8 @@ var SDKServer = class {
       return {
         openId,
         appId,
-        name
+        name,
+        email: typeof email === "string" && email.length > 0 ? email : null
       };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
@@ -1389,6 +1392,20 @@ var SDKServer = class {
     const sessionUserId = session.openId;
     const signedInAt = /* @__PURE__ */ new Date();
     let user = await getUserByOpenId(sessionUserId);
+    if (!user && session.openId.startsWith("pwd_") && ENV.allowEphemeralDb) {
+      const ownerEmail = ENV.ownerEmail.trim().toLowerCase();
+      const email = session.email?.trim().toLowerCase() || null;
+      const usersCount = await countUsers();
+      await upsertUser({
+        openId: session.openId,
+        name: session.name || null,
+        email,
+        loginMethod: "password",
+        role: usersCount === 0 || email && ownerEmail === email ? "admin" : "user",
+        lastSignedIn: signedInAt
+      });
+      user = await getUserByOpenId(session.openId);
+    }
     if (!user) {
       try {
         const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
@@ -2234,9 +2251,10 @@ function sanitizeUser(user) {
   const { passwordHash: _passwordHash, ...safeUser } = user;
   return safeUser;
 }
-async function setPasswordSession(ctx, openId, name) {
+async function setPasswordSession(ctx, openId, name, email) {
   const sessionToken = await sdk.createSessionToken(openId, {
     name: name || "",
+    email,
     expiresInMs: ONE_YEAR_MS
   });
   const cookieOptions = getSessionCookieOptions(ctx.req);
@@ -2266,7 +2284,7 @@ var appRouter = router({
         openId: user.openId,
         lastSignedIn: /* @__PURE__ */ new Date()
       });
-      await setPasswordSession(ctx, user.openId, user.name);
+      await setPasswordSession(ctx, user.openId, user.name, user.email);
       return sanitizeUser(await getUserByOpenId(user.openId) ?? user);
     }),
     register: publicProcedure.input(credentialsSchema.extend({
@@ -2298,7 +2316,7 @@ var appRouter = router({
           message: "Nao foi possivel criar a conta."
         });
       }
-      await setPasswordSession(ctx, user.openId, user.name);
+      await setPasswordSession(ctx, user.openId, user.name, user.email);
       return sanitizeUser(user);
     }),
     logout: publicProcedure.mutation(({ ctx }) => {

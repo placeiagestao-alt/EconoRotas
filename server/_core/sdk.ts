@@ -22,6 +22,7 @@ export type SessionPayload = {
   openId: string;
   appId: string;
   name: string;
+  email?: string | null;
 };
 
 const EXCHANGE_TOKEN_PATH = `/webdev.v1.WebDevAuthPublicService/ExchangeToken`;
@@ -170,13 +171,14 @@ class SDKServer {
    */
   async createSessionToken(
     openId: string,
-    options: { expiresInMs?: number; name?: string } = {}
+    options: { expiresInMs?: number; name?: string; email?: string | null } = {}
   ): Promise<string> {
     return this.signSession(
       {
         openId,
         appId: ENV.appId || "econorotas",
         name: options.name || "",
+        email: options.email ?? null,
       },
       options
     );
@@ -195,6 +197,7 @@ class SDKServer {
       openId: payload.openId,
       appId: payload.appId,
       name: payload.name,
+      email: payload.email ?? null,
     })
       .setProtectedHeader({ alg: "HS256", typ: "JWT" })
       .setExpirationTime(expirationSeconds)
@@ -203,7 +206,7 @@ class SDKServer {
 
   async verifySession(
     cookieValue: string | undefined | null
-  ): Promise<{ openId: string; appId: string; name: string } | null> {
+  ): Promise<{ openId: string; appId: string; name: string; email: string | null } | null> {
     if (!cookieValue) {
       console.warn("[Auth] Missing session cookie");
       return null;
@@ -214,7 +217,7 @@ class SDKServer {
       const { payload } = await jwtVerify(cookieValue, secretKey, {
         algorithms: ["HS256"],
       });
-      const { openId, appId, name } = payload as Record<string, unknown>;
+      const { openId, appId, name, email } = payload as Record<string, unknown>;
 
       if (
         !isNonEmptyString(openId) ||
@@ -229,6 +232,7 @@ class SDKServer {
         openId,
         appId,
         name,
+        email: typeof email === "string" && email.length > 0 ? email : null,
       };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
@@ -308,6 +312,21 @@ class SDKServer {
     const sessionUserId = session.openId;
     const signedInAt = new Date();
     let user = await db.getUserByOpenId(sessionUserId);
+
+    if (!user && session.openId.startsWith("pwd_") && ENV.allowEphemeralDb) {
+      const ownerEmail = ENV.ownerEmail.trim().toLowerCase();
+      const email = session.email?.trim().toLowerCase() || null;
+      const usersCount = await db.countUsers();
+      await db.upsertUser({
+        openId: session.openId,
+        name: session.name || null,
+        email,
+        loginMethod: "password",
+        role: usersCount === 0 || (email && ownerEmail === email) ? "admin" : "user",
+        lastSignedIn: signedInAt,
+      });
+      user = await db.getUserByOpenId(session.openId);
+    }
 
     // If user not in DB, sync from OAuth server automatically
     if (!user) {

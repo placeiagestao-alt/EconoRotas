@@ -61,9 +61,15 @@ function sanitizeUser<T extends User | null | undefined>(user: T) {
   return safeUser;
 }
 
-async function setPasswordSession(ctx: any, openId: string, name: string | null) {
+async function setPasswordSession(
+  ctx: any,
+  openId: string,
+  name: string | null,
+  email: string | null
+) {
   const sessionToken = await sdk.createSessionToken(openId, {
     name: name || "",
+    email,
     expiresInMs: ONE_YEAR_MS,
   });
   const cookieOptions = getSessionCookieOptions(ctx.req);
@@ -97,7 +103,7 @@ export const appRouter = router({
           openId: user.openId,
           lastSignedIn: new Date(),
         });
-        await setPasswordSession(ctx, user.openId, user.name);
+        await setPasswordSession(ctx, user.openId, user.name, user.email);
 
         return sanitizeUser((await db.getUserByOpenId(user.openId)) ?? user);
       }),
@@ -137,7 +143,7 @@ export const appRouter = router({
           });
         }
 
-        await setPasswordSession(ctx, user.openId, user.name);
+        await setPasswordSession(ctx, user.openId, user.name, user.email);
         return sanitizeUser(user);
       }),
     logout: publicProcedure.mutation(({ ctx }) => {
