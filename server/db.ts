@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/mysql2";
 import fs from "node:fs";
 import path from "node:path";
 import mysql from "mysql2/promise";
+import type { PoolOptions } from "mysql2/promise";
 import { InsertUser, users, routes, stops, routeSchedules, routeHistory, chatHistory } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -91,6 +92,31 @@ function requireConfiguredDatabase(): never {
   throw new Error("Database not available");
 }
 
+function shouldUseDatabaseSsl(databaseUrl: string) {
+  if (process.env.DATABASE_SSL === "true") return true;
+  if (process.env.DATABASE_SSL === "false") return false;
+
+  return /ssl-mode=required|tidbcloud|aivencloud|planetscale|railway/i.test(
+    databaseUrl
+  );
+}
+
+function createDatabasePool(databaseUrl: string) {
+  if (!shouldUseDatabaseSsl(databaseUrl)) {
+    return mysql.createPool(databaseUrl);
+  }
+
+  const poolOptions: PoolOptions = {
+    uri: databaseUrl,
+    ssl: {
+      minVersion: "TLSv1.2",
+      rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
+    },
+  };
+
+  return mysql.createPool(poolOptions);
+}
+
 function sortByDateDesc<T extends Record<string, any>>(items: T[], field: string) {
   return [...items].sort(
     (a, b) => new Date(b[field]).getTime() - new Date(a[field]).getTime()
@@ -120,7 +146,7 @@ export async function getDb() {
   _lastDbConnectAttempt = now;
 
   try {
-    const pool = mysql.createPool(process.env.DATABASE_URL);
+    const pool = createDatabasePool(process.env.DATABASE_URL);
     await pool.query("SELECT 1");
     _db = drizzle(pool);
   } catch (error) {

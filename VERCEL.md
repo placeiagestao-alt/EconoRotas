@@ -41,10 +41,30 @@ NOMINATIM_CONTACT_EMAIL=placeiagestao@gmail.com
 ## Producao real com banco
 
 Para uso real no smartphone e navegador, use um MySQL externo e defina `DATABASE_URL`.
-Quando `DATABASE_URL` estiver configurado, execute as migrations antes de usar o app em producao:
+
+Variaveis recomendadas para MySQL externo:
+
+```env
+DATABASE_URL=mysql://USUARIO:SENHA@HOST:3306/NOME_DO_BANCO
+DATABASE_SSL=true
+DATABASE_SSL_REJECT_UNAUTHORIZED=true
+ALLOW_EPHEMERAL_DB=false
+```
+
+Use `DATABASE_SSL=true` para bancos externos que exigem TLS, como servicos MySQL gerenciados. Deixe `DATABASE_SSL_REJECT_UNAUTHORIZED=true` em producao. Use `false` apenas se o provedor orientar isso ou para diagnostico temporario de certificado.
+
+Depois de configurar o banco, execute as migrations antes de usar o app em producao:
 
 ```bash
 pnpm run db:migrate
+```
+
+No Windows/PowerShell, para rodar a migration local apontando para o banco externo:
+
+```powershell
+$env:DATABASE_URL="mysql://USUARIO:SENHA@HOST:3306/NOME_DO_BANCO"
+$env:DATABASE_SSL="true"
+corepack pnpm run db:migrate
 ```
 
 Sem `DATABASE_URL`, a Vercel usa memoria temporaria. Isso serve para teste e demonstracao, mas nao garante permanencia das rotas.

@@ -16,6 +16,7 @@ export default function handler(_req: any, res: any) {
       config: {
         JWT_SECRET: hasJwtSecret ? "configured" : "missing",
         DATABASE_URL: hasPersistentDb ? "configured" : "missing",
+        DATABASE_SSL: process.env.DATABASE_SSL === "true" ? "true" : "false",
         ALLOW_EPHEMERAL_DB: allowEphemeralDb ? "true" : "false",
       },
       timestamp: new Date().toISOString(),

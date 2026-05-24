@@ -49,6 +49,7 @@ Edite `.env.production` e preencha, no minimo:
 - `MYSQL_PASSWORD`
 - `MYSQL_ROOT_PASSWORD`
 - `DATABASE_URL`
+- `DATABASE_SSL`, quando usar MySQL externo com TLS
 - `JWT_SECRET`
 - `OWNER_EMAIL`
 - `PUBLIC_DOMAIN`
