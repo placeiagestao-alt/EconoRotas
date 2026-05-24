@@ -72,6 +72,7 @@ Suba o backend, banco e HTTPS publico com Caddy:
 
 ```bash
 chmod +x scripts/*.sh
+pnpm run check:production
 ./scripts/prod-deploy.sh
 ```
 
@@ -133,6 +134,7 @@ cd android
 - O APK de producao nao deve apontar para `localhost`, `10.0.2.2` ou `192.168.x.x`.
 - `VITE_ENABLE_DEV_LOGIN=true` e apenas para teste local.
 - O servidor em `NODE_ENV=production` exige `DATABASE_URL` e `JWT_SECRET`.
+- `pnpm run check:production` e o portao de entrada antes de colocar cliente real.
 - O login proprio por e-mail/senha nao depende do OAuth Manus. O primeiro cadastro vira admin.
 - O app Android precisa de internet para buscar rotas, login, banco e geocodificacao no backend.
 - OpenStreetMap/Leaflet continua sem chave do Google Maps.

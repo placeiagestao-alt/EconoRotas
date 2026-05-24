@@ -5,6 +5,7 @@ export default function handler(_req: any, res: any) {
   const hasPersistentDb = Boolean(process.env.DATABASE_URL);
   const allowEphemeralDb = process.env.ALLOW_EPHEMERAL_DB === "true" || isVercel;
   const hasJwtSecret = Boolean(process.env.JWT_SECRET || isVercel);
+  const dataMode = hasPersistentDb ? "persistent" : "ephemeral";
 
   res.statusCode = hasJwtSecret && (hasPersistentDb || allowEphemeralDb) ? 200 : 500;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -13,12 +14,17 @@ export default function handler(_req: any, res: any) {
       ok: res.statusCode === 200,
       app: "EconoRotas",
       environment: process.env.NODE_ENV || "unknown",
+      mode: dataMode,
       config: {
         JWT_SECRET: hasJwtSecret ? "configured" : "missing",
         DATABASE_URL: hasPersistentDb ? "configured" : "missing",
         DATABASE_SSL: process.env.DATABASE_SSL === "true" ? "true" : "false",
         ALLOW_EPHEMERAL_DB: allowEphemeralDb ? "true" : "false",
       },
+      warnings:
+        dataMode === "ephemeral"
+          ? ["Dados temporarios: configure DATABASE_URL para producao real."]
+          : [],
       timestamp: new Date().toISOString(),
     })
   );

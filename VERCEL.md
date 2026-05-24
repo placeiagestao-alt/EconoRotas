@@ -13,7 +13,7 @@ Plataforma escolhida: Vercel Hobby, por permitir deploy GitHub gratuito sem cart
 1. Acesse https://vercel.com/new
 2. Importe `placeiagestao-alt/EconoRotas`
 3. Framework preset: `Other`
-4. Build command: `pnpm run build`
+4. Build command: `pnpm run build:vercel`
 5. Output directory: `dist/public`
 6. Install command: `pnpm install --frozen-lockfile`
 
@@ -23,7 +23,7 @@ O arquivo `vercel.json` ja define esses valores e direciona:
 - `/manus-storage/*` para a mesma funcao, mantendo compatibilidade
 - qualquer outra rota para `index.html`, necessario para o React Router/Wouter
 
-## Variaveis obrigatorias
+## Variaveis para demonstracao sem cartao
 
 Defina em Environment Variables:
 
@@ -37,6 +37,14 @@ NOMINATIM_CONTACT_EMAIL=placeiagestao@gmail.com
 ```
 
 `ALLOW_EPHEMERAL_DB=true` permite subir sem banco pago/cartao. Os dados podem ser perdidos em reinicios/cold starts da Vercel. Para producao real, troque por um MySQL externo e defina `DATABASE_URL`.
+
+Antes de tratar como producao, rode:
+
+```bash
+pnpm run check:production
+```
+
+Esse comando falha de proposito enquanto faltar `DATABASE_URL`, `JWT_SECRET` forte ou URL publica HTTPS. A perda invisivel aqui e simples: o app pode parecer pronto no celular, mas qualquer rota salva em banco temporario pode desaparecer.
 
 ## Producao real com banco
 
@@ -80,7 +88,7 @@ curl https://econo-rotas.vercel.app/api/health
 Resposta esperada:
 
 ```json
-{"ok":true,"app":"EconoRotas","environment":"production"}
+{"ok":true,"app":"EconoRotas","environment":"production","mode":"persistent"}
 ```
 
 ## Android
