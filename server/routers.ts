@@ -22,6 +22,7 @@ function toOptionalLocation(
   latitudeValue: unknown,
   longitudeValue: unknown
 ): Location | undefined {
+  const normalizedAddress = typeof address === "string" ? address.trim() : "";
   const latitude = Number(latitudeValue);
   const longitude = Number(longitudeValue);
 
@@ -29,11 +30,20 @@ function toOptionalLocation(
     return undefined;
   }
 
+  // Persisted defaults (empty address + 0/0) should mean "no endpoint configured".
+  if (!normalizedAddress && latitude === 0 && longitude === 0) {
+    return undefined;
+  }
+
   return {
-    address: typeof address === "string" ? address : undefined,
+    address: normalizedAddress || undefined,
     latitude,
     longitude,
   };
+}
+
+function hasMissingCoordinates(location: Location) {
+  return location.latitude === 0 && location.longitude === 0;
 }
 
 async function requireUserRoute(routeId: number, userId: number) {
@@ -49,9 +59,118 @@ async function requireUserRoute(routeId: number, userId: number) {
   return route;
 }
 
+async function optimizeUserRoute(
+  routeId: number,
+  userId: number,
+  requestedMode?: "shortest_distance" | "shortest_time" | "balanced"
+) {
+  const route = await requireUserRoute(routeId, userId);
+  const routeStops = await db.getRouteStops(routeId);
+
+  if (routeStops.length === 0) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "A rota nao tem paradas.",
+    });
+  }
+
+  const locations: Location[] = routeStops.map((stop: any) => ({
+    latitude: parseFloat(String(stop.latitude ?? 0)),
+    longitude: parseFloat(String(stop.longitude ?? 0)),
+    address: stop.address,
+    notes: stop.notes ?? undefined,
+  }));
+
+  const validation = validateLocations(locations);
+  if (!validation.valid) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: validation.error,
+    });
+  }
+  const missingCoordinateIndex = locations.findIndex(hasMissingCoordinates);
+  if (missingCoordinateIndex !== -1) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `Coordenadas ausentes na parada ${missingCoordinateIndex + 1}.`,
+    });
+  }
+
+  const startLocation = toOptionalLocation(
+    route.startLocation,
+    route.startLatitude,
+    route.startLongitude
+  );
+  const endLocation = toOptionalLocation(
+    route.endLocation,
+    route.endLatitude,
+    route.endLongitude
+  );
+  const endpointValidation = validateLocations(
+    [startLocation, endLocation].filter(Boolean) as Location[]
+  );
+  if ((startLocation || endLocation) && !endpointValidation.valid) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: endpointValidation.error,
+    });
+  }
+  if ([startLocation, endLocation].filter(Boolean).some((location) =>
+    hasMissingCoordinates(location as Location)
+  )) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Coordenadas ausentes no inicio ou fim da rota.",
+    });
+  }
+
+  const mode = requestedMode || route.mode;
+  const optimized = optimizeRoute(locations, mode, 0, {
+    startLocation,
+    endLocation,
+  });
+
+  await db.updateRoute(routeId, userId, {
+    totalDistance: optimized.totalDistance,
+    totalTime: optimized.totalTime,
+    status: "optimized",
+  });
+
+  await db.deleteRouteStops(routeId);
+  const updatedStops = optimized.waypoints.map(wp => ({
+    address: wp.address || "",
+    latitude: wp.latitude,
+    longitude: wp.longitude,
+    sequence: wp.sequence,
+    notes: wp.notes,
+  }));
+  await db.createStops(routeId, updatedStops);
+
+  return optimized;
+}
+
 const credentialsSchema = z.object({
   email: z.string().email("Informe um e-mail valido."),
   password: z.string().min(8, "A senha deve ter pelo menos 8 caracteres."),
+});
+const routeModeSchema = z.enum(["shortest_distance", "shortest_time", "balanced"]);
+const routeCreateSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  mode: routeModeSchema,
+  startLocation: z.string().optional(),
+  startLatitude: z.number().optional(),
+  startLongitude: z.number().optional(),
+  endLocation: z.string().optional(),
+  endLatitude: z.number().optional(),
+  endLongitude: z.number().optional(),
+});
+const stopCreateSchema = z.object({
+  address: z.string(),
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
+  sequence: z.number(),
+  notes: z.string().optional(),
 });
 
 function sanitizeUser<T extends User | null | undefined>(user: T) {
@@ -161,25 +280,45 @@ export const appRouter = router({
       .query(({ ctx, input }) =>
         db.getRouteById(input.id, ctx.user.id)
       ),
-    create: protectedProcedure.input(z.object({
-      name: z.string().min(1),
-      description: z.string().optional(),
-      mode: z.enum(["shortest_distance", "shortest_time", "balanced"]),
-      startLocation: z.string().optional(),
-      startLatitude: z.number().optional(),
-      startLongitude: z.number().optional(),
-      endLocation: z.string().optional(),
-      endLatitude: z.number().optional(),
-      endLongitude: z.number().optional(),
-    }))
+    create: protectedProcedure.input(routeCreateSchema)
       .mutation(({ ctx, input }) =>
         db.createRoute(ctx.user.id, input)
       ),
+    createAndOptimize: protectedProcedure.input(routeCreateSchema.extend({
+      stops: z.array(stopCreateSchema).min(2),
+    }))
+      .mutation(async ({ ctx, input }) => {
+        const { stops, ...routeInput } = input;
+        const route = await db.createRoute(ctx.user.id, routeInput);
+
+        if (!route) {
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: "Nao foi possivel criar a rota.",
+          });
+        }
+
+        try {
+          await db.createStops(route.id, stops);
+          const optimized = await optimizeUserRoute(route.id, ctx.user.id, input.mode);
+          const updatedRoute = await db.getRouteById(route.id, ctx.user.id);
+
+          return {
+            route: updatedRoute ?? route,
+            optimization: optimized,
+          };
+        } catch (error) {
+          await db.deleteRoute(route.id, ctx.user.id).catch((deleteError) => {
+            console.error("[Routes] Failed to rollback route creation:", deleteError);
+          });
+          throw error;
+        }
+      }),
     update: protectedProcedure.input(z.object({
       id: z.number(),
       name: z.string().optional(),
       description: z.string().optional(),
-      mode: z.enum(["shortest_distance", "shortest_time", "balanced"]).optional(),
+      mode: routeModeSchema.optional(),
       totalDistance: z.number().optional(),
       totalTime: z.number().optional(),
       status: z.enum(["draft", "optimized", "completed", "cancelled"]).optional(),
@@ -200,65 +339,10 @@ export const appRouter = router({
       ),
     optimize: protectedProcedure.input(z.object({
       id: z.number(),
-      mode: z.enum(["shortest_distance", "shortest_time", "balanced"]).optional(),
+      mode: routeModeSchema.optional(),
     }))
       .mutation(async ({ ctx, input }) => {
-        const route = await db.getRouteById(input.id, ctx.user.id);
-        if (!route) throw new Error("Route not found");
-
-        const routeStops = await db.getRouteStops(input.id);
-        if (routeStops.length === 0) throw new Error("Route has no stops");
-
-        const locations: Location[] = routeStops.map((stop: any) => ({
-          latitude: parseFloat(String(stop.latitude || 0)),
-          longitude: parseFloat(String(stop.longitude || 0)),
-          address: stop.address,
-          notes: stop.notes ?? undefined,
-        }));
-
-        const validation = validateLocations(locations);
-        if (!validation.valid) throw new Error(validation.error);
-
-        const startLocation = toOptionalLocation(
-          route.startLocation,
-          route.startLatitude,
-          route.startLongitude
-        );
-        const endLocation = toOptionalLocation(
-          route.endLocation,
-          route.endLatitude,
-          route.endLongitude
-        );
-        const endpointValidation = validateLocations(
-          [startLocation, endLocation].filter(Boolean) as Location[]
-        );
-        if ((startLocation || endLocation) && !endpointValidation.valid) {
-          throw new Error(endpointValidation.error);
-        }
-
-        const mode = input.mode || route.mode;
-        const optimized = optimizeRoute(locations, mode, 0, {
-          startLocation,
-          endLocation,
-        });
-
-        await db.updateRoute(input.id, ctx.user.id, {
-          totalDistance: optimized.totalDistance,
-          totalTime: optimized.totalTime,
-          status: "optimized",
-        });
-
-        await db.deleteRouteStops(input.id);
-        const updatedStops = optimized.waypoints.map(wp => ({
-          address: wp.address || "",
-          latitude: wp.latitude,
-          longitude: wp.longitude,
-          sequence: wp.sequence,
-          notes: wp.notes,
-        }));
-        await db.createStops(input.id, updatedStops);
-
-        return optimized;
+        return optimizeUserRoute(input.id, ctx.user.id, input.mode);
       }),
   }),
 
@@ -270,13 +354,7 @@ export const appRouter = router({
       }),
     create: protectedProcedure.input(z.object({
       routeId: z.number(),
-      stops: z.array(z.object({
-        address: z.string(),
-        latitude: z.number().optional(),
-        longitude: z.number().optional(),
-        sequence: z.number(),
-        notes: z.string().optional(),
-      })),
+        stops: z.array(stopCreateSchema),
     }))
       .mutation(async ({ ctx, input }) => {
         await requireUserRoute(input.routeId, ctx.user.id);

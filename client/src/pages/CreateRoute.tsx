@@ -58,13 +58,9 @@ export default function CreateRoute() {
     { address: "", latitude: 0, longitude: 0 },
   ]);
 
-  const createRouteMutation = trpc.routes.create.useMutation();
-  const createStopsMutation = trpc.stops.create.useMutation();
-  const optimizeMutation = trpc.routes.optimize.useMutation();
+  const createAndOptimizeMutation = trpc.routes.createAndOptimize.useMutation();
   const isSavingRoute =
-    createRouteMutation.isPending ||
-    createStopsMutation.isPending ||
-    optimizeMutation.isPending ||
+    createAndOptimizeMutation.isPending ||
     isResolvingCoordinates;
   const submitLabel = isResolvingCoordinates
     ? "Localizando enderecos..."
@@ -468,9 +464,12 @@ export default function CreateRoute() {
       const startPayload = getRoutePointPayload(validStartPoint);
       const endPayload = getRoutePointPayload(validEndPoint);
 
-      // Create route
       setInvalidStopIndexes([]);
-      const route = await createRouteMutation.mutateAsync({
+      const stopsWithSequence = validStops.map((stop, index) => ({
+        ...stop,
+        sequence: index,
+      }));
+      const result = await createAndOptimizeMutation.mutateAsync({
         name,
         description,
         mode,
@@ -480,32 +479,14 @@ export default function CreateRoute() {
         endLocation: endPayload?.location,
         endLatitude: endPayload?.latitude,
         endLongitude: endPayload?.longitude,
-      });
-
-      if (!route) {
-        toast.error("Erro ao criar rota");
-        return;
-      }
-
-      // Create stops
-      const stopsWithSequence = validStops.map((stop, index) => ({
-        ...stop,
-        sequence: index,
-      }));
-
-      await createStopsMutation.mutateAsync({
-        routeId: route.id,
         stops: stopsWithSequence,
       });
 
-      // Optimize route
-      const optimized = await optimizeMutation.mutateAsync({
-        id: route.id,
-        mode,
-      });
+      const { route, optimization } = result;
 
-      // Set route ID and metrics for sharing
       setCreatedRouteId(route.id);
+      setTotalDistance(optimization.totalDistance);
+      setTotalDuration(optimization.totalTime);
       
       toast.success("Rota criada e otimizada com sucesso!");
       navigate(`/routes/${route.id}`);

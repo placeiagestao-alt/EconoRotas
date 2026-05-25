@@ -28,6 +28,63 @@ function createAuthContext(userId: number): TrpcContext {
 }
 
 describe("Route endpoints", () => {
+  it("creates stops and optimizes route in one backend operation", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8201));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Rota atomica",
+      mode: "balanced",
+      stops: [
+        {
+          address: "Rua A, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+        },
+        {
+          address: "Rua B, Presidente Prudente - SP",
+          latitude: -22.1307,
+          longitude: -51.3989,
+          sequence: 1,
+        },
+      ],
+    });
+
+    expect(result.route.status).toBe("optimized");
+    expect(result.optimization.totalDistance).toBeGreaterThan(0);
+
+    const stops = await caller.stops.list({ routeId: result.route.id });
+    expect(stops).toHaveLength(2);
+  });
+
+  it("rolls back route creation when optimization rejects invalid stops", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8202));
+
+    await expect(
+      caller.routes.createAndOptimize({
+        name: "Rota invalida",
+        mode: "balanced",
+        stops: [
+          {
+            address: "Rua A, Presidente Prudente - SP",
+            latitude: -22.1207,
+            longitude: -51.3889,
+            sequence: 0,
+          },
+          {
+            address: "Parada sem coordenadas",
+            latitude: 0,
+            longitude: 0,
+            sequence: 1,
+          },
+        ],
+      })
+    ).rejects.toThrow();
+
+    const routes = await caller.routes.list();
+    expect(routes).toHaveLength(0);
+  });
+
   it("saves and clears start/end points for an existing route", async () => {
     const caller = appRouter.createCaller(createAuthContext(8101));
     const route = await caller.routes.create({

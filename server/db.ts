@@ -520,8 +520,8 @@ export async function createStops(routeId: number, stopsData: Array<{
         id: memory.ids.stops++,
         routeId,
         address: stop.address,
-        latitude: stop.latitude ? String(stop.latitude) : null,
-        longitude: stop.longitude ? String(stop.longitude) : null,
+        latitude: stop.latitude !== undefined ? String(stop.latitude) : null,
+        longitude: stop.longitude !== undefined ? String(stop.longitude) : null,
         sequence: stop.sequence,
         notes: stop.notes ?? null,
         createdAt: now,
@@ -537,8 +537,8 @@ export async function createStops(routeId: number, stopsData: Array<{
   const values = stopsData.map(s => ({
     routeId,
     address: s.address,
-    latitude: s.latitude ? String(s.latitude) : null,
-    longitude: s.longitude ? String(s.longitude) : null,
+    latitude: s.latitude !== undefined ? String(s.latitude) : null,
+    longitude: s.longitude !== undefined ? String(s.longitude) : null,
     sequence: s.sequence,
     notes: s.notes,
   }));

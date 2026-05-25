@@ -4,10 +4,13 @@ const isVercel = Boolean(
 
 const demoCookieSecret =
   "econorotas-vercel-demo-session-secret-change-before-production";
+const hasConfiguredCookieSecret = Boolean(process.env.JWT_SECRET);
 
 export const ENV = {
   appId: process.env.VITE_APP_ID ?? "",
   cookieSecret: process.env.JWT_SECRET ?? (isVercel ? demoCookieSecret : ""),
+  hasConfiguredCookieSecret,
+  usingDemoCookieSecret: !hasConfiguredCookieSecret && isVercel,
   databaseUrl: process.env.DATABASE_URL ?? "",
   databaseSsl: process.env.DATABASE_SSL ?? "",
   databaseSslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? "",
