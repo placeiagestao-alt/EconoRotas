@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -54,6 +54,8 @@ export default function RouteShare({
   const [shareEmail, setShareEmail] = useState("");
   const [isExporting, setIsExporting] = useState(false);
 
+  const escapeCsv = (value: unknown) => String(value ?? "").replace(/"/g, '""');
+
   const formatDuration = (seconds: number): string => {
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
@@ -65,7 +67,7 @@ export default function RouteShare({
 
   const generateShareLink = async () => {
     if (!routeId) {
-      toast.error("Salve a rota primeiro para gerar um link compartilhável");
+      toast.error("Salve a rota primeiro para gerar um link compartilh\u00e1vel");
       return;
     }
 
@@ -73,10 +75,10 @@ export default function RouteShare({
     try {
       // Generate a shareable link with route data
       const baseUrl = window.location.origin;
-      const link = `${baseUrl}/routes/${routeId}/share`;
+      const link = `${baseUrl}/routes/${routeId}`;
       setShareLink(link);
     } catch (error) {
-      toast.error("Erro ao gerar link compartilhável");
+      toast.error("Erro ao gerar link compartilh\u00e1vel");
     } finally {
       setIsGeneratingLink(false);
     }
@@ -86,7 +88,7 @@ export default function RouteShare({
     try {
       await navigator.clipboard.writeText(shareLink);
       setIsCopied(true);
-      toast.success("Link copiado para a área de transferência!");
+      toast.success("Link copiado para a area de transferencia!");
       setTimeout(() => setIsCopied(false), 2000);
     } catch (error) {
       toast.error("Erro ao copiar link");
@@ -146,11 +148,11 @@ export default function RouteShare({
   const handleExportCSV = () => {
     try {
       let csv = "Rota,Descrição,Modo,Distância Total,Tempo Total\n";
-      csv += `"${routeName}","${description || ""}","${mode || ""}","${totalDistance?.toFixed(2) || "N/A"} km","${totalDuration ? formatDuration(totalDuration) : "N/A"}"\n\n`;
+      csv += `"${escapeCsv(routeName)}","${escapeCsv(description || "")}","${escapeCsv(mode || "")}","${escapeCsv(totalDistance?.toFixed(2) || "N/A")} km","${escapeCsv(totalDuration ? formatDuration(totalDuration) : "N/A")}"\n\n`;
       
       csv += "Sequência,Endereço,Latitude,Longitude\n";
       stops.forEach((stop, idx) => {
-        csv += `${(stop.sequence || idx) + 1},"${stop.address}",${stop.latitude},${stop.longitude}\n`;
+        csv += `${(stop.sequence || idx) + 1},"${escapeCsv(stop.address)}",${stop.latitude},${stop.longitude}\n`;
       });
 
       const dataBlob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -170,12 +172,12 @@ export default function RouteShare({
 
   const handleShareViaEmail = async () => {
     if (!shareLink) {
-      toast.error("Gere o link compartilhável primeiro");
+      toast.error("Gere o link compartilh\u00e1vel primeiro");
       return;
     }
 
     if (!shareEmail.trim()) {
-      toast.error("Digite um email válido");
+      toast.error("Digite um e-mail v\u00e1lido");
       return;
     }
 
@@ -187,21 +189,21 @@ export default function RouteShare({
       const mailtoLink = `mailto:${shareEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
       window.location.href = mailtoLink;
       
-      toast.success("Email aberto. Envie para compartilhar a rota!");
+      toast.success("E-mail aberto. Envie para compartilhar a rota!");
       setShareEmail("");
     } catch (error) {
-      toast.error("Erro ao preparar email");
+      toast.error("Erro ao preparar e-mail");
     }
   };
 
   return (
     <div className="space-y-4">
       {/* Share Button */}
-      <Card className="p-4 bg-gradient-to-r from-purple-50 to-pink-50 border-purple-200">
+      <Card className="border-primary/30 bg-gradient-to-r from-emerald-50 via-white to-sky-50 p-4">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="font-semibold text-gray-900">Compartilhar & Exportar</h3>
-            <p className="text-sm text-gray-600 mt-1">Exporte sua rota ou compartilhe com outras pessoas</p>
+            <h3 className="font-semibold text-foreground">Compartilhar & Exportar</h3>
+            <p className="mt-1 text-sm text-muted-foreground">Exporte sua rota ou compartilhe com outras pessoas</p>
           </div>
           <Button
             onClick={() => {
@@ -284,7 +286,7 @@ export default function RouteShare({
           <div className="space-y-4">
             {/* Share Link Section */}
             <div className="space-y-2">
-              <Label className="text-sm font-medium">Link Compartilhável</Label>
+              <Label className="text-sm font-medium">Link Compartilh\u00e1vel</Label>
               {shareLink ? (
                 <div className="flex gap-2">
                   <Input
@@ -299,7 +301,7 @@ export default function RouteShare({
                     className="gap-1"
                   >
                     {isCopied ? (
-                      <Check className="w-4 h-4 text-green-600" />
+                      <Check className="w-4 h-4 text-accent" />
                     ) : (
                       <Copy className="w-4 h-4" />
                     )}
@@ -324,7 +326,7 @@ export default function RouteShare({
 
             {/* Share via Email */}
             <div className="space-y-2">
-              <Label className="text-sm font-medium">Compartilhar por Email</Label>
+              <Label className="text-sm font-medium">Compartilhar por E-mail</Label>
               <div className="flex gap-2">
                 <Input
                   type="email"
@@ -385,13 +387,13 @@ export default function RouteShare({
 
             {/* Route Summary */}
             {(totalDistance || totalDuration) && (
-              <Alert className="bg-blue-50 border-blue-200">
+              <Alert className="border-primary/35 bg-primary/10">
                 <AlertDescription className="text-sm">
                   <strong>Resumo da Rota:</strong>
                   <div className="mt-2 space-y-1 text-xs">
-                    <div>📍 Distância: {totalDistance?.toFixed(2) || "N/A"} km</div>
-                    <div>⏱️ Tempo: {totalDuration ? formatDuration(totalDuration) : "N/A"}</div>
-                    <div>🛑 Paradas: {stops.length}</div>
+                    <div>Distância: {totalDistance?.toFixed(2) || "N/A"} km</div>
+                    <div>Tempo: {totalDuration ? formatDuration(totalDuration) : "N/A"}</div>
+                    <div>Paradas: {stops.length}</div>
                   </div>
                 </AlertDescription>
               </Alert>
@@ -402,3 +404,6 @@ export default function RouteShare({
     </div>
   );
 }
+
+
+

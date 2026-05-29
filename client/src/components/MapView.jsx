@@ -9,7 +9,11 @@ import {
 import { configureLeafletDefaultIcons } from "@/services/maps/markerService";
 
 const OPEN_STREET_MAP_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
-const OPEN_STREET_MAP_ATTRIBUTION = "&copy; OpenStreetMap contributors";
+const DARK_TILE_URL = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+const OPEN_STREET_MAP_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const DARK_TILE_ATTRIBUTION =
+  '&copy; OpenStreetMap contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
 
 configureLeafletDefaultIcons();
 
@@ -25,6 +29,26 @@ function MapViewport({ markers, center, zoom }) {
 
     map.setView(center, zoom);
   }, [center, map, markers, zoom]);
+
+  return null;
+}
+
+function MapSizeSync({ height }) {
+  const map = useMap();
+
+  useEffect(() => {
+    const refresh = () => map.invalidateSize({ pan: false, debounceMoveend: true });
+
+    const timer = window.setTimeout(refresh, 120);
+    window.addEventListener("resize", refresh);
+    document.addEventListener("visibilitychange", refresh);
+
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("resize", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [map, height]);
 
   return null;
 }
@@ -66,13 +90,14 @@ function MapView({
         style={{ height: "100%", width: "100%" }}
       >
         <TileLayer
-          attribution={OPEN_STREET_MAP_ATTRIBUTION}
-          url={OPEN_STREET_MAP_TILE_URL}
+          attribution={darkMode ? DARK_TILE_ATTRIBUTION : OPEN_STREET_MAP_ATTRIBUTION}
+          url={darkMode ? DARK_TILE_URL : OPEN_STREET_MAP_TILE_URL}
           updateWhenIdle
           keepBuffer={4}
         />
 
         <MapViewport markers={mapMarkers} center={effectiveCenter} zoom={effectiveZoom} />
+        <MapSizeSync height={height} />
 
         {mapMarkers.map((marker) => (
           <Marker key={marker.id} position={marker.position}>
@@ -84,10 +109,16 @@ function MapView({
         ))}
 
         {routePath.length > 1 ? (
-          <Polyline
-            positions={routePath}
-            pathOptions={{ color: "#2563eb", opacity: 0.82, weight: 4 }}
-          />
+          <>
+            <Polyline
+              positions={routePath}
+              pathOptions={{ color: "#34d399", opacity: 0.2, weight: 9 }}
+            />
+            <Polyline
+              positions={routePath}
+              pathOptions={{ color: "#2563eb", opacity: 0.92, weight: 4 }}
+            />
+          </>
         ) : null}
       </MapContainer>
     </div>

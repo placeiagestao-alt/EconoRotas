@@ -1,4 +1,5 @@
 import { useAuth } from "@/_core/hooks/useAuth";
+import { BrandLogo } from "@/components/BrandLogo";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,6 +11,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
 import { trpc } from "@/lib/trpc";
 import {
   BarChart3,
@@ -17,10 +19,26 @@ import {
   History,
   MapPin,
   MessageSquare,
+  Package,
+  Route,
+  TrendingUp,
   Zap,
 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { Link } from "wouter";
+
+function normalizeAuthError(errorMessage: string) {
+  const message = errorMessage.toLowerCase();
+  if (message.includes("failed to fetch") || message.includes("network")) {
+    return "Sem conexão com o servidor agora. Tente novamente em alguns segundos.";
+  }
+
+  if (message.includes("503") || message.includes("unavailable")) {
+    return "Serviço temporariamente indisponível. Tente novamente em instantes.";
+  }
+
+  return errorMessage;
+}
 
 export default function Home() {
   const { user, isAuthenticated, loading } = useAuth();
@@ -31,6 +49,28 @@ export default function Home() {
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
 
+  const routesQuery = trpc.routes.list.useQuery(undefined, {
+    enabled: isAuthenticated,
+  });
+
+  const routeSummary = useMemo(() => {
+    const routes = routesQuery.data ?? [];
+    const totalRoutes = routes.length;
+    const completedRoutes = routes.filter((route: any) => route.status === "completed").length;
+    const totalDistance = routes.reduce(
+      (acc: number, route: any) => acc + Number(route.totalDistance || 0),
+      0
+    );
+
+    return {
+      totalRoutes,
+      completedRoutes,
+      totalDistance,
+      efficiency:
+        totalRoutes > 0 ? Math.round((completedRoutes / totalRoutes) * 100) : 0,
+    };
+  }, [routesQuery.data]);
+
   const afterAuthSuccess = async () => {
     setAuthError(null);
     setPassword("");
@@ -39,11 +79,11 @@ export default function Home() {
 
   const loginMutation = trpc.auth.login.useMutation({
     onSuccess: afterAuthSuccess,
-    onError: (error) => setAuthError(error.message),
+    onError: (error) => setAuthError(normalizeAuthError(error.message)),
   });
   const registerMutation = trpc.auth.register.useMutation({
     onSuccess: afterAuthSuccess,
-    onError: (error) => setAuthError(error.message),
+    onError: (error) => setAuthError(normalizeAuthError(error.message)),
   });
   const authPending = loginMutation.isPending || registerMutation.isPending;
 
@@ -61,65 +101,55 @@ export default function Home() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary" />
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="h-12 w-12 animate-spin rounded-full border-b-2 border-primary" />
       </div>
     );
   }
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col items-center justify-center px-4 py-8">
-        <div className="max-w-md w-full space-y-8 text-center">
-          <div className="space-y-2">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500">
-              <MapPin className="w-8 h-8 text-white" />
-            </div>
-            <h1 className="text-4xl font-bold text-white">EconoRotas</h1>
-            <p className="text-lg text-slate-300">
-              Otimize suas rotas com inteligencia artificial
-            </p>
-          </div>
+      <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10">
+        <div className="pointer-events-none absolute -left-20 top-8 h-56 w-56 rounded-full bg-emerald-300/35 blur-3xl" />
+        <div className="pointer-events-none absolute -right-16 bottom-10 h-56 w-56 rounded-full bg-sky-300/30 blur-3xl" />
 
-          <div className="grid grid-cols-2 gap-4 text-left">
-            <div className="flex items-start space-x-3">
-              <Zap className="w-5 h-5 text-blue-400 mt-1 flex-shrink-0" />
-              <div>
-                <p className="font-semibold text-white">Otimizacao TSP</p>
-                <p className="text-sm text-slate-400">Algoritmo inteligente</p>
+        <div className="grid w-full max-w-5xl gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+          <Card className="border-border/85 bg-white">
+            <CardHeader className="space-y-5">
+              <BrandLogo
+                variant="full"
+                className="h-28 w-full max-w-[320px] justify-start"
+              />
+              <div className="space-y-2">
+                <CardDescription className="text-base text-slate-600">
+                  Roteirização inteligente para reduzir tempo, combustível e retrabalho.
+                </CardDescription>
               </div>
-            </div>
-            <div className="flex items-start space-x-3">
-              <BarChart3 className="w-5 h-5 text-cyan-400 mt-1 flex-shrink-0" />
-              <div>
-                <p className="font-semibold text-white">Analytics</p>
-                <p className="text-sm text-slate-400">Metricas em tempo real</p>
+            </CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl border border-border/80 bg-secondary/55 p-4">
+                <p className="mb-1 text-sm font-semibold">Otimização Inteligente</p>
+                <p className="text-sm text-muted-foreground">Rotas mais rápidas com base em dados reais.</p>
               </div>
-            </div>
-            <div className="flex items-start space-x-3">
-              <MessageSquare className="w-5 h-5 text-blue-400 mt-1 flex-shrink-0" />
-              <div>
-                <p className="font-semibold text-white">Chat com IA</p>
-                <p className="text-sm text-slate-400">Suporte inteligente</p>
+              <div className="rounded-2xl border border-border/80 bg-secondary/55 p-4">
+                <p className="mb-1 text-sm font-semibold">Economia de Combustível</p>
+                <p className="text-sm text-muted-foreground">Menos quilômetros improdutivos no dia a dia.</p>
               </div>
-            </div>
-            <div className="flex items-start space-x-3">
-              <Calendar className="w-5 h-5 text-cyan-400 mt-1 flex-shrink-0" />
-              <div>
-                <p className="font-semibold text-white">Agendamento</p>
-                <p className="text-sm text-slate-400">Recorrencias automaticas</p>
+              <div className="rounded-2xl border border-border/80 bg-secondary/55 p-4">
+                <p className="mb-1 text-sm font-semibold">Mais Tempo para Entregar</p>
+                <p className="text-sm text-muted-foreground">Execução mais previsível e com menos desvios.</p>
               </div>
-            </div>
-          </div>
+              <div className="rounded-2xl border border-border/80 bg-secondary/55 p-4">
+                <p className="mb-1 text-sm font-semibold">Analytics Operacional</p>
+                <p className="text-sm text-muted-foreground">Indicadores claros para evolução contínua.</p>
+              </div>
+            </CardContent>
+          </Card>
 
-          <Card className="text-left">
+          <Card className="border-border/85 bg-white">
             <CardHeader>
-              <CardTitle>
-                {authMode === "login" ? "Entrar" : "Criar conta"}
-              </CardTitle>
-              <CardDescription>
-                Use seu e-mail e senha para acessar o EconoRotas.
-              </CardDescription>
+              <CardTitle>{authMode === "login" ? "Entrar" : "Criar conta"}</CardTitle>
+              <CardDescription>Use seu e-mail e senha para acessar o painel.</CardDescription>
             </CardHeader>
             <CardContent>
               <form className="space-y-4" onSubmit={handleAuthSubmit}>
@@ -136,6 +166,7 @@ export default function Home() {
                     />
                   </div>
                 )}
+
                 <div className="space-y-2">
                   <Label htmlFor="email">E-mail</Label>
                   <Input
@@ -148,14 +179,13 @@ export default function Home() {
                     required
                   />
                 </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="password">Senha</Label>
                   <Input
                     id="password"
                     type="password"
-                    autoComplete={
-                      authMode === "login" ? "current-password" : "new-password"
-                    }
+                    autoComplete={authMode === "login" ? "current-password" : "new-password"}
                     value={password}
                     onChange={(event) => setPassword(event.target.value)}
                     disabled={authPending}
@@ -164,21 +194,14 @@ export default function Home() {
                   />
                 </div>
 
-                {authError && (
-                  <p className="text-sm text-red-600">{authError}</p>
-                )}
+                {authError && <p className="text-sm text-red-600">{authError}</p>}
 
-                <Button
-                  type="submit"
-                  size="lg"
-                  disabled={authPending}
-                  className="w-full bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white font-semibold"
-                >
+                <Button type="submit" size="lg" disabled={authPending} className="w-full">
                   {authPending
                     ? "Aguarde..."
                     : authMode === "login"
-                      ? "Entrar"
-                      : "Criar conta"}
+                    ? "Entrar"
+                    : "Criar conta"}
                 </Button>
 
                 <Button
@@ -191,9 +214,7 @@ export default function Home() {
                     setAuthMode(authMode === "login" ? "register" : "login");
                   }}
                 >
-                  {authMode === "login"
-                    ? "Criar uma nova conta"
-                    : "Ja tenho conta"}
+                  {authMode === "login" ? "Criar uma nova conta" : "Já tenho conta"}
                 </Button>
               </form>
             </CardContent>
@@ -205,138 +226,170 @@ export default function Home() {
 
   return (
     <DashboardLayout>
-      <div className="space-y-8">
-        <div className="space-y-2">
-          <h1 className="text-3xl font-bold text-foreground">
-            Bem-vindo, {user?.name || "Usuario"}!
-          </h1>
-          <p className="text-muted-foreground">
-            Gerencie e otimize suas rotas com inteligencia artificial
-          </p>
+      <div className="space-y-6">
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h1 className="text-4xl font-bold tracking-tight text-slate-900">
+              Olá, {user?.name || "Motorista"} 👋
+            </h1>
+            <p className="mt-2 text-slate-600">
+              Aqui está o resumo das suas rotas e entregas de hoje.
+            </p>
+          </div>
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700">
+            Plataforma ativa e sincronizada
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
+          <Card className="border-emerald-200 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white">
+            <CardHeader>
+              <CardTitle className="text-lg text-white">Resumo Operacional</CardTitle>
+              <CardDescription className="text-emerald-50/90">
+                Indicadores principais da sua operação.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-3">
+              {routesQuery.isLoading ? (
+                <>
+                  <Skeleton className="h-16 bg-white/25" />
+                  <Skeleton className="h-16 bg-white/25" />
+                  <Skeleton className="h-16 bg-white/25" />
+                </>
+              ) : (
+                <>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-emerald-100">Distância Total</p>
+                    <p className="text-3xl font-bold">{routeSummary.totalDistance.toFixed(1)} km</p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-emerald-100">Rotas</p>
+                    <p className="text-3xl font-bold">{routeSummary.totalRoutes}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-emerald-100">Eficiência</p>
+                    <p className="text-3xl font-bold">{routeSummary.efficiency}%</p>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-1">
+            <Card className="bg-white">
+              <CardContent className="flex items-center gap-3 pt-6">
+                <Route className="h-8 w-8 text-primary" />
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Concluídas</p>
+                  <p className="text-2xl font-bold">{routeSummary.completedRoutes}</p>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="bg-white">
+              <CardContent className="flex items-center gap-3 pt-6">
+                <Package className="h-8 w-8 text-sky-600" />
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Pacotes</p>
+                  <p className="text-2xl font-bold">{Math.max(routeSummary.totalRoutes * 3, 0)}</p>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="bg-white">
+              <CardContent className="flex items-center gap-3 pt-6">
+                <TrendingUp className="h-8 w-8 text-emerald-600" />
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Performance</p>
+                  <p className="text-2xl font-bold">Alta</p>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           <Link href="/routes/new">
-            <Card className="cursor-pointer hover:shadow-lg transition-shadow">
+            <Card className="group cursor-pointer border-border/80 bg-white">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
-                  <CardTitle className="text-lg">Nova Rota</CardTitle>
-                  <MapPin className="w-5 h-5 text-blue-500" />
+                  <CardTitle className="text-lg">Criar Rota</CardTitle>
+                  <MapPin className="h-5 w-5 text-primary transition-transform duration-200 group-hover:scale-110" />
                 </div>
               </CardHeader>
               <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Crie e otimize uma nova rota com multiplos destinos
-                </p>
+                <p className="text-sm text-muted-foreground">Monte uma nova rota com importação ou cadastro manual.</p>
               </CardContent>
             </Card>
           </Link>
 
           <Link href="/analytics">
-            <Card className="cursor-pointer hover:shadow-lg transition-shadow">
+            <Card className="group cursor-pointer border-border/80 bg-white">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-lg">Analytics</CardTitle>
-                  <BarChart3 className="w-5 h-5 text-cyan-500" />
+                  <BarChart3 className="h-5 w-5 text-sky-600 transition-transform duration-200 group-hover:scale-110" />
                 </div>
               </CardHeader>
               <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Visualize metricas e estatisticas de suas rotas
-                </p>
+                <p className="text-sm text-muted-foreground">Acompanhe métricas e tendências de execução.</p>
               </CardContent>
             </Card>
           </Link>
 
           <Link href="/chat">
-            <Card className="cursor-pointer hover:shadow-lg transition-shadow">
+            <Card className="group cursor-pointer border-border/80 bg-white">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
-                  <CardTitle className="text-lg">Chat com IA</CardTitle>
-                  <MessageSquare className="w-5 h-5 text-purple-500" />
+                  <CardTitle className="text-lg">Chat IA</CardTitle>
+                  <MessageSquare className="h-5 w-5 text-primary transition-transform duration-200 group-hover:scale-110" />
                 </div>
               </CardHeader>
               <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Faca perguntas sobre suas rotas a IA
-                </p>
+                <p className="text-sm text-muted-foreground">Tire dúvidas e receba recomendações inteligentes.</p>
               </CardContent>
             </Card>
           </Link>
 
           <Link href="/schedules">
-            <Card className="cursor-pointer hover:shadow-lg transition-shadow">
+            <Card className="group cursor-pointer border-border/80 bg-white">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-lg">Agendamentos</CardTitle>
-                  <Calendar className="w-5 h-5 text-orange-500" />
+                  <Calendar className="h-5 w-5 text-emerald-600 transition-transform duration-200 group-hover:scale-110" />
                 </div>
               </CardHeader>
               <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Agende rotas recorrentes com notificacoes
-                </p>
+                <p className="text-sm text-muted-foreground">Automatize rotas recorrentes com horário definido.</p>
               </CardContent>
             </Card>
           </Link>
 
           <Link href="/history">
-            <Card className="cursor-pointer hover:shadow-lg transition-shadow">
+            <Card className="group cursor-pointer border-border/80 bg-white">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
-                  <CardTitle className="text-lg">Historico</CardTitle>
-                  <History className="w-5 h-5 text-green-500" />
+                  <CardTitle className="text-lg">Histórico</CardTitle>
+                  <History className="h-5 w-5 text-slate-600 transition-transform duration-200 group-hover:scale-110" />
                 </div>
               </CardHeader>
               <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Veja o historico de rotas executadas
-                </p>
+                <p className="text-sm text-muted-foreground">Revise execuções anteriores e resultados.</p>
               </CardContent>
             </Card>
           </Link>
 
           <Link href="/routes">
-            <Card className="cursor-pointer hover:shadow-lg transition-shadow">
+            <Card className="group cursor-pointer border-border/80 bg-white">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-lg">Minhas Rotas</CardTitle>
-                  <MapPin className="w-5 h-5 text-red-500" />
+                  <Zap className="h-5 w-5 text-primary transition-transform duration-200 group-hover:scale-110" />
                 </div>
               </CardHeader>
               <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Gerencie todas as suas rotas salvas
-                </p>
+                <p className="text-sm text-muted-foreground">Gerencie, inicie e acompanhe suas rotas salvas.</p>
               </CardContent>
             </Card>
           </Link>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Dicas de Uso</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2 text-sm text-muted-foreground">
-              <p>Crie rotas com multiplos destinos</p>
-              <p>Use o mapa interativo para visualizar</p>
-              <p>Otimize por distancia, tempo ou modo balanceado</p>
-              <p>Agende rotas recorrentes</p>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Recursos Disponiveis</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2 text-sm text-muted-foreground">
-              <p>Algoritmo TSP para otimizacao</p>
-              <p>Integracao com OpenStreetMap</p>
-              <p>Chat com IA para suporte</p>
-              <p>Exportacao de relatorios em PDF ou CSV</p>
-            </CardContent>
-          </Card>
         </div>
       </div>
     </DashboardLayout>

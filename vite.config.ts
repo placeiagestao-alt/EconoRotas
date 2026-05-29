@@ -150,7 +150,33 @@ function vitePluginManusDebugCollector(): Plugin {
   };
 }
 
-const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()];
+function vitePluginPruneDebugPublicAssets(enabled: boolean): Plugin {
+  return {
+    name: "prune-debug-public-assets",
+    closeBundle() {
+      if (!enabled) return;
+
+      fs.rmSync(path.join(PROJECT_ROOT, "dist", "public", "__manus__"), {
+        force: true,
+        recursive: true,
+      });
+    },
+  };
+}
+
+const mode = process.env.NODE_ENV;
+const capacitorEnv = process.env.CAPACITOR_ENV;
+const isOptimizedBuild =
+  mode === "production" ||
+  capacitorEnv === "android" ||
+  capacitorEnv === "android-production";
+
+const plugins = [
+  react(),
+  tailwindcss(),
+  ...(!isOptimizedBuild ? [jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()] : []),
+  vitePluginPruneDebugPublicAssets(isOptimizedBuild),
+];
 
 export default defineConfig({
   plugins,
@@ -167,6 +193,17 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
+    sourcemap: false,
+    reportCompressedSize: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          charts: ["recharts"],
+          maps: ["leaflet", "react-leaflet"],
+          spreadsheet: ["xlsx"],
+        },
+      },
+    },
   },
   server: {
     host: true,

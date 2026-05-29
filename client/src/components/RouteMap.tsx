@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+﻿import { useMemo } from "react";
 import { Card } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertCircle, Navigation } from "lucide-react";
@@ -14,6 +14,7 @@ interface Stop {
   address: string;
   latitude: number;
   longitude: number;
+  packageNumber?: string;
   sequence?: number;
 }
 
@@ -53,7 +54,7 @@ export default function RouteMap({
             createMapMarker(
               "route-start",
               startPoint,
-              "Inicio da rota",
+              "Início da rota",
               startPoint.address,
               "start"
             ),
@@ -63,7 +64,7 @@ export default function RouteMap({
         createMapMarker(
           `route-stop-${index}`,
           stop,
-          `Parada ${index + 1}`,
+          `Pacote ${(stop.packageNumber ?? "").trim() || String(index + 1)}`,
           stop.address,
           "stop"
         )
@@ -101,12 +102,12 @@ export default function RouteMap({
   }
 
   return (
-    <Card className="overflow-hidden">
-      <div className="p-4 bg-gradient-to-r from-blue-50 to-cyan-50 border-b">
+    <Card className="overflow-hidden border-border/80 bg-white">
+      <div className="border-b border-border/70 bg-gradient-to-r from-emerald-50 via-sky-50 to-teal-50 p-4">
         <div className="flex items-center gap-2">
-          <Navigation className="w-5 h-5 text-blue-600" />
-          <h3 className="font-semibold text-gray-900">{routeName}</h3>
-          <span className="text-sm text-gray-600 ml-auto">
+          <Navigation className="w-5 h-5 text-primary" />
+          <h3 className="font-semibold text-foreground">{routeName}</h3>
+          <span className="ml-auto text-sm text-muted-foreground">
             {validStops.length} parada{validStops.length !== 1 ? "s" : ""}
           </span>
         </div>
@@ -118,24 +119,26 @@ export default function RouteMap({
         markers={markers}
         routePath={routePath}
         height={mapHeight}
+        darkMode={false}
       />
 
-      <div className="p-4 bg-gray-50 border-t">
-        <div className="grid grid-cols-3 gap-4 text-sm">
+      <div className="border-t border-border/70 bg-secondary/45 p-4">
+        <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 rounded-full bg-green-500" />
-            <span className="text-gray-700">Início</span>
+            <span className="text-muted-foreground">Início</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 rounded-full bg-blue-500" />
-            <span className="text-gray-700">Intermediária</span>
+            <span className="text-muted-foreground">Intermedi\u00e1ria</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 rounded-full bg-red-500" />
-            <span className="text-gray-700">Fim</span>
+            <span className="text-muted-foreground">Fim</span>
           </div>
         </div>
       </div>
     </Card>
   );
 }
+

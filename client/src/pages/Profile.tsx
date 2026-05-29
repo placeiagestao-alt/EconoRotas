@@ -2,16 +2,25 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { getPrivacyPolicyUrl, getTermlyPolicyGeneratorUrl } from "@/const";
 import { Loader2 } from "lucide-react";
 
 export default function Profile() {
   const { user, loading, logout } = useAuth();
+  const privacyPolicyUrl = getPrivacyPolicyUrl();
+  const termlyGeneratorUrl = getTermlyPolicyGeneratorUrl();
+
+  const openExternalLink = (url: string) => {
+    const popup = window.open(url, "_blank", "noopener,noreferrer");
+    if (popup) return;
+    window.location.href = url;
+  };
 
   if (loading) {
     return (
       <DashboardLayout>
-        <div className="flex items-center justify-center h-64">
-          <Loader2 className="w-8 h-8 animate-spin" />
+        <div className="flex h-64 items-center justify-center">
+          <Loader2 className="h-8 w-8 animate-spin" />
         </div>
       </DashboardLayout>
     );
@@ -32,7 +41,7 @@ export default function Profile() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <h1 className="text-3xl font-bold">Meu Perfil</h1>
+        <h1 className="text-4xl font-bold tracking-tight">Meu Perfil</h1>
 
         <Card>
           <CardHeader>
@@ -44,7 +53,7 @@ export default function Profile() {
               <p className="text-lg">{user.name || "Não informado"}</p>
             </div>
             <div>
-              <label className="text-sm font-medium text-muted-foreground">Email</label>
+              <label className="text-sm font-medium text-muted-foreground">E-mail</label>
               <p className="text-lg">{user.email || "Não informado"}</p>
             </div>
             <div>
@@ -57,21 +66,37 @@ export default function Profile() {
             </div>
             <div>
               <label className="text-sm font-medium text-muted-foreground">Membro desde</label>
-              <p className="text-lg">{new Date(user.createdAt).toLocaleDateString("pt-BR")}</p>
+              <p className="text-lg">
+                {new Date(user.createdAt).toLocaleDateString("pt-BR")}
+              </p>
             </div>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle>Ações</CardTitle>
+              <CardTitle>Ações</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-3">
             <Button
-              variant="destructive"
-              onClick={logout}
+              type="button"
+              variant="outline"
+              onClick={() => openExternalLink(privacyPolicyUrl)}
             >
-              Fazer Logout
+              Pol\u00edtica de Privacidade
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => openExternalLink(termlyGeneratorUrl)}
+            >
+              Gerar/Editar pol\u00edtica no Termly
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Para usar sua própria política, configure VITE_PRIVACY_POLICY_URL no build.
+            </p>
+            <Button variant="destructive" onClick={logout}>
+              Sair da conta
             </Button>
           </CardContent>
         </Card>

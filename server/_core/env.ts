@@ -1,16 +1,10 @@
-const isVercel = Boolean(
-  process.env.VERCEL || process.env.VERCEL_URL || process.env.NOW_REGION
-);
-
-const demoCookieSecret =
-  "econorotas-vercel-demo-session-secret-change-before-production";
 const hasConfiguredCookieSecret = Boolean(process.env.JWT_SECRET);
 
 export const ENV = {
   appId: process.env.VITE_APP_ID ?? "",
-  cookieSecret: process.env.JWT_SECRET ?? (isVercel ? demoCookieSecret : ""),
+  cookieSecret: process.env.JWT_SECRET ?? "",
   hasConfiguredCookieSecret,
-  usingDemoCookieSecret: !hasConfiguredCookieSecret && isVercel,
+  usingDemoCookieSecret: false,
   databaseUrl: process.env.DATABASE_URL ?? "",
   databaseSsl: process.env.DATABASE_SSL ?? "",
   databaseSslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? "",
@@ -20,7 +14,14 @@ export const ENV = {
   publicAppUrl: process.env.PUBLIC_APP_URL ?? "",
   allowedOrigins: process.env.ALLOWED_ORIGINS ?? "",
   isProduction: process.env.NODE_ENV === "production",
-  allowEphemeralDb: process.env.ALLOW_EPHEMERAL_DB === "true" || isVercel,
+  allowEphemeralDb: process.env.ALLOW_EPHEMERAL_DB === "true",
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
+  androidUpdateLatestVersion: process.env.ANDROID_UPDATE_LATEST_VERSION ?? "",
+  androidUpdateApkUrl: process.env.ANDROID_UPDATE_APK_URL ?? "",
+  androidUpdateRequired: process.env.ANDROID_UPDATE_REQUIRED === "true",
+  androidMinimumSupportedVersion:
+    process.env.ANDROID_MINIMUM_SUPPORTED_VERSION ?? "",
+  androidUpdateMessage: process.env.ANDROID_UPDATE_MESSAGE ?? "",
+  androidUpdatePublishedAt: process.env.ANDROID_UPDATE_PUBLISHED_AT ?? "",
 };

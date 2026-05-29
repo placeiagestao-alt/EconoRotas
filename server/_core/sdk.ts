@@ -29,6 +29,12 @@ const EXCHANGE_TOKEN_PATH = `/webdev.v1.WebDevAuthPublicService/ExchangeToken`;
 const GET_USER_INFO_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserInfo`;
 const GET_USER_INFO_WITH_JWT_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserInfoWithJwt`;
 
+type OAuthStatePayload = {
+  redirectUri: string;
+  nonce: string;
+  issuedAt?: number;
+};
+
 class OAuthService {
   constructor(private client: ReturnType<typeof axios.create>) {
     if (!ENV.oAuthServerUrl) {
@@ -39,20 +45,68 @@ class OAuthService {
     console.log("[OAuth] Initialized with baseURL:", ENV.oAuthServerUrl);
   }
 
-  private decodeState(state: string): string {
-    const redirectUri = atob(state);
-    return redirectUri;
+  private decodeState(state: string): OAuthStatePayload {
+    const decodeBase64Url = () => {
+      const padded = state.replace(/-/g, "+").replace(/_/g, "/");
+      const missingPadding = padded.length % 4;
+      const normalized =
+        missingPadding === 0 ? padded : `${padded}${"=".repeat(4 - missingPadding)}`;
+      return Buffer.from(normalized, "base64").toString("utf8");
+    };
+
+    const validateUrl = (urlString: string) => {
+      try {
+        const parsed = new URL(urlString);
+        return parsed.protocol === "http:" || parsed.protocol === "https:";
+      } catch {
+        return false;
+      }
+    };
+
+    try {
+      const parsed = JSON.parse(decodeBase64Url()) as Partial<OAuthStatePayload>;
+      if (
+        typeof parsed.redirectUri !== "string" ||
+        !validateUrl(parsed.redirectUri) ||
+        typeof parsed.nonce !== "string" ||
+        parsed.nonce.length < 16
+      ) {
+        throw new Error("Invalid OAuth state payload");
+      }
+
+      return {
+        redirectUri: parsed.redirectUri,
+        nonce: parsed.nonce,
+        issuedAt: typeof parsed.issuedAt === "number" ? parsed.issuedAt : undefined,
+      };
+    } catch {
+      // Legacy state format (base64 redirectUri) is kept for a smoother transition.
+      const legacyRedirectUri = decodeBase64Url();
+      if (!validateUrl(legacyRedirectUri)) {
+        throw new Error("Invalid OAuth state payload");
+      }
+      return {
+        redirectUri: legacyRedirectUri,
+        nonce: "",
+      };
+    }
   }
 
   async getTokenByCode(
     code: string,
-    state: string
+    state: string,
+    expectedNonce: string
   ): Promise<ExchangeTokenResponse> {
+    const decodedState = this.decodeState(state);
+    if (!decodedState.nonce || decodedState.nonce !== expectedNonce) {
+      throw new Error("Invalid OAuth state nonce");
+    }
+
     const payload: ExchangeTokenRequest = {
       clientId: ENV.appId,
       grantType: "authorization_code",
       code,
-      redirectUri: this.decodeState(state),
+      redirectUri: decodedState.redirectUri,
     };
 
     const { data } = await this.client.post<ExchangeTokenResponse>(
@@ -117,13 +171,14 @@ class SDKServer {
   /**
    * Exchange OAuth authorization code for access token
    * @example
-   * const tokenResponse = await sdk.exchangeCodeForToken(code, state);
+   * const tokenResponse = await sdk.exchangeCodeForToken(code, state, expectedNonce);
    */
   async exchangeCodeForToken(
     code: string,
-    state: string
+    state: string,
+    expectedNonce: string
   ): Promise<ExchangeTokenResponse> {
-    return this.oauthService.getTokenByCode(code, state);
+    return this.oauthService.getTokenByCode(code, state, expectedNonce);
   }
 
   /**

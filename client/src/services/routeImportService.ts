@@ -2,6 +2,8 @@ export type ImportedStop = {
   address: string;
   latitude: number;
   longitude: number;
+  packageNumber?: string;
+  routingStop?: number;
   notes?: string;
   sourceRow: number;
 };
@@ -9,6 +11,7 @@ export type ImportedStop = {
 export type ImportedRoute = {
   routeName: string;
   stops: ImportedStop[];
+  hasStopSequence: boolean;
   totalRows: number;
   skippedRows: number;
   missingCoordinateRows: number;
@@ -18,6 +21,7 @@ type RawSpreadsheetRow = Record<string, unknown>;
 
 const HEADER_ALIASES = {
   routeId: ["at id", "route id", "rota", "codigo rota", "codigo da rota"],
+  stop: ["stop"],
   sequence: ["sequence", "sequencia", "sequencia rota", "ordem", "parada"],
   tracking: ["spx tn", "tracking", "codigo", "pedido", "encomenda", "pacote"],
   address: [
@@ -111,15 +115,28 @@ function buildNotes(row: RawSpreadsheetRow, headerMap: Record<string, string>) {
   const tracking = cleanText(getCell(row, headerMap, HEADER_ALIASES.tracking));
   const routeId = cleanText(getCell(row, headerMap, HEADER_ALIASES.routeId));
   const notes = [
-    tracking ? `Pacote: ${tracking}` : "",
+    tracking ? `Rastreio: ${tracking}` : "",
     routeId ? `Rota origem: ${routeId}` : "",
   ].filter(Boolean);
 
   return notes.length ? notes.join(" | ") : undefined;
 }
 
+function buildPackageNumberFromTableIndex(tableIndex: number) {
+  return String(tableIndex + 1);
+}
+
+function buildPackageNumber(tableIndex: number, sequence?: number) {
+  if (Number.isFinite(sequence)) {
+    return String(Number(sequence));
+  }
+
+  return buildPackageNumberFromTableIndex(tableIndex);
+}
+
 function getSequence(row: RawSpreadsheetRow, headerMap: Record<string, string>) {
-  const sequence = cleanText(getCell(row, headerMap, HEADER_ALIASES.sequence));
+  const stop = cleanText(getCell(row, headerMap, HEADER_ALIASES.stop));
+  const sequence = stop || cleanText(getCell(row, headerMap, HEADER_ALIASES.sequence));
   const parsed = Number(sequence.replace(",", "."));
   return Number.isFinite(parsed) ? parsed : undefined;
 }
@@ -160,19 +177,29 @@ export function parseRouteRows(rows: RawSpreadsheetRow[], fileName = "rota.xlsx"
     })
     .filter((stop) => stop.address);
 
-  const sortableRows = parsedRows.every((stop) => stop.sequence !== undefined)
-    ? [...parsedRows].sort((a, b) => Number(a.sequence) - Number(b.sequence))
-    : parsedRows;
+  const numberedRows = parsedRows.map((stop, tableIndex) => ({
+    ...stop,
+    packageNumber: buildPackageNumber(tableIndex, stop.sequence),
+  }));
 
-  const stops = sortableRows.map(({ sequence: _sequence, ...stop }) => stop);
+  const sortableRows = numberedRows.every((stop) => stop.sequence !== undefined)
+    ? [...numberedRows].sort((a, b) => Number(a.sequence) - Number(b.sequence))
+    : numberedRows;
+
+  const hasStopSequence = parsedRows.every((stop) => stop.sequence !== undefined);
+  const stops = sortableRows.map(({ sequence, ...stop }) => ({
+    ...stop,
+    routingStop: sequence,
+  }));
 
   if (stops.length < 2) {
-    throw new Error("A planilha precisa ter pelo menos 2 enderecos validos.");
+    throw new Error("A planilha precisa ter pelo menos 2 endere\u00e7os v\u00e1lidos.");
   }
 
   return {
     routeName: getRouteName(rows, headerMap, fileName),
     stops,
+    hasStopSequence,
     totalRows: rows.length,
     skippedRows: rows.length - stops.length,
     missingCoordinateRows: stops.filter((stop) => !stop.latitude || !stop.longitude).length,
@@ -180,8 +207,45 @@ export function parseRouteRows(rows: RawSpreadsheetRow[], fileName = "rota.xlsx"
 }
 
 export async function parseRouteWorkbook(file: File) {
-  const XLSX = await import("xlsx");
   const buffer = await file.arrayBuffer();
+
+  if (typeof Worker !== "undefined") {
+    return await new Promise<ImportedRoute>((resolve, reject) => {
+      const worker = new Worker(new URL("./routeImport.worker.ts", import.meta.url), {
+        type: "module",
+      });
+
+      worker.onmessage = (event) => {
+        const payload = event.data as
+          | { ok: true; parsed: ImportedRoute }
+          | { ok: false; message?: string };
+        worker.terminate();
+
+        if (payload?.ok) {
+          resolve(payload.parsed);
+          return;
+        }
+
+        reject(new Error(payload?.message || "Nao foi possivel processar a planilha."));
+      };
+
+      worker.onerror = () => {
+        worker.terminate();
+        reject(new Error("Falha ao processar planilha em segundo plano."));
+      };
+
+      worker.postMessage(
+        {
+          type: "parse-workbook",
+          fileName: file.name,
+          buffer,
+        },
+        [buffer]
+      );
+    });
+  }
+
+  const XLSX = await import("xlsx");
   const workbook = XLSX.read(buffer, { type: "array" });
   const firstSheetName = workbook.SheetNames[0];
 
@@ -197,3 +261,4 @@ export async function parseRouteWorkbook(file: File) {
 
   return parseRouteRows(rows, file.name);
 }
+

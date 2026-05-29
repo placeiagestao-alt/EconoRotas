@@ -9,6 +9,7 @@ import { ENV } from './_core/env';
 
 let _db: any = null;
 let _lastDbConnectAttempt = 0;
+let _lastDbConnectionError: string | null = null;
 
 const DB_CONNECT_RETRY_MS = 30_000;
 const LOCAL_DB_DIR = path.join(process.cwd(), ".data");
@@ -88,8 +89,13 @@ function shouldUseMemoryDb() {
   return true;
 }
 
+function formatDatabaseUnavailableMessage() {
+  const details = _lastDbConnectionError ? ` Detalhe: ${_lastDbConnectionError}` : "";
+  return `Banco de dados indisponivel. Verifique DATABASE_URL, DATABASE_SSL e se as migrations foram executadas.${details}`;
+}
+
 function requireConfiguredDatabase(): never {
-  throw new Error("Database not available");
+  throw new Error(formatDatabaseUnavailableMessage());
 }
 
 function shouldUseDatabaseSsl(databaseUrl: string) {
@@ -149,12 +155,37 @@ export async function getDb() {
     const pool = createDatabasePool(process.env.DATABASE_URL);
     await pool.query("SELECT 1");
     _db = drizzle(pool);
+    _lastDbConnectionError = null;
   } catch (error) {
     console.warn("[Database] Failed to connect:", error);
+    _lastDbConnectionError =
+      error instanceof Error ? error.message : "Erro desconhecido ao conectar.";
     _db = null;
   }
 
   return _db;
+}
+
+export async function getDatabaseHealth() {
+  const configured = Boolean(process.env.DATABASE_URL);
+
+  if (!configured) {
+    return {
+      configured,
+      connected: false,
+      ssl: shouldUseDatabaseSsl(""),
+      error: null,
+    };
+  }
+
+  const db = await getDb();
+
+  return {
+    configured,
+    connected: Boolean(db),
+    ssl: shouldUseDatabaseSsl(process.env.DATABASE_URL || ""),
+    error: _lastDbConnectionError,
+  };
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
@@ -763,14 +794,40 @@ export async function getUserRouteHistory(userId: number, limit = 50, offset = 0
   if (!db) {
     if (shouldUseMemoryDb()) {
       return sortByDateDesc(
-        memory.routeHistory.filter((history) => history.userId === userId),
+        memory.routeHistory
+          .filter((history) => history.userId === userId)
+          .map((history) => {
+            const route = memory.routes.find((item) => item.id === history.routeId);
+            return {
+              ...history,
+              routeName: route?.name ?? null,
+            };
+          }),
         "executedDate"
       ).slice(offset, offset + limit);
     }
     requireConfiguredDatabase();
   }
 
-  return db.select().from(routeHistory)
+  return db
+    .select({
+      id: routeHistory.id,
+      routeId: routeHistory.routeId,
+      userId: routeHistory.userId,
+      executedDate: routeHistory.executedDate,
+      actualDistance: routeHistory.actualDistance,
+      actualTime: routeHistory.actualTime,
+      status: routeHistory.status,
+      notes: routeHistory.notes,
+      exportedAt: routeHistory.exportedAt,
+      exportFormat: routeHistory.exportFormat,
+      storageKey: routeHistory.storageKey,
+      createdAt: routeHistory.createdAt,
+      updatedAt: routeHistory.updatedAt,
+      routeName: routes.name,
+    })
+    .from(routeHistory)
+    .leftJoin(routes, eq(routeHistory.routeId, routes.id))
     .where(eq(routeHistory.userId, userId))
     .orderBy(desc(routeHistory.executedDate))
     .limit(limit)

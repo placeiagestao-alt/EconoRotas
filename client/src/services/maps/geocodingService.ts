@@ -138,7 +138,7 @@ export async function searchAddress(
 
   if (!response.ok) {
     const payload = await response.json().catch(() => undefined);
-    throw new Error(payload?.error || "Nao foi possivel buscar o endereco agora.");
+    throw new Error(payload?.error || "Não foi possível buscar o endereço agora.");
   }
 
   const results = (await response.json()) as NominatimResult[];

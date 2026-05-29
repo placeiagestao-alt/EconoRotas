@@ -4,7 +4,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -12,11 +18,11 @@ import { Calendar, Plus, Trash2, Bell } from "lucide-react";
 
 const DAYS_OF_WEEK = [
   { value: "MON", label: "Segunda" },
-  { value: "TUE", label: "Terça" },
+  { value: "TUE", label: "Terca" },
   { value: "WED", label: "Quarta" },
   { value: "THU", label: "Quinta" },
   { value: "FRI", label: "Sexta" },
-  { value: "SAT", label: "Sábado" },
+  { value: "SAT", label: "Sabado" },
   { value: "SUN", label: "Domingo" },
 ];
 
@@ -30,13 +36,11 @@ export default function Schedules() {
     scheduledTime: "09:00",
   });
 
-  // Fetch data
   const routesQuery = trpc.routes.list.useQuery();
   const schedulesQuery = trpc.schedules.list.useQuery();
   const routes = routesQuery.data || [];
   const schedules = schedulesQuery.data || [];
 
-  // Mutations
   const createScheduleMutation = trpc.schedules.create.useMutation();
 
   const handleDayToggle = (day: string) => {
@@ -69,7 +73,8 @@ export default function Schedules() {
         recurrenceType: formData.recurrenceType,
         scheduledDate: new Date(formData.scheduledDate),
         scheduledTime: formData.scheduledTime,
-        daysOfWeek: formData.recurrenceType === "weekly" ? selectedDays.join(",") : undefined,
+        daysOfWeek:
+          formData.recurrenceType === "weekly" ? selectedDays.join(",") : undefined,
         nextExecution: new Date(formData.scheduledDate),
       });
 
@@ -91,18 +96,19 @@ export default function Schedules() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <h1 className="text-3xl font-bold">Agendamentos de Rotas</h1>
-            <p className="text-muted-foreground mt-2">Configure execuções automáticas com notificações</p>
+            <h1 className="text-4xl font-bold tracking-tight">Agendamentos de Rotas</h1>
+            <p className="mt-2 text-muted-foreground">
+              Configure execuções automáticas com notificações
+            </p>
           </div>
           <Button onClick={() => setShowForm(!showForm)} className="gap-2">
-            <Plus className="w-4 h-4" />
+            <Plus className="h-4 w-4" />
             Novo Agendamento
           </Button>
         </div>
 
-        {/* Create Form */}
         {showForm && (
           <Card>
             <CardHeader>
@@ -110,7 +116,7 @@ export default function Schedules() {
             </CardHeader>
             <CardContent>
               <form onSubmit={handleSubmit} className="space-y-6">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                   <div>
                     <Label htmlFor="route">Rota *</Label>
                     <Select
@@ -131,16 +137,18 @@ export default function Schedules() {
                   </div>
 
                   <div>
-                    <Label htmlFor="recurrence">Tipo de Recorrência *</Label>
+                    <Label htmlFor="recurrence">Tipo de Recorrencia *</Label>
                     <Select
                       value={formData.recurrenceType}
-                      onValueChange={(value: any) => setFormData({ ...formData, recurrenceType: value })}
+                      onValueChange={(value: any) =>
+                        setFormData({ ...formData, recurrenceType: value })
+                      }
                     >
                       <SelectTrigger id="recurrence" className="mt-1">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="once">Uma Única Vez</SelectItem>
+                        <SelectItem value="once">Uma Unica Vez</SelectItem>
                         <SelectItem value="daily">Diariamente</SelectItem>
                         <SelectItem value="weekly">Semanalmente</SelectItem>
                       </SelectContent>
@@ -153,7 +161,9 @@ export default function Schedules() {
                       id="date"
                       type="date"
                       value={formData.scheduledDate}
-                      onChange={(e) => setFormData({ ...formData, scheduledDate: e.target.value })}
+                      onChange={(e) =>
+                        setFormData({ ...formData, scheduledDate: e.target.value })
+                      }
                       className="mt-1"
                     />
                   </div>
@@ -164,7 +174,9 @@ export default function Schedules() {
                       id="time"
                       type="time"
                       value={formData.scheduledTime}
-                      onChange={(e) => setFormData({ ...formData, scheduledTime: e.target.value })}
+                      onChange={(e) =>
+                        setFormData({ ...formData, scheduledTime: e.target.value })
+                      }
                       className="mt-1"
                     />
                   </div>
@@ -173,9 +185,12 @@ export default function Schedules() {
                 {formData.recurrenceType === "weekly" && (
                   <div>
                     <Label>Dias da Semana *</Label>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
+                    <div className="mt-2 grid grid-cols-2 gap-3 md:grid-cols-4">
                       {DAYS_OF_WEEK.map((day) => (
-                        <div key={day.value} className="flex items-center space-x-2">
+                        <div
+                          key={day.value}
+                          className="flex items-center space-x-2 rounded-xl border border-border/70 bg-secondary/30 p-2"
+                        >
                           <Checkbox
                             id={day.value}
                             checked={selectedDays.includes(day.value)}
@@ -194,11 +209,7 @@ export default function Schedules() {
                   <Button type="submit" disabled={createScheduleMutation.isPending}>
                     {createScheduleMutation.isPending ? "Criando..." : "Criar Agendamento"}
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setShowForm(false)}
-                  >
+                  <Button type="button" variant="outline" onClick={() => setShowForm(false)}>
                     Cancelar
                   </Button>
                 </div>
@@ -207,7 +218,6 @@ export default function Schedules() {
           </Card>
         )}
 
-        {/* Schedules List */}
         <div className="space-y-4">
           {schedulesQuery.isLoading ? (
             <Card>
@@ -227,8 +237,8 @@ export default function Schedules() {
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <div className="p-2 bg-blue-100 rounded-lg">
-                        <Calendar className="w-4 h-4 text-blue-600" />
+                      <div className="rounded-xl bg-primary/15 p-2 text-primary">
+                        <Calendar className="h-4 w-4" />
                       </div>
                       <div>
                         <CardTitle className="text-base">
@@ -236,15 +246,15 @@ export default function Schedules() {
                         </CardTitle>
                         <p className="text-sm text-muted-foreground">
                           {schedule.recurrenceType === "once"
-                            ? "Uma única vez"
+                            ? "Uma unica vez"
                             : schedule.recurrenceType === "daily"
-                            ? "Diariamente"
-                            : "Semanalmente"}
+                              ? "Diariamente"
+                              : "Semanalmente"}
                         </p>
                       </div>
                     </div>
                     <Button variant="ghost" size="sm">
-                      <Trash2 className="w-4 h-4" />
+                      <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
                 </CardHeader>
@@ -263,12 +273,12 @@ export default function Schedules() {
                   )}
                   <p>
                     <span className="font-medium">Status:</span>{" "}
-                    <span className={schedule.isActive ? "text-green-600" : "text-gray-600"}>
+                    <span className={schedule.isActive ? "text-accent" : "text-muted-foreground"}>
                       {schedule.isActive ? "Ativo" : "Inativo"}
                     </span>
                   </p>
-                  <div className="flex items-center gap-2 text-blue-600 pt-2">
-                    <Bell className="w-4 h-4" />
+                  <div className="flex items-center gap-2 pt-2 text-primary">
+                    <Bell className="h-4 w-4" />
                     <span>Notificações ativadas</span>
                   </div>
                 </CardContent>
@@ -277,16 +287,15 @@ export default function Schedules() {
           )}
         </div>
 
-        {/* Info */}
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Sobre Agendamentos</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2 text-sm text-muted-foreground">
-            <p>✓ Crie agendamentos para executar rotas automaticamente</p>
-            <p>✓ Escolha entre execução única, diária ou semanal</p>
-            <p>✓ Receba notificações antes de cada execução</p>
-            <p>✓ Acompanhe o histórico de execuções</p>
+            <p>- Crie agendamentos para executar rotas automaticamente</p>
+            <p>- Escolha entre execução única, diária ou semanal</p>
+            <p>- Receba notificações antes de cada execução</p>
+            <p>- Acompanhe o histórico de execuções</p>
           </CardContent>
         </Card>
       </div>

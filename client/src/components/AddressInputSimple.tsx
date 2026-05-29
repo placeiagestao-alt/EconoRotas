@@ -80,7 +80,7 @@ export default function AddressInputSimple({
     if (normalizedQuery.length < MIN_QUERY_LENGTH) {
       setSuggestions([]);
       setHasSearched(false);
-      setError(`Digite pelo menos ${MIN_QUERY_LENGTH} caracteres do endereco.`);
+      setError(`Digite pelo menos ${MIN_QUERY_LENGTH} caracteres do endere\u00e7o.`);
       return;
     }
 
@@ -93,7 +93,7 @@ export default function AddressInputSimple({
       setHasSearched(true);
 
       if (results.length === 0 && showEmptyMessage) {
-        setError("Nenhum endereco encontrado. Confira rua, numero, cidade e UF.");
+        setError("Nenhum endere\u00e7o encontrado. Confira rua, n\u00famero, cidade e UF.");
       }
     } catch (searchError) {
       if (searchError instanceof DOMException && searchError.name === "AbortError") {
@@ -104,7 +104,7 @@ export default function AddressInputSimple({
       setError(
         searchError instanceof Error
           ? searchError.message
-          : "Nao foi possivel buscar o endereco agora."
+          : "Não foi possível buscar o endereço agora."
       );
     } finally {
       setIsLoading(false);
@@ -126,7 +126,7 @@ export default function AddressInputSimple({
     setSuggestions([]);
     setError(null);
     setHasSearched(true);
-    toast.success("Endereco localizado no mapa.");
+    toast.success("Endereço localizado no mapa.");
   };
 
   const handleManualCoordinates = () => {
@@ -134,7 +134,7 @@ export default function AddressInputSimple({
     const lng = parseFloat(manualLng);
 
     if (Number.isNaN(lat) || Number.isNaN(lng)) {
-      setError("Coordenadas invalidas.");
+      setError("Coordenadas inv\u00e1lidas.");
       return;
     }
 
@@ -187,8 +187,8 @@ export default function AddressInputSimple({
             size="icon"
             onClick={handleSearchClick}
             disabled={isLoading || value.trim().length < MIN_QUERY_LENGTH}
-            aria-label="Buscar endereco"
-            title="Buscar endereco"
+            aria-label="Buscar endere\u00e7o"
+            title="Buscar endere\u00e7o"
           >
             {isLoading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -199,13 +199,13 @@ export default function AddressInputSimple({
         </div>
 
         {suggestions.length > 0 && (
-          <div className="overflow-hidden rounded-md border bg-white shadow-sm">
+          <div className="overflow-hidden rounded-xl border border-border/80 bg-white shadow-[0_14px_28px_rgb(15_23_42_/_10%)]">
             {suggestions.map((suggestion) => (
               <button
                 key={suggestion.id}
                 type="button"
                 onClick={() => handleSelectSuggestion(suggestion)}
-                className="block w-full border-b px-3 py-2 text-left text-sm last:border-b-0 hover:bg-muted focus:bg-muted focus:outline-none"
+                className="block w-full border-b border-border/60 px-3 py-2 text-left text-sm last:border-b-0 hover:bg-secondary focus:bg-secondary focus:outline-none"
               >
                 <span className="block font-medium text-foreground">
                   {suggestion.label}
@@ -220,13 +220,13 @@ export default function AddressInputSimple({
 
         {hasSearched && suggestions.length === 0 && !hasCoordinates && !error && (
           <p className="text-xs text-muted-foreground">
-            Nenhum resultado encontrado para esse endereco.
+            Nenhum resultado encontrado para esse endere\u00e7o.
           </p>
         )}
 
         {!showManual && hasCoordinates && (
-          <div className="flex items-center justify-between rounded-lg border border-green-200 bg-green-50 p-3">
-            <div className="flex items-center gap-2 text-sm text-green-700">
+          <div className="flex items-center justify-between rounded-xl border border-accent/35 bg-accent/10 p-3">
+            <div className="flex items-center gap-2 text-sm text-accent">
               <MapPin className="h-4 w-4" />
               <span>
                 {latitude.toFixed(6)}, {longitude.toFixed(6)}
@@ -245,7 +245,7 @@ export default function AddressInputSimple({
         )}
 
         {showManual && (
-          <div className="space-y-2 rounded-lg border bg-blue-50 p-3">
+          <div className="space-y-2 rounded-xl border border-primary/30 bg-primary/10 p-3">
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <Label htmlFor={`${id}-lat`} className="text-xs">
@@ -309,7 +309,7 @@ export default function AddressInputSimple({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Informe rua, numero, bairro, cidade e UF. Ex: Rua 15 de Novembro, 100,
+        Informe rua, número, bairro, cidade e UF. Ex: Rua 15 de Novembro, 100,
         Centro, Presidente Prudente - SP.
       </p>
     </div>

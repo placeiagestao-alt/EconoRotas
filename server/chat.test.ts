@@ -70,7 +70,7 @@ describe("Chat Module", () => {
       const { invokeLLM } = await import("./_core/llm");
       
       const mockRoutes = [
-        { id: 1, name: "Route 1", mode: "balanced", totalDistance: 50 },
+        { id: 1, name: "Route 1", mode: "balanced", totalDistance: "50.25" },
         { id: 2, name: "Route 2", mode: "shortest_distance", totalDistance: 30 },
       ];
 

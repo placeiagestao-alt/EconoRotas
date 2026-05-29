@@ -11,6 +11,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { ENV } from "./env";
 import { serveStatic } from "./static";
+import { getDatabaseHealth } from "../db";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -116,12 +117,39 @@ export function createApp(options: { serveClient?: boolean } = {}): Express {
 
     next();
   });
-  app.get("/api/health", (_req, res) => {
-    res.json({
-      ok: true,
+  app.get("/api/health", async (_req, res) => {
+    const database = await getDatabaseHealth();
+    const databaseAvailable = ENV.databaseUrl
+      ? database.connected
+      : ENV.allowEphemeralDb || !ENV.isProduction;
+
+    res.status(databaseAvailable ? 200 : 500).json({
+      ok: databaseAvailable,
       app: "EconoRotas",
       environment: ENV.isProduction ? "production" : "development",
+      mode: ENV.databaseUrl ? "persistent" : "local-fallback",
+      database,
       timestamp: new Date().toISOString(),
+    });
+  });
+  app.get("/api/app-update/android", (_req, res) => {
+    const latestVersion = ENV.androidUpdateLatestVersion.trim();
+    const apkUrl = ENV.androidUpdateApkUrl.trim();
+
+    if (!latestVersion || !apkUrl) {
+      res.json({ enabled: false });
+      return;
+    }
+
+    res.json({
+      enabled: true,
+      latestVersion,
+      apkUrl,
+      required: ENV.androidUpdateRequired,
+      minimumSupportedVersion:
+        ENV.androidMinimumSupportedVersion.trim() || undefined,
+      message: ENV.androidUpdateMessage.trim() || undefined,
+      publishedAt: ENV.androidUpdatePublishedAt.trim() || undefined,
     });
   });
   // Configure body parser with larger size limit for file uploads

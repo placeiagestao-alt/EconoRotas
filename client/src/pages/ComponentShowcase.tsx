@@ -409,8 +409,8 @@ export default function ComponentsShowcase() {
             <Card>
               <CardContent className="pt-6 space-y-6">
                 <div className="space-y-2">
-                  <Label htmlFor="email">Email</Label>
-                  <Input id="email" type="email" placeholder="Email" />
+                  <Label htmlFor="email">E-mail</Label>
+                  <Input id="email" type="email" placeholder="E-mail" />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="message">Message</Label>

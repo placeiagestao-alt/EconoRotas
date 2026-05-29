@@ -1,14 +1,20 @@
-export default function handler(_req: any, res: any) {
-  const isVercel = Boolean(
-    process.env.VERCEL || process.env.VERCEL_URL || process.env.NOW_REGION
-  );
-  const hasPersistentDb = Boolean(process.env.DATABASE_URL);
-  const allowEphemeralDb = process.env.ALLOW_EPHEMERAL_DB === "true" || isVercel;
-  const hasJwtSecret = Boolean(process.env.JWT_SECRET || isVercel);
-  const usingDemoJwtSecret = !process.env.JWT_SECRET && isVercel;
-  const dataMode = hasPersistentDb ? "persistent" : "ephemeral";
+import { getDatabaseHealth } from "../server/db";
 
-  res.statusCode = hasJwtSecret && (hasPersistentDb || allowEphemeralDb) ? 200 : 500;
+export default async function handler(_req: any, res: any) {
+  const isProduction = process.env.NODE_ENV === "production";
+  const hasPersistentDb = Boolean(process.env.DATABASE_URL);
+  const allowEphemeralDb = process.env.ALLOW_EPHEMERAL_DB === "true";
+  const jwtSecretLength = process.env.JWT_SECRET?.length ?? 0;
+  const hasJwtSecret = jwtSecretLength > 0;
+  const hasValidJwtSecret = !isProduction || jwtSecretLength >= 32;
+  const dataMode = hasPersistentDb ? "persistent" : "ephemeral";
+  const database = await getDatabaseHealth();
+  const databaseAvailable = hasPersistentDb ? database.connected : allowEphemeralDb;
+
+  res.statusCode =
+    hasJwtSecret && hasValidJwtSecret && databaseAvailable
+      ? 200
+      : 500;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(
     JSON.stringify({
@@ -16,12 +22,11 @@ export default function handler(_req: any, res: any) {
       app: "EconoRotas",
       environment: process.env.NODE_ENV || "unknown",
       mode: dataMode,
+      database,
       config: {
         JWT_SECRET: process.env.JWT_SECRET
           ? "configured"
-          : usingDemoJwtSecret
-            ? "demo-fallback"
-            : "missing",
+          : "missing",
         DATABASE_URL: hasPersistentDb ? "configured" : "missing",
         DATABASE_SSL: process.env.DATABASE_SSL === "true" ? "true" : "false",
         ALLOW_EPHEMERAL_DB: allowEphemeralDb ? "true" : "false",
@@ -31,8 +36,8 @@ export default function handler(_req: any, res: any) {
           ...(dataMode === "ephemeral"
             ? ["Dados temporarios: configure DATABASE_URL para producao real."]
             : []),
-          ...(usingDemoJwtSecret
-            ? ["JWT_SECRET temporario: configure uma chave real antes de producao."]
+          ...(!hasValidJwtSecret
+            ? ["JWT_SECRET invalido: use ao menos 32 caracteres em producao."]
             : []),
         ],
       timestamp: new Date().toISOString(),

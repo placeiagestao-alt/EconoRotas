@@ -85,6 +85,44 @@ describe("Route endpoints", () => {
     expect(routes).toHaveLength(0);
   });
 
+  it("respects input stop order when sequential routing is requested", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8203));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Rota por STOP",
+      mode: "balanced",
+      respectInputSequence: true,
+      stops: [
+        {
+          address: "Stop A",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+        },
+        {
+          address: "Stop B",
+          latitude: -22.1207,
+          longitude: -51.2889,
+          sequence: 1,
+        },
+        {
+          address: "Stop C",
+          latitude: -22.1207,
+          longitude: -51.3789,
+          sequence: 2,
+        },
+      ],
+    });
+
+    const stops = await caller.stops.list({ routeId: result.route.id });
+    expect(stops.map((stop: any) => stop.address)).toEqual([
+      "Stop A",
+      "Stop B",
+      "Stop C",
+    ]);
+    expect(stops.map((stop: any) => Number(stop.sequence))).toEqual([0, 1, 2]);
+  });
+
   it("saves and clears start/end points for an existing route", async () => {
     const caller = appRouter.createCaller(createAuthContext(8101));
     const route = await caller.routes.create({

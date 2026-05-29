@@ -6,6 +6,11 @@ export type Message = {
   content: string;
 };
 
+function formatDistanceKm(value: unknown) {
+  const distance = Number(value);
+  return Number.isFinite(distance) ? distance.toFixed(2) : "N/A";
+}
+
 /**
  * Build context from user's routes for the LLM
  */
@@ -31,7 +36,7 @@ async function buildRouteContext(userId: number, routeId?: number): Promise<stri
     }
   } else {
     context += routes
-      .map((r: any) => `- ${r.name} (${r.mode}, ${r.totalDistance?.toFixed(2) || "N/A"} km)`)
+      .map((r: any) => `- ${r.name} (${r.mode}, ${formatDistanceKm(r.totalDistance)} km)`)
       .join("\n");
   }
 

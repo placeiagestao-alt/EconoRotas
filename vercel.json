@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
-  "buildCommand": "pnpm run build:vercel",
+  "buildCommand": "pnpm run build:vercel:prod",
   "outputDirectory": "dist/public",
   "installCommand": "pnpm install --frozen-lockfile",
   "functions": {
@@ -12,11 +12,11 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "/api?__route=api"
+      "destination": "/api?__route=api&path=:path*"
     },
     {
       "source": "/manus-storage/:path*",
-      "destination": "/api?__route=manus-storage"
+      "destination": "/api?__route=manus-storage&path=:path*"
     },
     {
       "source": "/(.*)",

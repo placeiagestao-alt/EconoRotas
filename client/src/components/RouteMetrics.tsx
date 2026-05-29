@@ -46,7 +46,7 @@ export default function RouteMetrics({
   const routePoints = useMemo(
     () => [
       ...(startPoint?.address.trim() && isValidCoordinate(startPoint)
-        ? [{ ...startPoint, address: `Inicio: ${startPoint.address}` }]
+        ? [{ ...startPoint, address: `Início: ${startPoint.address}` }]
         : []),
       ...validStops,
       ...(endPoint?.address.trim() && isValidCoordinate(endPoint)
@@ -111,34 +111,34 @@ export default function RouteMetrics({
 
   return (
     <div className="space-y-4">
-      <Card className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200">
-        <div className="grid grid-cols-3 gap-4">
+      <Card className="border-emerald-300/60 bg-gradient-to-r from-emerald-500 to-emerald-600 p-4 text-white">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <div className="space-y-1">
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <MapPin className="w-4 h-4 text-blue-600" />
+            <div className="flex items-center gap-2 text-sm text-emerald-100">
+              <MapPin className="h-4 w-4 text-white" />
               <span>Distância Estimada</span>
             </div>
-            <div className="text-2xl font-bold text-blue-900">
+            <div className="text-2xl font-bold text-white">
               {stats.totalDistance.toFixed(2)} km
             </div>
           </div>
 
           <div className="space-y-1">
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <Clock className="w-4 h-4 text-indigo-600" />
+            <div className="flex items-center gap-2 text-sm text-emerald-100">
+              <Clock className="h-4 w-4 text-white" />
               <span>Tempo Estimado</span>
             </div>
-            <div className="text-2xl font-bold text-indigo-900">
+            <div className="text-2xl font-bold text-white">
               {formatDuration(stats.totalDuration)}
             </div>
           </div>
 
           <div className="space-y-1">
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <Zap className="w-4 h-4 text-amber-600" />
+            <div className="flex items-center gap-2 text-sm text-emerald-100">
+              <Zap className="h-4 w-4 text-white" />
               <span>Modo</span>
             </div>
-            <div className="text-sm font-semibold text-amber-900">
+            <div className="text-sm font-semibold text-white">
               {getModeLabel()}
             </div>
           </div>
@@ -147,28 +147,28 @@ export default function RouteMetrics({
 
       {stats.segments.length > 0 && (
         <Card className="p-4">
-          <h3 className="font-semibold text-gray-900 mb-3">Detalhes por Segmento</h3>
+          <h3 className="mb-3 font-semibold text-foreground">Detalhes por Segmento</h3>
           <div className="space-y-2 max-h-64 overflow-y-auto">
             {stats.segments.map((segment, index) => (
               <div
                 key={`${segment.from}-${segment.to}`}
-                className="p-3 bg-gray-50 rounded-lg border border-gray-200 space-y-2"
+                className="space-y-2 rounded-xl border border-border/75 bg-secondary/55 p-3"
               >
                 <div className="flex items-start gap-2">
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-gray-900 truncate">
+                    <div className="truncate text-sm font-medium text-foreground">
                       {index + 1}. {segment.from}
                     </div>
-                    <div className="text-xs text-gray-500 mt-1">↓</div>
-                    <div className="text-sm font-medium text-gray-900 truncate">
+                    <div className="mt-1 text-xs text-muted-foreground">↓</div>
+                    <div className="truncate text-sm font-medium text-foreground">
                       {segment.to}
                     </div>
                   </div>
                   <div className="text-right flex-shrink-0">
-                    <div className="text-sm font-semibold text-blue-600">
+                    <div className="text-sm font-semibold text-primary">
                       {segment.distance.toFixed(2)} km
                     </div>
-                    <div className="text-xs text-gray-600">
+                    <div className="text-xs text-muted-foreground">
                       {formatDuration(segment.duration)}
                     </div>
                   </div>
@@ -179,7 +179,7 @@ export default function RouteMetrics({
         </Card>
       )}
 
-      <div className="p-3 bg-amber-50 rounded-lg border border-amber-200 text-sm text-amber-900">
+      <div className="rounded-xl border border-accent/35 bg-accent/10 p-3 text-sm text-foreground">
         <p className="font-medium mb-1">Dica:</p>
         <p>
           As métricas atuais usam distância geográfica estimada. A arquitetura já está preparada

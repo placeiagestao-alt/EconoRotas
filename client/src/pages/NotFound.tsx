@@ -11,38 +11,30 @@ export default function NotFound() {
   };
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100">
-      <Card className="w-full max-w-lg mx-4 shadow-lg border-0 bg-white/80 backdrop-blur-sm">
-        <CardContent className="pt-8 pb-8 text-center">
-          <div className="flex justify-center mb-6">
+    <div className="relative flex min-h-screen w-full items-center justify-center overflow-hidden bg-background px-4">
+      <div className="pointer-events-none absolute -left-20 top-14 h-64 w-64 rounded-full bg-emerald-300/35 blur-3xl" />
+      <div className="pointer-events-none absolute -right-20 bottom-10 h-64 w-64 rounded-full bg-sky-300/30 blur-3xl" />
+
+      <Card className="mx-4 w-full max-w-lg border-border/80 bg-white">
+        <CardContent className="pb-8 pt-8 text-center">
+          <div className="mb-6 flex justify-center">
             <div className="relative">
-              <div className="absolute inset-0 bg-red-100 rounded-full animate-pulse" />
-              <AlertCircle className="relative h-16 w-16 text-red-500" />
+              <div className="absolute inset-0 rounded-full bg-destructive/20 blur-md" />
+              <AlertCircle className="relative h-16 w-16 text-destructive" />
             </div>
           </div>
 
-          <h1 className="text-4xl font-bold text-slate-900 mb-2">404</h1>
+          <h1 className="mb-2 text-5xl font-bold tracking-tight text-foreground">404</h1>
+          <h2 className="mb-4 text-xl font-semibold text-foreground/90">Página não encontrada</h2>
 
-          <h2 className="text-xl font-semibold text-slate-700 mb-4">
-            Page Not Found
-          </h2>
-
-          <p className="text-slate-600 mb-8 leading-relaxed">
-            Sorry, the page you are looking for doesn't exist.
-            <br />
-            It may have been moved or deleted.
+          <p className="mb-8 leading-relaxed text-muted-foreground">
+            A página que você tentou abrir não existe ou foi movida.
           </p>
 
-          <div
-            id="not-found-button-group"
-            className="flex flex-col sm:flex-row gap-3 justify-center"
-          >
-            <Button
-              onClick={handleGoHome}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg"
-            >
-              <Home className="w-4 h-4 mr-2" />
-              Go Home
+          <div id="not-found-button-group" className="flex justify-center">
+            <Button onClick={handleGoHome}>
+              <Home className="mr-2 h-4 w-4" />
+              Voltar ao início
             </Button>
           </div>
         </CardContent>

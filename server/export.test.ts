@@ -80,7 +80,8 @@ describe("Export Module", () => {
 
       const csv = generateRouteCSV(history);
 
-      expect(csv).toContain('"Route "Special""');
+      expect(csv).toContain('"Route ""Special"""');
+      expect(csv).toContain('"Note with ""quotes"""');
     });
 
     it("formats dates correctly", () => {

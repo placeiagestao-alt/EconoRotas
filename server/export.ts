@@ -2,6 +2,10 @@ import { PDFDocument, PDFPage, rgb } from "pdf-lib";
 import * as db from "./db";
 import { storagePut } from "./storage";
 
+function escapeCsvCell(value: unknown): string {
+  return String(value ?? "").replace(/"/g, '""');
+}
+
 /**
  * Generate CSV content from route history
  */
@@ -28,7 +32,7 @@ export function generateRouteCSV(history: any[]): string {
 
   const csvContent = [
     headers.join(","),
-    ...rows.map((row) => row.map((cell) => `"${cell}"`).join(",")),
+    ...rows.map((row) => row.map((cell) => `"${escapeCsvCell(cell)}"`).join(",")),
   ].join("\n");
 
   return csvContent;

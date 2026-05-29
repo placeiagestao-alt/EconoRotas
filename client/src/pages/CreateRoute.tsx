@@ -1,4 +1,4 @@
-import { useState, type ChangeEvent } from "react";
+﻿import { useState, type ChangeEvent } from "react";
 import { useLocation } from "wouter";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -24,6 +24,8 @@ import { searchAddress } from "@/services/maps/geocodingService";
 import { cn } from "@/lib/utils";
 
 type RouteStop = Pick<ImportedStop, "address" | "latitude" | "longitude"> & {
+  packageNumber?: string;
+  routingStop?: number;
   notes?: string;
   sourceRow?: number;
 };
@@ -38,6 +40,41 @@ type StopIssue = {
 
 const EMPTY_ROUTE_POINT: RoutePoint = { address: "", latitude: 0, longitude: 0 };
 
+function parseStopNotes(notes?: string) {
+  const raw = notes?.trim();
+  if (!raw) return { packageNumber: "", notes: undefined as string | undefined };
+
+  const parts = raw
+    .split("|")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  let packageNumber = "";
+  const remaining: string[] = [];
+
+  for (const part of parts) {
+    const match = part.match(/^Pacote:\s*(.+)$/i);
+    if (match?.[1] && !packageNumber) {
+      packageNumber = match[1].trim();
+      continue;
+    }
+    remaining.push(part);
+  }
+
+  return {
+    packageNumber,
+    notes: remaining.length ? remaining.join(" | ") : undefined,
+  };
+}
+
+function buildStopNotes(packageNumber?: string, notes?: string) {
+  const parts = [
+    packageNumber?.trim() ? `Pacote: ${packageNumber.trim()}` : "",
+    notes?.trim() ?? "",
+  ].filter(Boolean);
+
+  return parts.length ? parts.join(" | ") : undefined;
+}
+
 export default function CreateRoute() {
   const [, navigate] = useLocation();
   const [isCalculating, setIsCalculating] = useState(false);
@@ -48,6 +85,7 @@ export default function CreateRoute() {
   const [description, setDescription] = useState("");
   const [mode, setMode] = useState<"shortest_distance" | "shortest_time" | "balanced">("balanced");
   const [importSummary, setImportSummary] = useState<ImportedRoute | null>(null);
+  const [respectImportedStopSequence, setRespectImportedStopSequence] = useState(false);
   const [isImportingFile, setIsImportingFile] = useState(false);
   const [isResolvingCoordinates, setIsResolvingCoordinates] = useState(false);
   const [startPoint, setStartPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
@@ -63,7 +101,7 @@ export default function CreateRoute() {
     createAndOptimizeMutation.isPending ||
     isResolvingCoordinates;
   const submitLabel = isResolvingCoordinates
-    ? "Localizando enderecos..."
+    ? "Localizando endere\u00e7os..."
     : isSavingRoute
       ? "Criando e otimizando..."
       : "Criar e Otimizar Rota";
@@ -239,11 +277,13 @@ export default function CreateRoute() {
 
   const handleAddStop = () => {
     setInvalidStopIndexes([]);
+    setRespectImportedStopSequence(false);
     setStops((currentStops) => [...currentStops, { address: "", latitude: 0, longitude: 0 }]);
   };
 
   const handleRemoveStop = (index: number) => {
     setInvalidStopIndexes([]);
+    setRespectImportedStopSequence(false);
     setStops((currentStops) => currentStops.filter((_, i) => i !== index));
   };
 
@@ -261,6 +301,14 @@ export default function CreateRoute() {
     setStops((currentStops) =>
       currentStops.map((stop, stopIndex) =>
         stopIndex === index ? { ...stop, latitude, longitude } : stop
+      )
+    );
+  };
+
+  const handlePackageNumberChange = (index: number, packageNumber: string) => {
+    setStops((currentStops) =>
+      currentStops.map((stop, stopIndex) =>
+        stopIndex === index ? { ...stop, packageNumber } : stop
       )
     );
   };
@@ -288,14 +336,18 @@ export default function CreateRoute() {
       setInvalidStopIndexes([]);
       setStops(
         importedRoute.stops.map((stop) => ({
+          ...parseStopNotes(stop.notes),
           address: stop.address,
           latitude: stop.latitude,
           longitude: stop.longitude,
+          packageNumber: stop.packageNumber,
+          routingStop: stop.routingStop,
           notes: stop.notes,
           sourceRow: stop.sourceRow,
         }))
       );
       setImportSummary(importedRoute);
+      setRespectImportedStopSequence(importedRoute.hasStopSequence);
 
       if (!name.trim()) {
         setName(importedRoute.routeName);
@@ -308,6 +360,11 @@ export default function CreateRoute() {
       }
 
       toast.success(`${importedRoute.stops.length} paradas importadas.`);
+      if (importedRoute.hasStopSequence) {
+        toast.message(
+          "Coluna STOP detectada: a sequencia inicial seguira a ordem da planilha."
+        );
+      }
 
       if (importedRoute.missingCoordinateRows > 0) {
         toast.warning(
@@ -315,7 +372,7 @@ export default function CreateRoute() {
         );
       }
     } catch (error: any) {
-      toast.error(error.message || "Nao foi possivel importar a planilha.");
+      toast.error(error.message || "Não foi possível importar a planilha.");
     } finally {
       setIsImportingFile(false);
       input.value = "";
@@ -386,7 +443,7 @@ export default function CreateRoute() {
     if (endpointMissingCoordinates.length > 0) {
       setIsResolvingCoordinates(true);
       toast.message(
-        `Buscando coordenadas de ${endpointMissingCoordinates.length} ponto(s) de inicio/fim...`
+        `Buscando coordenadas de ${endpointMissingCoordinates.length} ponto(s) de in\u00edcio/fim...`
       );
 
       try {
@@ -403,10 +460,10 @@ export default function CreateRoute() {
         const resolvedCount =
           Number(resolvedStart.resolved) + Number(resolvedEnd.resolved);
         if (resolvedCount > 0) {
-          toast.success(`${resolvedCount} ponto(s) de inicio/fim localizado(s).`);
+          toast.success(`${resolvedCount} ponto(s) de in\u00edcio/fim localizado(s).`);
         }
       } catch (error: any) {
-        toast.error(error.message || "Nao foi possivel buscar inicio/fim.");
+        toast.error(error.message || "Não foi possível buscar início/fim.");
         setIsResolvingCoordinates(false);
         return;
       } finally {
@@ -415,12 +472,12 @@ export default function CreateRoute() {
     }
 
     if (validStartPoint.address.trim() && !hasValidCoordinates(validStartPoint)) {
-      toast.error("Confira endereco e coordenadas do inicio da rota.");
+      toast.error("Confira endereço e coordenadas do início da rota.");
       return;
     }
 
     if (validEndPoint.address.trim() && !hasValidCoordinates(validEndPoint)) {
-      toast.error("Confira endereco e coordenadas do fim da rota.");
+      toast.error("Confira endereço e coordenadas do fim da rota.");
       return;
     }
 
@@ -443,7 +500,7 @@ export default function CreateRoute() {
           toast.success(`${result.resolvedCount} parada(s) localizada(s).`);
         }
       } catch (error: any) {
-        toast.error(error.message || "Nao foi possivel buscar as coordenadas.");
+        toast.error(error.message || "Não foi possível buscar as coordenadas.");
         setIsResolvingCoordinates(false);
         return;
       } finally {
@@ -455,7 +512,7 @@ export default function CreateRoute() {
     if (unresolvedStopIssues.length > 0) {
       setInvalidStopIndexes(unresolvedStopIssues.map((item) => item.index));
       toast.error(
-        `Confira endereco e coordenadas: ${formatStopList(unresolvedStopIssues)}.`
+        `Confira endereço e coordenadas: ${formatStopList(unresolvedStopIssues)}.`
       );
       return;
     }
@@ -466,7 +523,10 @@ export default function CreateRoute() {
 
       setInvalidStopIndexes([]);
       const stopsWithSequence = validStops.map((stop, index) => ({
-        ...stop,
+        address: stop.address,
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        notes: buildStopNotes(stop.packageNumber, stop.notes),
         sequence: index,
       }));
       const result = await createAndOptimizeMutation.mutateAsync({
@@ -480,6 +540,7 @@ export default function CreateRoute() {
         endLatitude: endPayload?.latitude,
         endLongitude: endPayload?.longitude,
         stops: stopsWithSequence,
+        respectInputSequence: respectImportedStopSequence,
       });
 
       const { route, optimization } = result;
@@ -499,11 +560,11 @@ export default function CreateRoute() {
 
   return (
     <DashboardLayout>
-      <div className="space-y-6 max-w-4xl">
+      <div className="mx-auto max-w-5xl space-y-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
-            <h1 className="text-3xl font-bold">Criar Nova Rota</h1>
-            <p className="text-muted-foreground mt-2">Configure sua rota com endereços reais e deixe a IA otimizar</p>
+            <h1 className="text-4xl font-bold tracking-tight">Criar Nova Rota</h1>
+            <p className="mt-2 text-muted-foreground">Configure sua rota com endereços reais e deixe a IA otimizar</p>
           </div>
           <Button
             type="submit"
@@ -566,15 +627,15 @@ export default function CreateRoute() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Flag className="h-5 w-5" />
-                Inicio e Fim da Rota
+                Início e Fim da Rota
               </CardTitle>
             </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2">
-              <div className="rounded-lg border bg-gray-50 p-4">
+              <div className="rounded-2xl border border-border/70 bg-white p-4">
                 <AddressInputSimple
                   id="route-start-address"
-                  label="Inicio da rota"
-                  placeholder="Rua, numero, bairro, cidade - UF"
+                  label="Início da rota"
+                  placeholder="Rua, número, bairro, cidade - UF"
                   value={startPoint.address}
                   latitude={startPoint.latitude}
                   longitude={startPoint.longitude}
@@ -587,11 +648,11 @@ export default function CreateRoute() {
                 />
               </div>
 
-              <div className="rounded-lg border bg-gray-50 p-4">
+              <div className="rounded-2xl border border-border/70 bg-white p-4">
                 <AddressInputSimple
                   id="route-end-address"
                   label="Fim da rota"
-                  placeholder="Rua, numero, bairro, cidade - UF"
+                  placeholder="Rua, número, bairro, cidade - UF"
                   value={endPoint.address}
                   latitude={endPoint.latitude}
                   longitude={endPoint.longitude}
@@ -674,17 +735,17 @@ export default function CreateRoute() {
                   <AlertDescription className="space-y-3">
                     <div>
                       <p className="font-medium">
-                        {invalidStopIssues.length} parada(s) sem coordenadas validas.
+                        {invalidStopIssues.length} parada(s) sem coordenadas válidas.
                       </p>
                       <p className="mt-1">
-                        Corrija o endereco, digite as coordenadas manualmente ou remova as
+                        Corrija o endereço, digite as coordenadas manualmente ou remova as
                         paradas com problema.
                       </p>
                     </div>
                     <div className="space-y-1 text-sm">
                       {invalidStopIssues.slice(0, 6).map((issue) => (
                         <p key={issue.index}>
-                          {formatStopIssue(issue)}: {issue.address || "sem endereco"}
+                          {formatStopIssue(issue)}: {issue.address || "sem endereço"}
                         </p>
                       ))}
                       {invalidStopIssues.length > 6 && (
@@ -718,7 +779,7 @@ export default function CreateRoute() {
                   key={index}
                   id={`route-stop-${index}`}
                   className={cn(
-                    "space-y-3 rounded-lg border bg-gray-50 p-4",
+                    "space-y-3 rounded-2xl border border-border/70 bg-white p-4",
                     invalidStopIndexes.includes(index) &&
                       "border-destructive bg-destructive/5"
                   )}
@@ -747,21 +808,35 @@ export default function CreateRoute() {
 
                   <AddressInputSimple
                     id={`address-${index}`}
-                    label="Endereco completo"
-                    placeholder="Rua, numero, bairro, cidade - UF"
+                    label="Endereço completo"
+                    placeholder="Rua, número, bairro, cidade - UF"
                     value={stop.address}
                     latitude={stop.latitude}
                     longitude={stop.longitude}
                     onAddressChange={(address) => handleAddressChange(index, address)}
                     onCoordinatesChange={(lat, lng) => handleCoordinatesChange(index, lat, lng)}
                   />
+                  <div className="space-y-1">
+                    <Label htmlFor={`package-number-${index}`}>Número do pacote</Label>
+                    <Input
+                      id={`package-number-${index}`}
+                      value={stop.packageNumber ?? ""}
+                      onChange={(event) =>
+                        handlePackageNumberChange(index, event.target.value)
+                      }
+                      placeholder="Ex: 1, 2, 3 (pode repetir)"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Identificador editável: pode repetir em paradas diferentes.
+                    </p>
+                  </div>
                   {stop.notes && (
                     <p className="text-sm text-muted-foreground">{stop.notes}</p>
                   )}
                   {invalidStopIndexes.includes(index) && (
                     <p className="rounded-md border border-destructive/30 bg-background p-2 text-sm text-destructive">
-                      Essa parada nao tem coordenadas validas. Se o endereco estiver
-                      correto, use “Digitar coordenadas manualmente”.
+                      Essa parada não tem coordenadas válidas. Se o endereço estiver
+                      correto, use "Digitar coordenadas manualmente".
                     </p>
                   )}
                 </div>
@@ -803,7 +878,7 @@ export default function CreateRoute() {
           )}
 
           {/* Actions */}
-          <div className="sticky bottom-0 z-20 -mx-4 flex flex-col gap-3 border-t bg-background/95 p-4 backdrop-blur sm:flex-row md:mx-0 md:rounded-lg md:border">
+          <div className="z-20 flex flex-col gap-3 border border-border/70 bg-white/95 p-4 shadow-[0_-6px_16px_rgb(15_23_42_/_8%)] sm:flex-row md:sticky md:bottom-0 md:rounded-2xl">
             <Button
               type="submit"
               disabled={isSavingRoute}
@@ -825,3 +900,5 @@ export default function CreateRoute() {
     </DashboardLayout>
   );
 }
+
+

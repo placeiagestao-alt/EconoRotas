@@ -97,6 +97,7 @@ Available pre-defined system envs:
 - `VITE_APP_ID`: Manus OAuth application ID
 - `OAUTH_SERVER_URL`: Manus OAuth backend base URL
 - `VITE_OAUTH_PORTAL_URL`: Manus login portal URL (frontend)
+- `VITE_PRIVACY_POLICY_URL`: Public privacy policy URL shown in the profile page
 - `OWNER_OPEN_ID`, `OWNER_NAME`: Owner's info
 - `BUILT_IN_FORGE_API_URL`: Manus built-in apis (includes llm, storage, data_api, notification, etc...)
 - `BUILT_IN_FORGE_API_KEY`: Bearer token used by Manus built-in apis (server-side)
@@ -105,6 +106,23 @@ Available pre-defined system envs:
 
 Do not edit these directly in code or commit `.env` files.
 The envs above are system envs, when use env in website code, refer `server/_core/env.ts` for available list.
+
+### Android APK Update Check (Sideload)
+
+For apps installed via APK (outside Play Store), automatic Play updates do not apply.
+This project supports a custom update check endpoint for Android clients:
+
+- `GET /api/app-update/android`
+- Configured by server env vars:
+  - `ANDROID_UPDATE_LATEST_VERSION`
+  - `ANDROID_UPDATE_APK_URL`
+  - `ANDROID_UPDATE_REQUIRED` (`true`/`false`)
+  - `ANDROID_MINIMUM_SUPPORTED_VERSION` (optional)
+  - `ANDROID_UPDATE_MESSAGE` (optional)
+  - `ANDROID_UPDATE_PUBLISHED_AT` (optional)
+
+When the installed Android version is lower than `ANDROID_UPDATE_LATEST_VERSION`,
+the app shows a banner with a button to download/install the latest APK.
 
 ---
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -51,26 +51,26 @@ export function ManusDialog({
       open={onOpenChange ? open : internalOpen}
       onOpenChange={handleOpenChange}
     >
-      <DialogContent className="py-5 bg-[#f8f8f7] rounded-[20px] w-[400px] shadow-[0px_4px_11px_0px_rgba(0,0,0,0.08)] border border-[rgba(0,0,0,0.08)] backdrop-blur-2xl p-0 gap-0 text-center">
+      <DialogContent className="w-[400px] max-w-[calc(100vw-2rem)] gap-0 rounded-2xl border-border/70 bg-card/95 p-0 py-5 text-center shadow-[0_18px_34px_rgb(15_23_42_/_12%)]">
         <div className="flex flex-col items-center gap-2 p-5 pt-12">
           {logo ? (
-            <div className="w-16 h-16 bg-white rounded-xl border border-[rgba(0,0,0,0.08)] flex items-center justify-center">
+            <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-border/70 bg-secondary/55">
               <img
                 src={logo}
                 alt="Dialog graphic"
-                className="w-10 h-10 rounded-md"
+                className="h-10 w-10 rounded-md"
               />
             </div>
           ) : null}
 
           {/* Title and subtitle */}
           {title ? (
-            <DialogTitle className="text-xl font-semibold text-[#34322d] leading-[26px] tracking-[-0.44px]">
+            <DialogTitle className="text-xl font-semibold leading-[26px] tracking-tight text-foreground">
               {title}
             </DialogTitle>
           ) : null}
-          <DialogDescription className="text-sm text-[#858481] leading-5 tracking-[-0.154px]">
-            Please login with Manus to continue
+          <DialogDescription className="text-sm leading-5 text-muted-foreground">
+            Faça login com Manus para continuar
           </DialogDescription>
         </div>
 
@@ -78,12 +78,13 @@ export function ManusDialog({
           {/* Login button */}
           <Button
             onClick={onLogin}
-            className="w-full h-10 bg-[#1a1a19] hover:bg-[#1a1a19]/90 text-white rounded-[10px] text-sm font-medium leading-5 tracking-[-0.154px]"
+            className="h-10 w-full rounded-xl text-sm font-medium leading-5"
           >
-            Login with Manus
+            Entrar com Manus
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
+

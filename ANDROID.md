@@ -19,6 +19,26 @@ corepack pnpm run android:sync
 O script Android usa `vite build --mode android`, entao o Vite carrega `.env.android` automaticamente quando esse arquivo existir.
 Para producao, use `corepack pnpm run android:sync:prod`; esse comando carrega `.env.android-production`.
 
+## Celular fisico via USB
+
+Para celular fisico conectado por USB, use ADB reverse. O app chama `http://127.0.0.1:3000`, e o ADB encaminha essa porta para o backend local do Windows.
+
+`.env.android`:
+
+```env
+VITE_API_BASE_URL=http://127.0.0.1:3000
+VITE_ENABLE_DEV_LOGIN=true
+```
+
+Com o backend local rodando em `3000`, execute:
+
+```powershell
+corepack pnpm run android:usb
+corepack pnpm run android:sync
+```
+
+O comando `android:usb` precisa ser reexecutado se o cabo for desconectado, o ADB reiniciar ou o celular for reconectado.
+
 ## Backend/API
 
 O app Android precisa acessar o backend Express para login, rotas, banco e geocodificacao. Para emulador Android, crie `.env.android` a partir de `.env.android.example` e use:
@@ -28,7 +48,7 @@ VITE_API_BASE_URL=http://10.0.2.2:3000
 VITE_ENABLE_DEV_LOGIN=true
 ```
 
-Para celular fisico, troque pelo IP do computador na rede.
+Para celular fisico via rede Wi-Fi, troque pelo IP do computador na rede. Para celular fisico via USB, prefira o fluxo `android:usb` acima.
 
 `VITE_ENABLE_DEV_LOGIN=true` e apenas para teste local. Para publicacao real, use backend publico HTTPS e login proprio por e-mail/senha.
 

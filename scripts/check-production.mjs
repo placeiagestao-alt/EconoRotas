@@ -24,14 +24,14 @@ const required = [
     check: (value) => value !== "true",
     message: "login de desenvolvimento deve ficar desligado",
   },
+  {
+    name: "ALLOW_EPHEMERAL_DB",
+    check: (value) => value !== "true",
+    message: "banco temporario deve ficar desligado em producao",
+  },
 ];
 
 const optionalWarnings = [
-  {
-    name: "ALLOW_EPHEMERAL_DB",
-    warn: (value) => value === "true",
-    message: "banco temporario esta ligado; isso serve para demo, nao para cliente real",
-  },
   {
     name: "DATABASE_SSL",
     warn: (value) => value !== "true",

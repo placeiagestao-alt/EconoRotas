@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { BrandLogo } from "@/components/BrandLogo";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -21,45 +22,56 @@ import {
 } from "recharts";
 import { MapPin, Clock, Zap, TrendingUp } from "lucide-react";
 
-const COLORS = ["#3b82f6", "#06b6d4", "#8b5cf6", "#ec4899", "#f59e0b"];
+const COLORS = ["#2563eb", "#22c55e", "#38bdf8", "#14b8a6", "#93c5fd"];
 
 export default function Analytics() {
   const [days, setDays] = useState(30);
-  
+
   const statsQuery = trpc.analytics.stats.useQuery({ days });
   const timelineQuery = trpc.analytics.timeline.useQuery({ days });
 
   const stats = statsQuery.data;
   const timeline = timelineQuery.data || [];
 
-  // Format timeline data for chart
   const chartData = useMemo(() => {
     return timeline.map((item: any) => ({
-      date: new Date(item.date).toLocaleDateString("pt-BR", { month: "short", day: "numeric" }),
+      date: new Date(item.date).toLocaleDateString("pt-BR", {
+        month: "short",
+        day: "numeric",
+      }),
       rotas: Number(item.count) || 0,
       distancia: parseFloat(String(item.totalDistance || 0)),
       tempo: Number(item.totalTime || 0),
     }));
   }, [timeline]);
 
-  // Prepare data for mode distribution (mock)
   const modeDistribution = [
     { name: "Menor Distância", value: Math.round((stats?.totalRoutes || 0) * 0.4) },
     { name: "Menor Tempo", value: Math.round((stats?.totalRoutes || 0) * 0.35) },
     { name: "Balanceado", value: Math.round((stats?.totalRoutes || 0) * 0.25) },
   ];
 
+  const axisStyle = { stroke: "#94a3b8", fontSize: 12 };
+  const tooltipStyle = {
+    backgroundColor: "#ffffff",
+    border: "1px solid #d9e3ef",
+    borderRadius: "12px",
+    color: "#0f172a",
+    boxShadow: "0 12px 28px rgb(15 23 42 / 12%)",
+  };
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <h1 className="text-3xl font-bold">Dashboard de Analytics</h1>
-            <p className="text-muted-foreground mt-2">Visualize métricas e estatísticas de suas rotas</p>
+            <h1 className="text-4xl font-bold tracking-tight">Dashboard de Analytics</h1>
+            <p className="mt-2 text-muted-foreground">
+              Visualize métricas e estatísticas das suas rotas
+            </p>
           </div>
-          
-          {/* Date Range Filters */}
-          <div className="flex gap-2">
+
+          <div className="flex flex-wrap gap-2">
             <Button
               variant={days === 7 ? "default" : "outline"}
               size="sm"
@@ -84,12 +96,11 @@ export default function Analytics() {
           </div>
         </div>
 
-        {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <Card>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <Card className="border-primary/35 bg-gradient-to-br from-primary/15 to-white">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-                <MapPin className="w-4 h-4" />
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <MapPin className="h-4 w-4" />
                 Total de Rotas
               </CardTitle>
             </CardHeader>
@@ -99,14 +110,14 @@ export default function Analytics() {
               ) : (
                 <p className="text-3xl font-bold">{stats?.totalRoutes || 0}</p>
               )}
-              <p className="text-xs text-muted-foreground mt-1">Rotas criadas</p>
+              <p className="mt-1 text-xs text-muted-foreground">Rotas criadas</p>
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="border-cyan-500/25 bg-gradient-to-br from-cyan-500/10 to-white">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-                <Zap className="w-4 h-4" />
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <Zap className="h-4 w-4" />
                 Distância Total
               </CardTitle>
             </CardHeader>
@@ -116,14 +127,14 @@ export default function Analytics() {
               ) : (
                 <p className="text-3xl font-bold">{(stats?.totalDistance || 0).toFixed(1)}</p>
               )}
-              <p className="text-xs text-muted-foreground mt-1">km percorridos</p>
+              <p className="mt-1 text-xs text-muted-foreground">km percorridos</p>
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="border-accent/35 bg-gradient-to-br from-accent/10 to-white">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-                <Clock className="w-4 h-4" />
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <Clock className="h-4 w-4" />
                 Tempo Médio
               </CardTitle>
             </CardHeader>
@@ -133,14 +144,14 @@ export default function Analytics() {
               ) : (
                 <p className="text-3xl font-bold">{(stats?.avgTime || 0).toFixed(0)}</p>
               )}
-              <p className="text-xs text-muted-foreground mt-1">minutos por rota</p>
+              <p className="mt-1 text-xs text-muted-foreground">minutos por rota</p>
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="border-blue-400/25 bg-gradient-to-br from-blue-400/10 to-white">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-                <TrendingUp className="w-4 h-4" />
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <TrendingUp className="h-4 w-4" />
                 Rotas Concluídas
               </CardTitle>
             </CardHeader>
@@ -150,14 +161,12 @@ export default function Analytics() {
               ) : (
                 <p className="text-3xl font-bold">{stats?.completedRoutes || 0}</p>
               )}
-              <p className="text-xs text-muted-foreground mt-1">executadas com sucesso</p>
+              <p className="mt-1 text-xs text-muted-foreground">executadas com sucesso</p>
             </CardContent>
           </Card>
         </div>
 
-        {/* Charts */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Timeline Chart */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <Card>
             <CardHeader>
               <CardTitle>Atividade nos Últimos {days} Dias</CardTitle>
@@ -168,39 +177,67 @@ export default function Analytics() {
               ) : chartData.length > 0 ? (
                 <ResponsiveContainer width="100%" height={300}>
                   <LineChart data={chartData}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" />
-                    <YAxis yAxisId="left" />
-                    <YAxis yAxisId="right" orientation="right" />
-                    <Tooltip />
+                    <CartesianGrid stroke="#d9e3ef" strokeDasharray="3 3" />
+                    <XAxis
+                      dataKey="date"
+                      tick={axisStyle}
+                      axisLine={{ stroke: "#cbd5e1" }}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      yAxisId="left"
+                      tick={axisStyle}
+                      axisLine={{ stroke: "#cbd5e1" }}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      tick={axisStyle}
+                      axisLine={{ stroke: "#cbd5e1" }}
+                      tickLine={false}
+                    />
+                    <Tooltip
+                      contentStyle={tooltipStyle}
+                      labelStyle={{ color: "#0f172a" }}
+                    />
                     <Legend />
                     <Line
                       yAxisId="left"
                       type="monotone"
                       dataKey="rotas"
-                      stroke="#3b82f6"
+                      stroke="#2563eb"
                       name="Rotas"
-                      strokeWidth={2}
+                      strokeWidth={2.5}
+                      dot={{ r: 2 }}
                     />
                     <Line
                       yAxisId="right"
                       type="monotone"
                       dataKey="distancia"
-                      stroke="#06b6d4"
+                      stroke="#22c55e"
                       name="Distância (km)"
-                      strokeWidth={2}
+                      strokeWidth={2.5}
+                      dot={{ r: 2 }}
                     />
                   </LineChart>
                 </ResponsiveContainer>
               ) : (
-                <div className="h-80 flex items-center justify-center text-muted-foreground">
-                  Nenhum dado disponível
+                <div className="flex h-80 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+                  <BrandLogo variant="mark" className="h-16 w-16 opacity-90" />
+                  <div>
+                    <p className="font-medium text-foreground">
+                      Nenhum dado disponível
+                    </p>
+                    <p className="text-sm">
+                      Crie e execute rotas para visualizar a evolução.
+                    </p>
+                  </div>
                 </div>
               )}
             </CardContent>
           </Card>
 
-          {/* Mode Distribution */}
           <Card>
             <CardHeader>
               <CardTitle>Distribuição de Modos de Otimização</CardTitle>
@@ -217,27 +254,36 @@ export default function Analytics() {
                       cy="50%"
                       labelLine={false}
                       label={({ name, value }) => `${name}: ${value}`}
-                      outerRadius={80}
-                      fill="#8884d8"
+                      outerRadius={86}
                       dataKey="value"
                     >
                       {modeDistribution.map((entry, index) => (
                         <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                       ))}
                     </Pie>
-                    <Tooltip />
+                    <Tooltip
+                      contentStyle={tooltipStyle}
+                      labelStyle={{ color: "#f8fafc" }}
+                    />
                   </PieChart>
                 </ResponsiveContainer>
               ) : (
-                <div className="h-80 flex items-center justify-center text-muted-foreground">
-                  Nenhuma rota criada ainda
+                <div className="flex h-80 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+                  <BrandLogo variant="mark" className="h-16 w-16 opacity-90" />
+                  <div>
+                    <p className="font-medium text-foreground">
+                      Nenhuma rota criada ainda
+                    </p>
+                    <p className="text-sm">
+                      Os modos de otimização aparecem depois das primeiras rotas.
+                    </p>
+                  </div>
                 </div>
               )}
             </CardContent>
           </Card>
         </div>
 
-        {/* Distance vs Time Chart */}
         <Card>
           <CardHeader>
             <CardTitle>Distância vs Tempo por Dia</CardTitle>
@@ -248,25 +294,63 @@ export default function Analytics() {
             ) : chartData.length > 0 ? (
               <ResponsiveContainer width="100%" height={300}>
                 <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="date" />
-                  <YAxis yAxisId="left" />
-                  <YAxis yAxisId="right" orientation="right" />
-                  <Tooltip />
+                    <CartesianGrid stroke="#d9e3ef" strokeDasharray="3 3" />
+                  <XAxis
+                    dataKey="date"
+                    tick={axisStyle}
+                    axisLine={{ stroke: "#cbd5e1" }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    yAxisId="left"
+                    tick={axisStyle}
+                    axisLine={{ stroke: "#cbd5e1" }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    yAxisId="right"
+                    orientation="right"
+                    tick={axisStyle}
+                    axisLine={{ stroke: "#cbd5e1" }}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    contentStyle={tooltipStyle}
+                    labelStyle={{ color: "#0f172a" }}
+                  />
                   <Legend />
-                  <Bar yAxisId="left" dataKey="distancia" fill="#3b82f6" name="Distância (km)" />
-                  <Bar yAxisId="right" dataKey="tempo" fill="#06b6d4" name="Tempo (min)" />
+                  <Bar
+                    yAxisId="left"
+                    dataKey="distancia"
+                    fill="#2563eb"
+                    name="Distância (km)"
+                    radius={[8, 8, 0, 0]}
+                  />
+                  <Bar
+                    yAxisId="right"
+                    dataKey="tempo"
+                    fill="#22c55e"
+                    name="Tempo (min)"
+                    radius={[8, 8, 0, 0]}
+                  />
                 </BarChart>
               </ResponsiveContainer>
             ) : (
-              <div className="h-80 flex items-center justify-center text-muted-foreground">
-                Nenhum dado disponível
+              <div className="flex h-80 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+                <BrandLogo variant="mark" className="h-16 w-16 opacity-90" />
+                <div>
+                  <p className="font-medium text-foreground">
+                    Nenhum dado disponível
+                  </p>
+                  <p className="text-sm">
+                    A comparação aparece quando houver histórico de execução.
+                  </p>
+                </div>
               </div>
             )}
           </CardContent>
         </Card>
 
-        {/* Summary */}
         <Card>
           <CardHeader>
             <CardTitle>Resumo</CardTitle>
@@ -274,7 +358,10 @@ export default function Analytics() {
           <CardContent className="space-y-2 text-sm">
             <p>
               <span className="font-medium">Média de Distância por Rota:</span>{" "}
-              {stats?.totalRoutes ? (stats.totalDistance / stats.totalRoutes).toFixed(2) : 0} km
+              {stats?.totalRoutes
+                ? (stats.totalDistance / stats.totalRoutes).toFixed(2)
+                : 0}{" "}
+              km
             </p>
             <p>
               <span className="font-medium">Taxa de Conclusão:</span>{" "}

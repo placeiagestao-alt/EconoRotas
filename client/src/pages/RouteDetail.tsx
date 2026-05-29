@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "wouter";
 import {
   ArrowLeft,
@@ -22,6 +22,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { trpc } from "@/lib/trpc";
@@ -41,6 +42,8 @@ type Stop = {
   latitude: number;
   longitude: number;
   sequence: number;
+  packageNumber?: string;
+  notes?: string;
 };
 
 type RoutePoint = {
@@ -62,6 +65,40 @@ function toNumber(value: unknown) {
   return Number.isFinite(number) ? number : 0;
 }
 
+function parseStopNotes(notes?: string | null) {
+  const raw = notes?.trim();
+  if (!raw) return { packageNumber: undefined as string | undefined, notes: undefined as string | undefined };
+
+  const parts = raw
+    .split("|")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  let packageNumber: string | undefined;
+  const remaining: string[] = [];
+
+  for (const part of parts) {
+    const match = part.match(/^(Pacote|STOP)\s*:\s*(.+)$/i);
+    if (match?.[2] && !packageNumber) {
+      packageNumber = match[2].trim();
+      continue;
+    }
+    remaining.push(part);
+  }
+
+  return {
+    packageNumber,
+    notes: remaining.length ? remaining.join(" | ") : undefined,
+  };
+}
+
+function normalizeText(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
 function getDeliveryStorageKey(routeId: number) {
   return `routing-pwa:route-delivery:${routeId}`;
 }
@@ -71,7 +108,7 @@ function getStatusLabel(status?: string) {
     case "optimized":
       return "Otimizada";
     case "completed":
-      return "Concluida";
+      return "Concluída";
     case "cancelled":
       return "Cancelada";
     default:
@@ -83,10 +120,29 @@ function buildMapsUrl(stop?: Stop) {
   if (!stop) return "#";
 
   if (stop.latitude && stop.longitude) {
-    return `https://www.openstreetmap.org/?mlat=${stop.latitude}&mlon=${stop.longitude}#map=18/${stop.latitude}/${stop.longitude}`;
+    return `https://www.google.com/maps/dir/?api=1&destination=${stop.latitude},${stop.longitude}&travelmode=driving`;
   }
 
-  return `https://www.openstreetmap.org/search?query=${encodeURIComponent(stop.address)}`;
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(stop.address)}&travelmode=driving`;
+}
+
+function openStopInMap(stop?: Stop) {
+  const mapsUrl = buildMapsUrl(stop);
+  if (mapsUrl === "#") return;
+
+  const opened = window.open(mapsUrl, "_blank", "noopener,noreferrer");
+  if (!opened) {
+    window.location.assign(mapsUrl);
+  }
+}
+
+function getStopDisplayLabel(stop: Stop, fallbackIndex: number) {
+  const packageNumber = stop.packageNumber?.trim();
+  if (packageNumber) {
+    return packageNumber;
+  }
+
+  return String(fallbackIndex + 1);
 }
 
 function parseRoutePoint(
@@ -161,7 +217,7 @@ export default function RouteDetail() {
       toast.success("Rota otimizada.");
     },
     onError: (error) => {
-      toast.error(error.message || "Nao foi possivel otimizar a rota.");
+      toast.error(error.message || "Não foi possível otimizar a rota.");
     },
   });
 
@@ -169,6 +225,7 @@ export default function RouteDetail() {
     () =>
       (stopsQuery.data ?? [])
         .map((stop: any) => ({
+          ...parseStopNotes(stop.notes),
           id: stop.id,
           address: stop.address,
           latitude: toNumber(stop.latitude),
@@ -203,6 +260,8 @@ export default function RouteDetail() {
   const [startPoint, setStartPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
   const [endPoint, setEndPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
   const [isSavingEndpoints, setIsSavingEndpoints] = useState(false);
+  const [stopSearch, setStopSearch] = useState("");
+  const [selectedStopIndex, setSelectedStopIndex] = useState<number | null>(null);
   const [loadedDeliveryRouteId, setLoadedDeliveryRouteId] = useState<number | null>(
     null
   );
@@ -304,6 +363,15 @@ export default function RouteDetail() {
     (_, index) => !deliveredSet.has(index) && !failedSet.has(index)
   );
   const progressValue = stops.length > 0 ? (handledCount / stops.length) * 100 : 0;
+  const filteredStops = useMemo(() => {
+    const query = normalizeText(stopSearch);
+    return stops
+      .map((stop, index) => ({ stop, index }))
+      .filter(({ stop }) => {
+        if (!query) return true;
+        return normalizeText(stop.address).includes(query);
+      });
+  }, [stopSearch, stops]);
 
   const completeRoute = async () => {
     await updateRouteMutation.mutateAsync({
@@ -325,20 +393,23 @@ export default function RouteDetail() {
     }));
   };
 
-  const handleStopResult = async (result: "delivered" | "failed") => {
-    if (!currentStop) return;
+  const handleStopResultAtIndex = async (
+    stopIndex: number,
+    result: "delivered" | "failed"
+  ) => {
+    const targetStop = stops[stopIndex];
+    if (!targetStop) return;
 
-    const currentStopIndex = deliveryState.currentIndex;
     const delivered = Array.from(
       new Set([
-        ...deliveryState.delivered.filter((index) => index !== currentStopIndex),
-        ...(result === "delivered" ? [currentStopIndex] : []),
+        ...deliveryState.delivered.filter((index) => index !== stopIndex),
+        ...(result === "delivered" ? [stopIndex] : []),
       ])
     ).sort((a, b) => a - b);
     const failed = Array.from(
       new Set([
-        ...deliveryState.failed.filter((index) => index !== currentStopIndex),
-        ...(result === "failed" ? [currentStopIndex] : []),
+        ...deliveryState.failed.filter((index) => index !== stopIndex),
+        ...(result === "failed" ? [stopIndex] : []),
       ])
     ).sort((a, b) => a - b);
     const handled = new Set([...delivered, ...failed]);
@@ -346,8 +417,8 @@ export default function RouteDetail() {
     const finished = nextIndex === -1;
 
     setDeliveryState({
-      started: !finished,
-      currentIndex: finished ? stops.length - 1 : nextIndex,
+      started: finished ? false : deliveryState.started,
+      currentIndex: finished ? stops.length - 1 : nextIndex >= 0 ? nextIndex : 0,
       delivered,
       failed,
     });
@@ -358,24 +429,30 @@ export default function RouteDetail() {
     }
 
     if (result === "delivered") {
-      toast.success("Entrega registrada. Proxima parada aberta.");
+      toast.success(
+        `Entrega registrada para parada ${getStopDisplayLabel(targetStop, stopIndex)}.`
+      );
       return;
     }
 
-    toast.warning("Falha registrada. Proxima parada aberta.");
+    toast.warning(
+      `Falha registrada para parada ${getStopDisplayLabel(targetStop, stopIndex)}.`
+    );
   };
 
   const handleDelivered = async () => {
-    await handleStopResult("delivered");
+    if (!currentStop) return;
+    await handleStopResultAtIndex(deliveryState.currentIndex, "delivered");
   };
 
   const handleNotDelivered = async () => {
-    await handleStopResult("failed");
+    if (!currentStop) return;
+    await handleStopResultAtIndex(deliveryState.currentIndex, "failed");
   };
 
   const handleReset = () => {
     setDeliveryState(DEFAULT_DELIVERY_STATE);
-    toast.message("Execucao da rota reiniciada.");
+    toast.message("Execução da rota reiniciada.");
   };
 
   const handleOptimizeRoute = () => {
@@ -412,7 +489,7 @@ export default function RouteDetail() {
     const suggestion = (await searchAddress(address, { limit: 1 }))[0];
 
     if (!suggestion) {
-      throw new Error(`Confira o endereco e as coordenadas de ${label}.`);
+      throw new Error(`Confira o endereço e as coordenadas de ${label}.`);
     }
 
     return {
@@ -429,7 +506,7 @@ export default function RouteDetail() {
 
     try {
       const [resolvedStart, resolvedEnd] = await Promise.all([
-        resolveRoutePoint(startPoint, "inicio"),
+        resolveRoutePoint(startPoint, "início"),
         resolveRoutePoint(endPoint, "fim"),
       ]);
 
@@ -453,12 +530,12 @@ export default function RouteDetail() {
         latitude: resolvedEnd.latitude ?? 0,
         longitude: resolvedEnd.longitude ?? 0,
       });
-      toast.success("Inicio e fim da rota salvos.");
+      toast.success("Início e fim da rota salvos.");
     } catch (error) {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Nao foi possivel salvar inicio e fim."
+          : "Não foi possível salvar início e fim."
       );
     } finally {
       setIsSavingEndpoints(false);
@@ -467,7 +544,7 @@ export default function RouteDetail() {
 
   return (
     <DashboardLayout>
-      <div className="mx-auto max-w-6xl space-y-6">
+      <div className="mx-auto max-w-7xl space-y-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div className="space-y-2">
             <Link href="/routes">
@@ -477,7 +554,7 @@ export default function RouteDetail() {
               </Button>
             </Link>
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-3xl font-bold">
+              <h1 className="text-4xl font-bold tracking-tight">
                 {routeQuery.data?.name || "Rota"}
               </h1>
               <Badge variant={routeQuery.data?.status === "completed" ? "default" : "outline"}>
@@ -524,12 +601,12 @@ export default function RouteDetail() {
         ) : routeQuery.error || stopsQuery.error ? (
           <Alert variant="destructive">
             <AlertDescription>
-              Nao foi possivel carregar essa rota.
+              Não foi possível carregar essa rota.
             </AlertDescription>
           </Alert>
         ) : !routeQuery.data ? (
           <Alert>
-            <AlertDescription>Rota nao encontrada.</AlertDescription>
+            <AlertDescription>Rota não encontrada.</AlertDescription>
           </Alert>
         ) : (
           <>
@@ -539,7 +616,7 @@ export default function RouteDetail() {
                   <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <CardTitle className="flex items-center gap-2">
                       <Flag className="h-5 w-5" />
-                      Inicio e fim da rota
+                      Início e fim da rota
                     </CardTitle>
                     <Button
                       type="button"
@@ -548,15 +625,15 @@ export default function RouteDetail() {
                       disabled={isSavingEndpoints || updateRouteMutation.isPending}
                     >
                       <Save className="mr-2 h-4 w-4" />
-                      {isSavingEndpoints ? "Salvando..." : "Salvar inicio/fim"}
+                      {isSavingEndpoints ? "Salvando..." : "Salvar in\u00edcio/fim"}
                     </Button>
                   </CardHeader>
                   <CardContent className="grid gap-4 lg:grid-cols-2">
-                    <div className="rounded-lg border bg-gray-50 p-4">
+                    <div className="rounded-2xl border border-border/70 bg-white p-4">
                       <AddressInputSimple
                         id="route-detail-start-address"
-                        label="Inicio da rota"
-                        placeholder="Rua, numero, bairro, cidade - UF"
+                        label="Início da rota"
+                        placeholder="Rua, número, bairro, cidade - UF"
                         value={startPoint.address}
                         latitude={startPoint.latitude}
                         longitude={startPoint.longitude}
@@ -573,11 +650,11 @@ export default function RouteDetail() {
                       />
                     </div>
 
-                    <div className="rounded-lg border bg-gray-50 p-4">
+                    <div className="rounded-2xl border border-border/70 bg-white p-4">
                       <AddressInputSimple
                         id="route-detail-end-address"
                         label="Fim da rota"
-                        placeholder="Rua, numero, bairro, cidade - UF"
+                        placeholder="Rua, número, bairro, cidade - UF"
                         value={endPoint.address}
                         latitude={endPoint.latitude}
                         longitude={endPoint.longitude}
@@ -600,7 +677,7 @@ export default function RouteDetail() {
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2">
                       <Navigation className="h-5 w-5" />
-                      Execucao da rota
+                      Execução da rota
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-5">
@@ -621,16 +698,16 @@ export default function RouteDetail() {
                   {isComplete ? (
                     <div
                       className={[
-                        "rounded-lg border p-5",
+                        "rounded-2xl border border-border/70 bg-white p-5",
                         failedCount > 0
-                          ? "border-amber-200 bg-amber-50"
-                          : "border-green-200 bg-green-50",
+                          ? "border-amber-400/40 bg-amber-400/15"
+                          : "border-accent/40 bg-accent/15",
                       ].join(" ")}
                     >
                       <div
                         className={[
                           "flex items-center gap-3",
-                          failedCount > 0 ? "text-amber-900" : "text-green-800",
+                          failedCount > 0 ? "text-amber-200" : "text-accent",
                         ].join(" ")}
                       >
                         {failedCount > 0 ? (
@@ -647,7 +724,7 @@ export default function RouteDetail() {
                           <p
                             className={[
                               "text-sm",
-                              failedCount > 0 ? "text-amber-800" : "text-green-700",
+                              failedCount > 0 ? "text-amber-100" : "text-accent/90",
                             ].join(" ")}
                           >
                             {failedCount > 0
@@ -658,10 +735,10 @@ export default function RouteDetail() {
                       </div>
                     </div>
                   ) : deliveryState.started && currentStop ? (
-                    <div className="rounded-lg border bg-background p-5">
+                    <div className="rounded-2xl border border-border/70 bg-white p-5">
                       <div className="mb-4 flex items-center justify-between gap-3">
                         <Badge variant="secondary">
-                          Parada {deliveryState.currentIndex + 1}
+                          Parada {getStopDisplayLabel(currentStop, deliveryState.currentIndex)}
                         </Badge>
                         <span className="text-sm text-muted-foreground">
                           Atual
@@ -674,6 +751,11 @@ export default function RouteDetail() {
                             <p className="text-lg font-semibold">
                               {currentStop.address}
                             </p>
+                            {currentStop.packageNumber && (
+                              <p className="text-sm font-medium text-primary">
+                                Pacote: {currentStop.packageNumber}
+                              </p>
+                            )}
                             <p className="text-sm text-muted-foreground">
                               {currentStop.latitude.toFixed(6)},{" "}
                               {currentStop.longitude.toFixed(6)}
@@ -700,17 +782,20 @@ export default function RouteDetail() {
                             <XCircle className="h-4 w-4" />
                             Não Entregue
                           </Button>
-                          <Button asChild variant="outline" className="w-full gap-2">
-                            <a href={buildMapsUrl(currentStop)} target="_self">
-                              <Navigation className="h-4 w-4" />
-                              Abrir no mapa
-                            </a>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="w-full gap-2"
+                            onClick={() => openStopInMap(currentStop)}
+                          >
+                            <Navigation className="h-4 w-4" />
+                            Abrir no mapa
                           </Button>
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="rounded-lg border bg-muted/30 p-5">
+                    <div className="rounded-2xl border border-border/70 bg-secondary/55 p-5">
                       <div className="flex items-center gap-3">
                         <Clock className="h-5 w-5 text-muted-foreground" />
                         <div>
@@ -737,27 +822,50 @@ export default function RouteDetail() {
                   <CardTitle>Paradas</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {routeStartPoint && (
-                    <div className="rounded-lg border border-green-200 bg-green-50 p-3">
-                      <p className="text-xs font-semibold uppercase text-green-700">
-                        Inicio
+                  <div className="space-y-2">
+                    <Input
+                      value={stopSearch}
+                      onChange={(event) => setStopSearch(event.target.value)}
+                      placeholder="Filtrar por endereço da parada"
+                      aria-label="Filtrar paradas por endereço"
+                    />
+                    {stopSearch.trim() && (
+                      <p className="text-xs text-muted-foreground">
+                        {filteredStops.length} de {stops.length} parada(s) encontrada(s)
                       </p>
-                      <p className="text-sm text-green-900">{routeStartPoint.address}</p>
+                    )}
+                  </div>
+                  {routeStartPoint && (
+                    <div className="rounded-lg border border-accent/40 bg-accent/15 p-3">
+                      <p className="text-xs font-semibold uppercase text-accent/90">
+                        Início
+                      </p>
+                      <p className="text-sm text-foreground">{routeStartPoint.address}</p>
                     </div>
                   )}
-                  {stops.map((stop, index) => {
+                  {filteredStops.map(({ stop, index }) => {
                     const delivered = deliveredSet.has(index);
                     const failed = failedSet.has(index);
                     const active = deliveryState.started && index === deliveryState.currentIndex;
+                    const expanded = selectedStopIndex === index;
 
                     return (
                       <div key={stop.id ?? index}>
+                        <button
+                          type="button"
+                          className="w-full text-left"
+                          onClick={() =>
+                            setSelectedStopIndex((current) =>
+                              current === index ? null : index
+                            )
+                          }
+                        >
                         <div className="flex gap-3">
                           <div
                             className={[
                               "mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold",
                               delivered
-                                ? "border-green-600 bg-green-600 text-white"
+                                ? "border-accent bg-accent text-accent-foreground"
                                 : failed
                                   ? "border-destructive bg-destructive text-destructive-foreground"
                                 : active
@@ -770,32 +878,78 @@ export default function RouteDetail() {
                             ) : failed ? (
                               <XCircle className="h-4 w-4" />
                             ) : (
-                              index + 1
+                              getStopDisplayLabel(stop, index)
                             )}
                           </div>
                           <div className="min-w-0 flex-1">
                             <p className="font-medium leading-snug">{stop.address}</p>
+                            {stop.packageNumber && (
+                              <p className="text-xs font-medium text-primary">
+                                Pacote: {stop.packageNumber}
+                              </p>
+                            )}
                             <p className="text-xs text-muted-foreground">
                               {delivered
                                 ? "Entregue"
                                 : failed
                                   ? "Não entregue"
-                                  : active
+                                : active
                                     ? "Aberta agora"
                                     : "Pendente"}
                             </p>
                           </div>
                         </div>
+                        </button>
+                        {expanded && (
+                          <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                            <Button
+                              type="button"
+                              size="sm"
+                              className="gap-2"
+                              onClick={() => void handleStopResultAtIndex(index, "delivered")}
+                              disabled={updateRouteMutation.isPending}
+                            >
+                              <CheckCircle2 className="h-4 w-4" />
+                              Entregue
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="destructive"
+                              className="gap-2"
+                              onClick={() => void handleStopResultAtIndex(index, "failed")}
+                              disabled={updateRouteMutation.isPending}
+                            >
+                              <XCircle className="h-4 w-4" />
+                              Não Entregue
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="gap-2"
+                              onClick={() => openStopInMap(stop)}
+                            >
+                              <Navigation className="h-4 w-4" />
+                              Abrir no mapa
+                            </Button>
+                          </div>
+                        )}
                         {index < stops.length - 1 && <Separator className="mt-3" />}
                       </div>
                     );
                   })}
+                  {filteredStops.length === 0 && (
+                    <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                      Nenhuma parada corresponde ao endereço pesquisado.
+                    </div>
+                  )}
                   {routeEndPoint && (
-                    <div className="rounded-lg border border-red-200 bg-red-50 p-3">
-                      <p className="text-xs font-semibold uppercase text-red-700">
+                    <div className="rounded-xl border border-destructive/35 bg-destructive/10 p-3">
+                      <p className="text-xs font-semibold uppercase text-destructive">
                         Fim
                       </p>
-                      <p className="text-sm text-red-900">{routeEndPoint.address}</p>
+                      <p className="text-sm text-foreground">{routeEndPoint.address}</p>
                     </div>
                   )}
                 </CardContent>
@@ -815,3 +969,5 @@ export default function RouteDetail() {
     </DashboardLayout>
   );
 }
+
+

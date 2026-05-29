@@ -15,6 +15,7 @@ export type MapMarker = {
 
 export type RouteStop = Coordinate & {
   address: string;
+  packageNumber?: string;
   sequence?: number;
 };
 
@@ -56,7 +57,7 @@ export function createMarkersFromStops(stops: RouteStop[]) {
     return createMapMarker(
       String(index),
       stop,
-      `Parada ${index + 1}`,
+      `Pacote ${(stop.packageNumber ?? "").trim() || String(index + 1)}`,
       stop.address,
       isStart ? "start" : isEnd ? "end" : "stop"
     );

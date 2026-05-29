@@ -14,7 +14,14 @@ import {
   verifyPassword,
 } from "./passwordAuth";
 import { sdk } from "./_core/sdk";
-import { optimizeRoute, validateLocations, type Location } from "./optimization";
+import {
+  calculateDistance,
+  estimateTravelTime,
+  optimizeRoute,
+  validateLocations,
+  type Location,
+  type OptimizedRoute,
+} from "./optimization";
 import { chatWithLLM, formatChatHistory } from "./chat";
 
 function toOptionalLocation(
@@ -46,6 +53,58 @@ function hasMissingCoordinates(location: Location) {
   return location.latitude === 0 && location.longitude === 0;
 }
 
+function buildSequentialRoute(
+  locations: Location[],
+  options: { startLocation?: Location; endLocation?: Location } = {}
+): OptimizedRoute {
+  const waypoints = locations.map((location, index) => ({
+    ...location,
+    sequence: index,
+  }));
+
+  if (waypoints.length === 0) {
+    return {
+      sequence: [],
+      totalDistance: 0,
+      totalTime: 0,
+      waypoints: [],
+    };
+  }
+
+  let totalDistance = 0;
+  let totalTime = 0;
+
+  if (options.startLocation) {
+    const firstSegmentDistance = calculateDistance(options.startLocation, waypoints[0]);
+    totalDistance += firstSegmentDistance;
+    totalTime += estimateTravelTime(firstSegmentDistance);
+  }
+
+  for (let index = 0; index < waypoints.length - 1; index++) {
+    const current = waypoints[index];
+    const next = waypoints[index + 1];
+    const segmentDistance = calculateDistance(current, next);
+    totalDistance += segmentDistance;
+    totalTime += estimateTravelTime(segmentDistance);
+  }
+
+  if (options.endLocation) {
+    const lastSegmentDistance = calculateDistance(
+      waypoints[waypoints.length - 1],
+      options.endLocation
+    );
+    totalDistance += lastSegmentDistance;
+    totalTime += estimateTravelTime(lastSegmentDistance);
+  }
+
+  return {
+    sequence: waypoints.map((_, index) => index),
+    totalDistance: Math.round(totalDistance * 100) / 100,
+    totalTime,
+    waypoints,
+  };
+}
+
 async function requireUserRoute(routeId: number, userId: number) {
   const route = await db.getRouteById(routeId, userId);
 
@@ -62,7 +121,8 @@ async function requireUserRoute(routeId: number, userId: number) {
 async function optimizeUserRoute(
   routeId: number,
   userId: number,
-  requestedMode?: "shortest_distance" | "shortest_time" | "balanced"
+  requestedMode?: "shortest_distance" | "shortest_time" | "balanced",
+  options?: { respectInputSequence?: boolean }
 ) {
   const route = await requireUserRoute(routeId, userId);
   const routeStops = await db.getRouteStops(routeId);
@@ -125,10 +185,12 @@ async function optimizeUserRoute(
   }
 
   const mode = requestedMode || route.mode;
-  const optimized = optimizeRoute(locations, mode, 0, {
-    startLocation,
-    endLocation,
-  });
+  const optimized = options?.respectInputSequence
+    ? buildSequentialRoute(locations, { startLocation, endLocation })
+    : optimizeRoute(locations, mode, 0, {
+        startLocation,
+        endLocation,
+      });
 
   await db.updateRoute(routeId, userId, {
     totalDistance: optimized.totalDistance,
@@ -286,9 +348,10 @@ export const appRouter = router({
       ),
     createAndOptimize: protectedProcedure.input(routeCreateSchema.extend({
       stops: z.array(stopCreateSchema).min(2),
+      respectInputSequence: z.boolean().optional(),
     }))
       .mutation(async ({ ctx, input }) => {
-        const { stops, ...routeInput } = input;
+        const { stops, respectInputSequence, ...routeInput } = input;
         const route = await db.createRoute(ctx.user.id, routeInput);
 
         if (!route) {
@@ -300,7 +363,9 @@ export const appRouter = router({
 
         try {
           await db.createStops(route.id, stops);
-          const optimized = await optimizeUserRoute(route.id, ctx.user.id, input.mode);
+          const optimized = await optimizeUserRoute(route.id, ctx.user.id, input.mode, {
+            respectInputSequence,
+          });
           const updatedRoute = await db.getRouteById(route.id, ctx.user.id);
 
           return {

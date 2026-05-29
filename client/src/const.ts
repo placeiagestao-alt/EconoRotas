@@ -1,6 +1,9 @@
 import { buildApiUrl } from "./lib/apiBase";
 export { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 
+const DEFAULT_TERMLY_GENERATOR_URL =
+  "https://termly.io/products/privacy-policy-generator/";
+
 // Generate login URL at runtime so redirect URI reflects the current origin.
 export const getLoginUrl = () => {
   const oauthPortalUrl = import.meta.env.VITE_OAUTH_PORTAL_URL?.trim();
@@ -15,14 +18,22 @@ export const getLoginUrl = () => {
     return import.meta.env.DEV ? buildApiUrl("/api/dev/login") : "/";
   }
 
-  const redirectUri = `${window.location.origin}/api/oauth/callback`;
-  const state = btoa(redirectUri);
-
-  const url = new URL("/app-auth", oauthPortalUrl);
-  url.searchParams.set("appId", appId);
-  url.searchParams.set("redirectUri", redirectUri);
-  url.searchParams.set("state", state);
-  url.searchParams.set("type", "signIn");
-
-  return url.toString();
+  return buildApiUrl("/api/oauth/login");
 };
+
+const ensureAbsoluteUrl = (rawUrl: string) => {
+  if (!rawUrl) return rawUrl;
+  if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+    return rawUrl;
+  }
+
+  return `https://${rawUrl}`;
+};
+
+export const getPrivacyPolicyUrl = () => {
+  const configuredUrl = import.meta.env.VITE_PRIVACY_POLICY_URL?.trim() ?? "";
+  return ensureAbsoluteUrl(configuredUrl || DEFAULT_TERMLY_GENERATOR_URL);
+};
+
+export const getTermlyPolicyGeneratorUrl = () =>
+  DEFAULT_TERMLY_GENERATOR_URL;

@@ -3,8 +3,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { Loader2, Send, User, Sparkles } from "lucide-react";
-import { useState, useEffect, useRef } from "react";
-import { Streamdown } from "streamdown";
+import { useState, useEffect, useRef, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 
 /**
  * Message type matching server-side LLM Message interface
@@ -59,12 +58,100 @@ export type AIChatBoxProps = {
   suggestedPrompts?: string[];
 };
 
+function formatInlineMarkdown(text: string) {
+  const nodes: ReactNode[] = [];
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+
+    const token = match[0];
+    if (token.startsWith("`")) {
+      nodes.push(
+        <code key={match.index} className="rounded bg-background/80 px-1 py-0.5 text-xs">
+          {token.slice(1, -1)}
+        </code>
+      );
+    } else if (token.startsWith("**")) {
+      nodes.push(<strong key={match.index}>{token.slice(2, -2)}</strong>);
+    } else {
+      const labelEnd = token.indexOf("]");
+      const label = token.slice(1, labelEnd);
+      const href = token.slice(labelEnd + 2, -1);
+      nodes.push(
+        <a
+          key={match.index}
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-primary underline-offset-4 hover:underline"
+        >
+          {label}
+        </a>
+      );
+    }
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+
+  return nodes;
+}
+
+function LightweightMarkdown({ children }: { children: string }) {
+  const blocks = children.split(/\n{2,}/);
+
+  return (
+    <div className="space-y-2 text-sm leading-relaxed">
+      {blocks.map((block, blockIndex) => {
+        const lines = block.split("\n");
+        const isList = lines.every((line) => /^[-*]\s+/.test(line.trim()));
+        const isCodeBlock = block.trim().startsWith("```") && block.trim().endsWith("```");
+
+        if (isCodeBlock) {
+          return (
+            <pre
+              key={blockIndex}
+              className="overflow-x-auto rounded-md bg-background/80 p-3 text-xs"
+            >
+              <code>{block.trim().replace(/^```[^\n]*\n?/, "").replace(/```$/, "")}</code>
+            </pre>
+          );
+        }
+
+        if (isList) {
+          return (
+            <ul key={blockIndex} className="list-disc space-y-1 pl-5">
+              {lines.map((line, lineIndex) => (
+                <li key={lineIndex}>{formatInlineMarkdown(line.trim().replace(/^[-*]\s+/, ""))}</li>
+              ))}
+            </ul>
+          );
+        }
+
+        return (
+          <p key={blockIndex} className="whitespace-pre-wrap">
+            {formatInlineMarkdown(block)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * A ready-to-use AI chat box component that integrates with the LLM system.
  *
  * Features:
  * - Matches server-side Message interface for seamless integration
- * - Markdown rendering with Streamdown
+ * - Lightweight Markdown rendering
  * - Auto-scrolls to latest message
  * - Loading states
  * - Uses global theme colors from index.css
@@ -133,7 +220,17 @@ export function AIChatBox({
   const [minHeightForLastMessage, setMinHeightForLastMessage] = useState(0);
 
   useEffect(() => {
-    if (containerRef.current && inputAreaRef.current) {
+    const updateReservedHeight = () => {
+      if (!containerRef.current || !inputAreaRef.current) return;
+
+      const compactViewport =
+        window.matchMedia("(max-width: 767px)").matches || window.innerHeight < 760;
+
+      if (compactViewport) {
+        setMinHeightForLastMessage(0);
+        return;
+      }
+
       const containerHeight = containerRef.current.offsetHeight;
       const inputHeight = inputAreaRef.current.offsetHeight;
       const scrollAreaHeight = containerHeight - inputHeight;
@@ -146,8 +243,17 @@ export function AIChatBox({
       const calculatedHeight = scrollAreaHeight - 32 - userMessageReservedHeight;
 
       setMinHeightForLastMessage(Math.max(0, calculatedHeight));
-    }
-  }, []);
+    };
+
+    updateReservedHeight();
+    window.addEventListener("resize", updateReservedHeight);
+    window.visualViewport?.addEventListener("resize", updateReservedHeight);
+
+    return () => {
+      window.removeEventListener("resize", updateReservedHeight);
+      window.visualViewport?.removeEventListener("resize", updateReservedHeight);
+    };
+  }, [displayMessages.length, isLoading]);
 
   // Scroll to bottom helper function with smooth animation
   const scrollToBottom = () => {
@@ -165,7 +271,7 @@ export function AIChatBox({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
@@ -180,7 +286,7 @@ export function AIChatBox({
     textareaRef.current?.focus();
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit(e);
@@ -191,7 +297,7 @@ export function AIChatBox({
     <div
       ref={containerRef}
       className={cn(
-        "flex flex-col bg-card text-card-foreground rounded-lg border shadow-sm",
+        "flex flex-col rounded-2xl border border-border/70 bg-card/85 text-card-foreground shadow-[0_8px_20px_rgb(2_8_23_/_26%)] backdrop-blur-0 md:shadow-[0_25px_55px_rgb(2_8_23_/_45%)] md:backdrop-blur-sm",
         className
       )}
       style={{ height }}
@@ -202,7 +308,7 @@ export function AIChatBox({
           <div className="flex h-full flex-col p-4">
             <div className="flex flex-1 flex-col items-center justify-center gap-6 text-muted-foreground">
               <div className="flex flex-col items-center gap-3">
-                <Sparkles className="size-12 opacity-20" />
+                <Sparkles className="size-12 text-primary/40" />
                 <p className="text-sm">{emptyStateMessage}</p>
               </div>
 
@@ -213,7 +319,7 @@ export function AIChatBox({
                       key={index}
                       onClick={() => onSendMessage(prompt)}
                       disabled={isLoading}
-                      className="rounded-lg border border-border bg-card px-4 py-2 text-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-xl border border-border/70 bg-card/70 px-4 py-2 text-sm transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {prompt}
                     </button>
@@ -247,23 +353,21 @@ export function AIChatBox({
                     }
                   >
                     {message.role === "assistant" && (
-                      <div className="size-8 shrink-0 mt-1 rounded-full bg-primary/10 flex items-center justify-center">
+                      <div className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-full border border-primary/30 bg-primary/15">
                         <Sparkles className="size-4 text-primary" />
                       </div>
                     )}
 
                     <div
                       className={cn(
-                        "max-w-[80%] rounded-lg px-4 py-2.5",
+                        "max-w-[80%] rounded-2xl px-4 py-2.5",
                         message.role === "user"
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-muted text-foreground"
+                          ? "bg-gradient-to-r from-primary to-blue-500 text-primary-foreground shadow-[0_8px_18px_rgb(37_99_235_/_22%)] md:shadow-[0_12px_30px_rgb(37_99_235_/_30%)]"
+                          : "border border-border/60 bg-secondary/55 text-foreground"
                       )}
                     >
                       {message.role === "assistant" ? (
-                        <div className="prose prose-sm dark:prose-invert max-w-none">
-                          <Streamdown>{message.content}</Streamdown>
-                        </div>
+                        <LightweightMarkdown>{message.content}</LightweightMarkdown>
                       ) : (
                         <p className="whitespace-pre-wrap text-sm">
                           {message.content}
@@ -272,7 +376,7 @@ export function AIChatBox({
                     </div>
 
                     {message.role === "user" && (
-                      <div className="size-8 shrink-0 mt-1 rounded-full bg-secondary flex items-center justify-center">
+                      <div className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-full border border-border/60 bg-secondary">
                         <User className="size-4 text-secondary-foreground" />
                       </div>
                     )}
@@ -289,10 +393,10 @@ export function AIChatBox({
                       : undefined
                   }
                 >
-                  <div className="size-8 shrink-0 mt-1 rounded-full bg-primary/10 flex items-center justify-center">
+                  <div className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-full border border-primary/30 bg-primary/15">
                     <Sparkles className="size-4 text-primary" />
                   </div>
-                  <div className="rounded-lg bg-muted px-4 py-2.5">
+                  <div className="rounded-2xl border border-border/60 bg-secondary/55 px-4 py-2.5">
                     <Loader2 className="size-4 animate-spin text-muted-foreground" />
                   </div>
                 </div>
@@ -306,7 +410,7 @@ export function AIChatBox({
       <form
         ref={inputAreaRef}
         onSubmit={handleSubmit}
-        className="flex gap-2 p-4 border-t bg-background/50 items-end"
+        className="flex items-end gap-2 border-t border-border/70 bg-background/55 p-3 backdrop-blur-0 sm:p-4 md:backdrop-blur-md"
       >
         <Textarea
           ref={textareaRef}
@@ -314,7 +418,7 @@ export function AIChatBox({
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
-          className="flex-1 max-h-32 resize-none min-h-9"
+          className="min-h-9 max-h-24 flex-1 resize-none sm:max-h-32"
           rows={1}
         />
         <Button

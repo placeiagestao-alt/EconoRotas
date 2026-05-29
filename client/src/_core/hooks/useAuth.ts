@@ -8,13 +8,39 @@ type UseAuthOptions = {
   redirectPath?: string;
 };
 
+const AUTH_CACHE_KEY = "routing-pwa:last-auth-user";
+
+function readCachedUser() {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = window.localStorage.getItem(AUTH_CACHE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function isUnauthorizedError(error: unknown) {
+  return (
+    error instanceof TRPCClientError &&
+    (error.data?.code === "UNAUTHORIZED" ||
+      error.message === "Please login (10001)")
+  );
+}
+
 export function useAuth(options?: UseAuthOptions) {
   const { redirectOnUnauthenticated = false, redirectPath = getLoginUrl() } =
     options ?? {};
   const utils = trpc.useUtils();
+  const cachedUser = useMemo(() => readCachedUser(), []);
 
   const meQuery = trpc.auth.me.useQuery(undefined, {
-    retry: false,
+    retry: (failureCount, error) => {
+      if (isUnauthorizedError(error)) return false;
+      return failureCount < 2;
+    },
     refetchOnWindowFocus: false,
   });
 
@@ -42,17 +68,25 @@ export function useAuth(options?: UseAuthOptions) {
   }, [logoutMutation, utils]);
 
   const state = useMemo(() => {
-    localStorage.setItem(
-      "manus-runtime-user-info",
-      JSON.stringify(meQuery.data)
-    );
+    if (typeof window !== "undefined" && meQuery.data) {
+      window.localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(meQuery.data));
+    }
+
+    const hasNetworkLikeError =
+      meQuery.error instanceof Error &&
+      !isUnauthorizedError(meQuery.error);
+    const fallbackUser = hasNetworkLikeError ? cachedUser : null;
+    const resolvedUser = meQuery.data ?? fallbackUser ?? null;
+
     return {
-      user: meQuery.data ?? null,
+      user: resolvedUser,
       loading: meQuery.isLoading || logoutMutation.isPending,
       error: meQuery.error ?? logoutMutation.error ?? null,
-      isAuthenticated: Boolean(meQuery.data),
+      isAuthenticated: Boolean(resolvedUser),
+      degradedAuth: !meQuery.data && Boolean(fallbackUser),
     };
   }, [
+    cachedUser,
     meQuery.data,
     meQuery.error,
     meQuery.isLoading,
@@ -64,6 +98,7 @@ export function useAuth(options?: UseAuthOptions) {
     if (!redirectOnUnauthenticated) return;
     if (meQuery.isLoading || logoutMutation.isPending) return;
     if (state.user) return;
+    if (meQuery.error && !isUnauthorizedError(meQuery.error)) return;
     if (typeof window === "undefined") return;
     if (window.location.pathname === redirectPath) return;
 
@@ -72,6 +107,7 @@ export function useAuth(options?: UseAuthOptions) {
     redirectOnUnauthenticated,
     redirectPath,
     logoutMutation.isPending,
+    meQuery.error,
     meQuery.isLoading,
     state.user,
   ]);

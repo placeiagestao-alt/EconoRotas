@@ -150,17 +150,16 @@ var init_schema = __esm({
 });
 
 // server/_core/env.ts
-var isVercel, demoCookieSecret, ENV;
+var hasConfiguredCookieSecret, ENV;
 var init_env = __esm({
   "server/_core/env.ts"() {
     "use strict";
-    isVercel = Boolean(
-      process.env.VERCEL || process.env.VERCEL_URL || process.env.NOW_REGION
-    );
-    demoCookieSecret = "econorotas-vercel-demo-session-secret-change-before-production";
+    hasConfiguredCookieSecret = Boolean(process.env.JWT_SECRET);
     ENV = {
       appId: process.env.VITE_APP_ID ?? "",
-      cookieSecret: process.env.JWT_SECRET ?? (isVercel ? demoCookieSecret : ""),
+      cookieSecret: process.env.JWT_SECRET ?? "",
+      hasConfiguredCookieSecret,
+      usingDemoCookieSecret: false,
       databaseUrl: process.env.DATABASE_URL ?? "",
       databaseSsl: process.env.DATABASE_SSL ?? "",
       databaseSslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? "",
@@ -170,9 +169,15 @@ var init_env = __esm({
       publicAppUrl: process.env.PUBLIC_APP_URL ?? "",
       allowedOrigins: process.env.ALLOWED_ORIGINS ?? "",
       isProduction: process.env.NODE_ENV === "production",
-      allowEphemeralDb: process.env.ALLOW_EPHEMERAL_DB === "true" || isVercel,
+      allowEphemeralDb: process.env.ALLOW_EPHEMERAL_DB === "true",
       forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
-      forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? ""
+      forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
+      androidUpdateLatestVersion: process.env.ANDROID_UPDATE_LATEST_VERSION ?? "",
+      androidUpdateApkUrl: process.env.ANDROID_UPDATE_APK_URL ?? "",
+      androidUpdateRequired: process.env.ANDROID_UPDATE_REQUIRED === "true",
+      androidMinimumSupportedVersion: process.env.ANDROID_MINIMUM_SUPPORTED_VERSION ?? "",
+      androidUpdateMessage: process.env.ANDROID_UPDATE_MESSAGE ?? "",
+      androidUpdatePublishedAt: process.env.ANDROID_UPDATE_PUBLISHED_AT ?? ""
     };
   }
 });
@@ -226,8 +231,12 @@ function shouldUseMemoryDb() {
   loadLocalDb();
   return true;
 }
+function formatDatabaseUnavailableMessage() {
+  const details = _lastDbConnectionError ? ` Detalhe: ${_lastDbConnectionError}` : "";
+  return `Banco de dados indisponivel. Verifique DATABASE_URL, DATABASE_SSL e se as migrations foram executadas.${details}`;
+}
 function requireConfiguredDatabase() {
-  throw new Error("Database not available");
+  throw new Error(formatDatabaseUnavailableMessage());
 }
 function shouldUseDatabaseSsl(databaseUrl) {
   if (process.env.DATABASE_SSL === "true") return true;
@@ -274,11 +283,31 @@ async function getDb() {
     const pool = createDatabasePool(process.env.DATABASE_URL);
     await pool.query("SELECT 1");
     _db = drizzle(pool);
+    _lastDbConnectionError = null;
   } catch (error) {
     console.warn("[Database] Failed to connect:", error);
+    _lastDbConnectionError = error instanceof Error ? error.message : "Erro desconhecido ao conectar.";
     _db = null;
   }
   return _db;
+}
+async function getDatabaseHealth() {
+  const configured = Boolean(process.env.DATABASE_URL);
+  if (!configured) {
+    return {
+      configured,
+      connected: false,
+      ssl: shouldUseDatabaseSsl(""),
+      error: null
+    };
+  }
+  const db = await getDb();
+  return {
+    configured,
+    connected: Boolean(db),
+    ssl: shouldUseDatabaseSsl(process.env.DATABASE_URL || ""),
+    error: _lastDbConnectionError
+  };
 }
 async function upsertUser(user) {
   if (!user.openId) {
@@ -544,8 +573,8 @@ async function createStops(routeId, stopsData) {
         id: memory.ids.stops++,
         routeId,
         address: stop.address,
-        latitude: stop.latitude ? String(stop.latitude) : null,
-        longitude: stop.longitude ? String(stop.longitude) : null,
+        latitude: stop.latitude !== void 0 ? String(stop.latitude) : null,
+        longitude: stop.longitude !== void 0 ? String(stop.longitude) : null,
         sequence: stop.sequence,
         notes: stop.notes ?? null,
         createdAt: now
@@ -559,8 +588,8 @@ async function createStops(routeId, stopsData) {
   const values = stopsData.map((s) => ({
     routeId,
     address: s.address,
-    latitude: s.latitude ? String(s.latitude) : null,
-    longitude: s.longitude ? String(s.longitude) : null,
+    latitude: s.latitude !== void 0 ? String(s.latitude) : null,
+    longitude: s.longitude !== void 0 ? String(s.longitude) : null,
     sequence: s.sequence,
     notes: s.notes
   }));
@@ -714,13 +743,34 @@ async function getUserRouteHistory(userId, limit = 50, offset = 0) {
   if (!db) {
     if (shouldUseMemoryDb()) {
       return sortByDateDesc(
-        memory.routeHistory.filter((history) => history.userId === userId),
+        memory.routeHistory.filter((history) => history.userId === userId).map((history) => {
+          const route = memory.routes.find((item) => item.id === history.routeId);
+          return {
+            ...history,
+            routeName: route?.name ?? null
+          };
+        }),
         "executedDate"
       ).slice(offset, offset + limit);
     }
     requireConfiguredDatabase();
   }
-  return db.select().from(routeHistory).where(eq(routeHistory.userId, userId)).orderBy(desc(routeHistory.executedDate)).limit(limit).offset(offset);
+  return db.select({
+    id: routeHistory.id,
+    routeId: routeHistory.routeId,
+    userId: routeHistory.userId,
+    executedDate: routeHistory.executedDate,
+    actualDistance: routeHistory.actualDistance,
+    actualTime: routeHistory.actualTime,
+    status: routeHistory.status,
+    notes: routeHistory.notes,
+    exportedAt: routeHistory.exportedAt,
+    exportFormat: routeHistory.exportFormat,
+    storageKey: routeHistory.storageKey,
+    createdAt: routeHistory.createdAt,
+    updatedAt: routeHistory.updatedAt,
+    routeName: routes.name
+  }).from(routeHistory).leftJoin(routes, eq(routeHistory.routeId, routes.id)).where(eq(routeHistory.userId, userId)).orderBy(desc(routeHistory.executedDate)).limit(limit).offset(offset);
 }
 async function getRouteHistory(routeId, userId) {
   const db = await getDb();
@@ -881,7 +931,7 @@ async function getRouteStatsOverTime(userId, days = 30) {
     sql`executedDate >= ${startDate}`
   )).groupBy(sql`DATE(executedDate)`).orderBy(asc(sql`DATE(executedDate)`));
 }
-var _db, _lastDbConnectAttempt, DB_CONNECT_RETRY_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, localDbLoaded, memory;
+var _db, _lastDbConnectAttempt, _lastDbConnectionError, DB_CONNECT_RETRY_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, localDbLoaded, memory;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
@@ -889,6 +939,7 @@ var init_db = __esm({
     init_env();
     _db = null;
     _lastDbConnectAttempt = 0;
+    _lastDbConnectionError = null;
     DB_CONNECT_RETRY_MS = 3e4;
     LOCAL_DB_DIR = path.join(process.cwd(), ".data");
     LOCAL_DB_FILE = path.join(LOCAL_DB_DIR, "routing-pwa-db.json");
@@ -972,6 +1023,9 @@ __export(export_exports, {
   generateRoutePDF: () => generateRoutePDF
 });
 import { PDFDocument, rgb } from "pdf-lib";
+function escapeCsvCell(value) {
+  return String(value ?? "").replace(/"/g, '""');
+}
 function generateRouteCSV(history) {
   const headers = [
     "ID",
@@ -993,7 +1047,7 @@ function generateRouteCSV(history) {
   ]);
   const csvContent = [
     headers.join(","),
-    ...rows.map((row) => row.map((cell) => `"${cell}"`).join(","))
+    ...rows.map((row) => row.map((cell) => `"${escapeCsvCell(cell)}"`).join(","))
   ].join("\n");
   return csvContent;
 }
@@ -1132,6 +1186,8 @@ var NOT_ADMIN_ERR_MSG = "You do not have required permission (10002)";
 
 // server/_core/oauth.ts
 init_db();
+import { parse as parseCookieHeader2 } from "cookie";
+import { randomBytes } from "node:crypto";
 
 // server/_core/cookies.ts
 function isSecureRequest(req) {
@@ -1184,15 +1240,51 @@ var OAuthService = class {
     console.log("[OAuth] Initialized with baseURL:", ENV.oAuthServerUrl);
   }
   decodeState(state) {
-    const redirectUri = atob(state);
-    return redirectUri;
+    const decodeBase64Url = () => {
+      const padded = state.replace(/-/g, "+").replace(/_/g, "/");
+      const missingPadding = padded.length % 4;
+      const normalized = missingPadding === 0 ? padded : `${padded}${"=".repeat(4 - missingPadding)}`;
+      return Buffer.from(normalized, "base64").toString("utf8");
+    };
+    const validateUrl = (urlString) => {
+      try {
+        const parsed = new URL(urlString);
+        return parsed.protocol === "http:" || parsed.protocol === "https:";
+      } catch {
+        return false;
+      }
+    };
+    try {
+      const parsed = JSON.parse(decodeBase64Url());
+      if (typeof parsed.redirectUri !== "string" || !validateUrl(parsed.redirectUri) || typeof parsed.nonce !== "string" || parsed.nonce.length < 16) {
+        throw new Error("Invalid OAuth state payload");
+      }
+      return {
+        redirectUri: parsed.redirectUri,
+        nonce: parsed.nonce,
+        issuedAt: typeof parsed.issuedAt === "number" ? parsed.issuedAt : void 0
+      };
+    } catch {
+      const legacyRedirectUri = decodeBase64Url();
+      if (!validateUrl(legacyRedirectUri)) {
+        throw new Error("Invalid OAuth state payload");
+      }
+      return {
+        redirectUri: legacyRedirectUri,
+        nonce: ""
+      };
+    }
   }
-  async getTokenByCode(code, state) {
+  async getTokenByCode(code, state, expectedNonce) {
+    const decodedState = this.decodeState(state);
+    if (!decodedState.nonce || decodedState.nonce !== expectedNonce) {
+      throw new Error("Invalid OAuth state nonce");
+    }
     const payload = {
       clientId: ENV.appId,
       grantType: "authorization_code",
       code,
-      redirectUri: this.decodeState(state)
+      redirectUri: decodedState.redirectUri
     };
     const { data } = await this.client.post(
       EXCHANGE_TOKEN_PATH,
@@ -1239,10 +1331,10 @@ var SDKServer = class {
   /**
    * Exchange OAuth authorization code for access token
    * @example
-   * const tokenResponse = await sdk.exchangeCodeForToken(code, state);
+   * const tokenResponse = await sdk.exchangeCodeForToken(code, state, expectedNonce);
    */
-  async exchangeCodeForToken(code, state) {
-    return this.oauthService.getTokenByCode(code, state);
+  async exchangeCodeForToken(code, state, expectedNonce) {
+    return this.oauthService.getTokenByCode(code, state, expectedNonce);
   }
   /**
    * Get user information using access token
@@ -1466,9 +1558,51 @@ function buildDevUser() {
 var sdk = new SDKServer();
 
 // server/_core/oauth.ts
+var OAUTH_STATE_COOKIE_NAME = "oauth_state_nonce";
+var OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1e3;
 function getQueryParam(req, key) {
   const value = req.query[key];
   return typeof value === "string" ? value : void 0;
+}
+function getCookie(req, key) {
+  const parsed = parseCookieHeader2(req.headers.cookie ?? "");
+  return parsed[key];
+}
+function buildRequestOrigin(req) {
+  const forwardedProtoRaw = req.headers["x-forwarded-proto"];
+  const forwardedHostRaw = req.headers["x-forwarded-host"];
+  const forwardedProto = Array.isArray(forwardedProtoRaw) ? forwardedProtoRaw[0] : forwardedProtoRaw?.split(",")[0];
+  const forwardedHost = Array.isArray(forwardedHostRaw) ? forwardedHostRaw[0] : forwardedHostRaw?.split(",")[0];
+  const protocol = (forwardedProto || req.protocol || "https").trim();
+  const host = (forwardedHost || req.get("host") || "").trim();
+  if (!host) return null;
+  return `${protocol}://${host}`;
+}
+function buildOAuthRedirectUri(req) {
+  if (ENV.publicAppUrl) {
+    try {
+      return new URL("/api/oauth/callback", ENV.publicAppUrl).toString();
+    } catch {
+    }
+  }
+  const origin = buildRequestOrigin(req);
+  if (!origin) return null;
+  return `${origin}/api/oauth/callback`;
+}
+function getOAuthPortalUrl() {
+  const raw = process.env.OAUTH_PORTAL_URL?.trim() || process.env.VITE_OAUTH_PORTAL_URL?.trim() || "";
+  if (!raw) return raw;
+  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+  return `https://${raw}`;
+}
+function createStatePayload(redirectUri, nonce) {
+  return Buffer.from(
+    JSON.stringify({
+      redirectUri,
+      nonce,
+      issuedAt: Date.now()
+    })
+  ).toString("base64url");
 }
 function registerOAuthRoutes(app2) {
   if (!ENV.isProduction) {
@@ -1493,6 +1627,35 @@ function registerOAuthRoutes(app2) {
       }
     });
   }
+  app2.get("/api/oauth/login", (req, res) => {
+    const oauthPortalUrl = getOAuthPortalUrl();
+    if (!oauthPortalUrl || !ENV.appId) {
+      if (!ENV.isProduction) {
+        res.redirect(302, "/api/dev/login");
+        return;
+      }
+      res.status(503).json({ error: "OAuth login is not configured" });
+      return;
+    }
+    const redirectUri = buildOAuthRedirectUri(req);
+    if (!redirectUri) {
+      res.status(500).json({ error: "Unable to resolve OAuth redirect URI" });
+      return;
+    }
+    const nonce = randomBytes(24).toString("hex");
+    const state = createStatePayload(redirectUri, nonce);
+    const cookieOptions = getSessionCookieOptions(req);
+    res.cookie(OAUTH_STATE_COOKIE_NAME, nonce, {
+      ...cookieOptions,
+      maxAge: OAUTH_STATE_MAX_AGE_MS
+    });
+    const oauthUrl = new URL("/app-auth", oauthPortalUrl);
+    oauthUrl.searchParams.set("appId", ENV.appId);
+    oauthUrl.searchParams.set("redirectUri", redirectUri);
+    oauthUrl.searchParams.set("state", state);
+    oauthUrl.searchParams.set("type", "signIn");
+    res.redirect(302, oauthUrl.toString());
+  });
   app2.get("/api/oauth/callback", async (req, res) => {
     const code = getQueryParam(req, "code");
     const state = getQueryParam(req, "state");
@@ -1500,8 +1663,18 @@ function registerOAuthRoutes(app2) {
       res.status(400).json({ error: "code and state are required" });
       return;
     }
+    const expectedNonce = getCookie(req, OAUTH_STATE_COOKIE_NAME);
+    const cookieOptions = getSessionCookieOptions(req);
+    res.clearCookie(OAUTH_STATE_COOKIE_NAME, {
+      ...cookieOptions,
+      path: "/"
+    });
+    if (!expectedNonce) {
+      res.status(400).json({ error: "Invalid OAuth state (missing nonce)" });
+      return;
+    }
     try {
-      const tokenResponse = await sdk.exchangeCodeForToken(code, state);
+      const tokenResponse = await sdk.exchangeCodeForToken(code, state, expectedNonce);
       const userInfo = await sdk.getUserInfo(tokenResponse.accessToken);
       if (!userInfo.openId) {
         res.status(400).json({ error: "openId missing from user info" });
@@ -1518,11 +1691,15 @@ function registerOAuthRoutes(app2) {
         name: userInfo.name || "",
         expiresInMs: ONE_YEAR_MS
       });
-      const cookieOptions = getSessionCookieOptions(req);
-      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+      const cookieOptions2 = getSessionCookieOptions(req);
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions2, maxAge: ONE_YEAR_MS });
       res.redirect(302, "/");
     } catch (error) {
       console.error("[OAuth] Callback failed", error);
+      if (error instanceof Error && error.message.includes("Invalid OAuth state")) {
+        res.status(400).json({ error: "Invalid OAuth state" });
+        return;
+      }
       res.status(500).json({ error: "OAuth callback failed" });
     }
   });
@@ -1573,7 +1750,13 @@ function registerStorageProxy(app2) {
 // server/_core/geocodingProxy.ts
 var NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 var CACHE_TTL_MS = 24 * 60 * 60 * 1e3;
+var RATE_LIMIT_WINDOW_MS = 60 * 1e3;
+var RATE_LIMIT_MAX_REQUESTS = Math.max(
+  1,
+  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 30)
+);
 var cache = /* @__PURE__ */ new Map();
+var rateLimiter = /* @__PURE__ */ new Map();
 function getNominatimUserAgent() {
   return process.env.NOMINATIM_USER_AGENT || `routing-pwa/1.0 (${process.env.NOMINATIM_CONTACT_EMAIL || "local-development"})`;
 }
@@ -1588,12 +1771,45 @@ function getCached(cacheKey) {
   }
   return cached.data;
 }
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  const candidate = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  return candidate?.split(",")[0]?.trim() || req.ip || req.socket.remoteAddress || "unknown";
+}
+function checkRateLimit(req) {
+  const key = getClientIp(req);
+  const now = Date.now();
+  const existing = rateLimiter.get(key);
+  if (!existing || existing.resetAt <= now) {
+    rateLimiter.set(key, {
+      count: 1,
+      resetAt: now + RATE_LIMIT_WINDOW_MS
+    });
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+  if (existing.count >= RATE_LIMIT_MAX_REQUESTS) {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1e3))
+    };
+  }
+  existing.count += 1;
+  return { allowed: true, retryAfterSeconds: 0 };
+}
 function registerGeocodingProxy(app2) {
   app2.get("/api/geocode/search", async (req, res) => {
     const q = String(req.query.q || "").replace(/\s+/g, " ").trim();
     const limit = Math.min(Number(req.query.limit || 6) || 6, 10);
     if (q.length < 4) {
       res.json([]);
+      return;
+    }
+    const rateLimit = checkRateLimit(req);
+    if (!rateLimit.allowed) {
+      res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
+      res.status(429).json({
+        error: "Limite de consultas excedido. Tente novamente em instantes."
+      });
       return;
     }
     const cacheKey = `${q.toLowerCase()}|${limit}`;
@@ -1789,7 +2005,7 @@ import { TRPCError as TRPCError3 } from "@trpc/server";
 import { z as z2 } from "zod";
 
 // server/passwordAuth.ts
-import { randomBytes, scrypt as scryptCallback, timingSafeEqual, createHash } from "node:crypto";
+import { randomBytes as randomBytes2, scrypt as scryptCallback, timingSafeEqual, createHash } from "node:crypto";
 import { promisify } from "node:util";
 var scrypt = promisify(scryptCallback);
 var KEY_LENGTH = 64;
@@ -1802,7 +2018,7 @@ function buildPasswordOpenId(email) {
   return `pwd_${digest.slice(0, 60)}`;
 }
 async function hashPassword(password) {
-  const salt = randomBytes(16).toString("base64url");
+  const salt = randomBytes2(16).toString("base64url");
   const key = await scrypt(password, salt, KEY_LENGTH);
   return `${HASH_PREFIX}$${salt}$${key.toString("base64url")}`;
 }
@@ -2135,6 +2351,10 @@ async function invokeLLM(params) {
 
 // server/chat.ts
 init_db();
+function formatDistanceKm(value) {
+  const distance = Number(value);
+  return Number.isFinite(distance) ? distance.toFixed(2) : "N/A";
+}
 async function buildRouteContext(userId, routeId) {
   const routes2 = await getUserRoutes(userId);
   if (routes2.length === 0) {
@@ -2161,7 +2381,7 @@ Rota Selecionada: ${route.name}
 `;
     }
   } else {
-    context += routes2.map((r) => `- ${r.name} (${r.mode}, ${r.totalDistance?.toFixed(2) || "N/A"} km)`).join("\n");
+    context += routes2.map((r) => `- ${r.name} (${r.mode}, ${formatDistanceKm(r.totalDistance)} km)`).join("\n");
   }
   const stats = await getUserStats(userId);
   if (stats) {
@@ -2221,15 +2441,64 @@ function formatChatHistory(messages) {
 
 // server/routers.ts
 function toOptionalLocation(address, latitudeValue, longitudeValue) {
+  const normalizedAddress = typeof address === "string" ? address.trim() : "";
   const latitude = Number(latitudeValue);
   const longitude = Number(longitudeValue);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     return void 0;
   }
+  if (!normalizedAddress && latitude === 0 && longitude === 0) {
+    return void 0;
+  }
   return {
-    address: typeof address === "string" ? address : void 0,
+    address: normalizedAddress || void 0,
     latitude,
     longitude
+  };
+}
+function hasMissingCoordinates(location) {
+  return location.latitude === 0 && location.longitude === 0;
+}
+function buildSequentialRoute(locations, options = {}) {
+  const waypoints = locations.map((location, index) => ({
+    ...location,
+    sequence: index
+  }));
+  if (waypoints.length === 0) {
+    return {
+      sequence: [],
+      totalDistance: 0,
+      totalTime: 0,
+      waypoints: []
+    };
+  }
+  let totalDistance = 0;
+  let totalTime = 0;
+  if (options.startLocation) {
+    const firstSegmentDistance = calculateDistance(options.startLocation, waypoints[0]);
+    totalDistance += firstSegmentDistance;
+    totalTime += estimateTravelTime(firstSegmentDistance);
+  }
+  for (let index = 0; index < waypoints.length - 1; index++) {
+    const current = waypoints[index];
+    const next = waypoints[index + 1];
+    const segmentDistance = calculateDistance(current, next);
+    totalDistance += segmentDistance;
+    totalTime += estimateTravelTime(segmentDistance);
+  }
+  if (options.endLocation) {
+    const lastSegmentDistance = calculateDistance(
+      waypoints[waypoints.length - 1],
+      options.endLocation
+    );
+    totalDistance += lastSegmentDistance;
+    totalTime += estimateTravelTime(lastSegmentDistance);
+  }
+  return {
+    sequence: waypoints.map((_, index) => index),
+    totalDistance: Math.round(totalDistance * 100) / 100,
+    totalTime,
+    waypoints
   };
 }
 async function requireUserRoute(routeId, userId) {
@@ -2242,9 +2511,105 @@ async function requireUserRoute(routeId, userId) {
   }
   return route;
 }
+async function optimizeUserRoute(routeId, userId, requestedMode, options) {
+  const route = await requireUserRoute(routeId, userId);
+  const routeStops = await getRouteStops(routeId);
+  if (routeStops.length === 0) {
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: "A rota nao tem paradas."
+    });
+  }
+  const locations = routeStops.map((stop) => ({
+    latitude: parseFloat(String(stop.latitude ?? 0)),
+    longitude: parseFloat(String(stop.longitude ?? 0)),
+    address: stop.address,
+    notes: stop.notes ?? void 0
+  }));
+  const validation = validateLocations(locations);
+  if (!validation.valid) {
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: validation.error
+    });
+  }
+  const missingCoordinateIndex = locations.findIndex(hasMissingCoordinates);
+  if (missingCoordinateIndex !== -1) {
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: `Coordenadas ausentes na parada ${missingCoordinateIndex + 1}.`
+    });
+  }
+  const startLocation = toOptionalLocation(
+    route.startLocation,
+    route.startLatitude,
+    route.startLongitude
+  );
+  const endLocation = toOptionalLocation(
+    route.endLocation,
+    route.endLatitude,
+    route.endLongitude
+  );
+  const endpointValidation = validateLocations(
+    [startLocation, endLocation].filter(Boolean)
+  );
+  if ((startLocation || endLocation) && !endpointValidation.valid) {
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: endpointValidation.error
+    });
+  }
+  if ([startLocation, endLocation].filter(Boolean).some(
+    (location) => hasMissingCoordinates(location)
+  )) {
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: "Coordenadas ausentes no inicio ou fim da rota."
+    });
+  }
+  const mode = requestedMode || route.mode;
+  const optimized = options?.respectInputSequence ? buildSequentialRoute(locations, { startLocation, endLocation }) : optimizeRoute(locations, mode, 0, {
+    startLocation,
+    endLocation
+  });
+  await updateRoute(routeId, userId, {
+    totalDistance: optimized.totalDistance,
+    totalTime: optimized.totalTime,
+    status: "optimized"
+  });
+  await deleteRouteStops(routeId);
+  const updatedStops = optimized.waypoints.map((wp) => ({
+    address: wp.address || "",
+    latitude: wp.latitude,
+    longitude: wp.longitude,
+    sequence: wp.sequence,
+    notes: wp.notes
+  }));
+  await createStops(routeId, updatedStops);
+  return optimized;
+}
 var credentialsSchema = z2.object({
   email: z2.string().email("Informe um e-mail valido."),
   password: z2.string().min(8, "A senha deve ter pelo menos 8 caracteres.")
+});
+var routeModeSchema = z2.enum(["shortest_distance", "shortest_time", "balanced"]);
+var routeCreateSchema = z2.object({
+  name: z2.string().min(1),
+  description: z2.string().optional(),
+  mode: routeModeSchema,
+  startLocation: z2.string().optional(),
+  startLatitude: z2.number().optional(),
+  startLongitude: z2.number().optional(),
+  endLocation: z2.string().optional(),
+  endLatitude: z2.number().optional(),
+  endLongitude: z2.number().optional()
+});
+var stopCreateSchema = z2.object({
+  address: z2.string(),
+  latitude: z2.number().optional(),
+  longitude: z2.number().optional(),
+  sequence: z2.number(),
+  notes: z2.string().optional()
 });
 function sanitizeUser(user) {
   if (!user) return null;
@@ -2332,24 +2697,43 @@ var appRouter = router({
     get: protectedProcedure.input(z2.object({ id: z2.number() })).query(
       ({ ctx, input }) => getRouteById(input.id, ctx.user.id)
     ),
-    create: protectedProcedure.input(z2.object({
-      name: z2.string().min(1),
-      description: z2.string().optional(),
-      mode: z2.enum(["shortest_distance", "shortest_time", "balanced"]),
-      startLocation: z2.string().optional(),
-      startLatitude: z2.number().optional(),
-      startLongitude: z2.number().optional(),
-      endLocation: z2.string().optional(),
-      endLatitude: z2.number().optional(),
-      endLongitude: z2.number().optional()
-    })).mutation(
+    create: protectedProcedure.input(routeCreateSchema).mutation(
       ({ ctx, input }) => createRoute(ctx.user.id, input)
     ),
+    createAndOptimize: protectedProcedure.input(routeCreateSchema.extend({
+      stops: z2.array(stopCreateSchema).min(2),
+      respectInputSequence: z2.boolean().optional()
+    })).mutation(async ({ ctx, input }) => {
+      const { stops: stops2, respectInputSequence, ...routeInput } = input;
+      const route = await createRoute(ctx.user.id, routeInput);
+      if (!route) {
+        throw new TRPCError3({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Nao foi possivel criar a rota."
+        });
+      }
+      try {
+        await createStops(route.id, stops2);
+        const optimized = await optimizeUserRoute(route.id, ctx.user.id, input.mode, {
+          respectInputSequence
+        });
+        const updatedRoute = await getRouteById(route.id, ctx.user.id);
+        return {
+          route: updatedRoute ?? route,
+          optimization: optimized
+        };
+      } catch (error) {
+        await deleteRoute(route.id, ctx.user.id).catch((deleteError) => {
+          console.error("[Routes] Failed to rollback route creation:", deleteError);
+        });
+        throw error;
+      }
+    }),
     update: protectedProcedure.input(z2.object({
       id: z2.number(),
       name: z2.string().optional(),
       description: z2.string().optional(),
-      mode: z2.enum(["shortest_distance", "shortest_time", "balanced"]).optional(),
+      mode: routeModeSchema.optional(),
       totalDistance: z2.number().optional(),
       totalTime: z2.number().optional(),
       status: z2.enum(["draft", "optimized", "completed", "cancelled"]).optional(),
@@ -2368,56 +2752,9 @@ var appRouter = router({
     ),
     optimize: protectedProcedure.input(z2.object({
       id: z2.number(),
-      mode: z2.enum(["shortest_distance", "shortest_time", "balanced"]).optional()
+      mode: routeModeSchema.optional()
     })).mutation(async ({ ctx, input }) => {
-      const route = await getRouteById(input.id, ctx.user.id);
-      if (!route) throw new Error("Route not found");
-      const routeStops = await getRouteStops(input.id);
-      if (routeStops.length === 0) throw new Error("Route has no stops");
-      const locations = routeStops.map((stop) => ({
-        latitude: parseFloat(String(stop.latitude || 0)),
-        longitude: parseFloat(String(stop.longitude || 0)),
-        address: stop.address,
-        notes: stop.notes ?? void 0
-      }));
-      const validation = validateLocations(locations);
-      if (!validation.valid) throw new Error(validation.error);
-      const startLocation = toOptionalLocation(
-        route.startLocation,
-        route.startLatitude,
-        route.startLongitude
-      );
-      const endLocation = toOptionalLocation(
-        route.endLocation,
-        route.endLatitude,
-        route.endLongitude
-      );
-      const endpointValidation = validateLocations(
-        [startLocation, endLocation].filter(Boolean)
-      );
-      if ((startLocation || endLocation) && !endpointValidation.valid) {
-        throw new Error(endpointValidation.error);
-      }
-      const mode = input.mode || route.mode;
-      const optimized = optimizeRoute(locations, mode, 0, {
-        startLocation,
-        endLocation
-      });
-      await updateRoute(input.id, ctx.user.id, {
-        totalDistance: optimized.totalDistance,
-        totalTime: optimized.totalTime,
-        status: "optimized"
-      });
-      await deleteRouteStops(input.id);
-      const updatedStops = optimized.waypoints.map((wp) => ({
-        address: wp.address || "",
-        latitude: wp.latitude,
-        longitude: wp.longitude,
-        sequence: wp.sequence,
-        notes: wp.notes
-      }));
-      await createStops(input.id, updatedStops);
-      return optimized;
+      return optimizeUserRoute(input.id, ctx.user.id, input.mode);
     })
   }),
   stops: router({
@@ -2427,13 +2764,7 @@ var appRouter = router({
     }),
     create: protectedProcedure.input(z2.object({
       routeId: z2.number(),
-      stops: z2.array(z2.object({
-        address: z2.string(),
-        latitude: z2.number().optional(),
-        longitude: z2.number().optional(),
-        sequence: z2.number(),
-        notes: z2.string().optional()
-      }))
+      stops: z2.array(stopCreateSchema)
     })).mutation(async ({ ctx, input }) => {
       await requireUserRoute(input.routeId, ctx.user.id);
       return createStops(input.routeId, input.stops);
@@ -2599,6 +2930,7 @@ function serveStatic(app2) {
 }
 
 // server/_core/index.ts
+init_db();
 function normalizeOrigin(origin) {
   try {
     return new URL(origin).origin;
@@ -2664,12 +2996,33 @@ function createApp(options = {}) {
     }
     next();
   });
-  app2.get("/api/health", (_req, res) => {
-    res.json({
-      ok: true,
+  app2.get("/api/health", async (_req, res) => {
+    const database = await getDatabaseHealth();
+    const databaseAvailable = ENV.databaseUrl ? database.connected : ENV.allowEphemeralDb || !ENV.isProduction;
+    res.status(databaseAvailable ? 200 : 500).json({
+      ok: databaseAvailable,
       app: "EconoRotas",
       environment: ENV.isProduction ? "production" : "development",
+      mode: ENV.databaseUrl ? "persistent" : "local-fallback",
+      database,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  });
+  app2.get("/api/app-update/android", (_req, res) => {
+    const latestVersion = ENV.androidUpdateLatestVersion.trim();
+    const apkUrl = ENV.androidUpdateApkUrl.trim();
+    if (!latestVersion || !apkUrl) {
+      res.json({ enabled: false });
+      return;
+    }
+    res.json({
+      enabled: true,
+      latestVersion,
+      apkUrl,
+      required: ENV.androidUpdateRequired,
+      minimumSupportedVersion: ENV.androidMinimumSupportedVersion.trim() || void 0,
+      message: ENV.androidUpdateMessage.trim() || void 0,
+      publishedAt: ENV.androidUpdatePublishedAt.trim() || void 0
     });
   });
   app2.use(express2.json({ limit: "50mb" }));

@@ -23,20 +23,23 @@ O arquivo `vercel.json` ja define esses valores e direciona:
 - `/manus-storage/*` para a mesma funcao, mantendo compatibilidade
 - qualquer outra rota para `index.html`, necessario para o React Router/Wouter
 
-## Variaveis para demonstracao sem cartao
+## Variaveis obrigatorias
 
 Defina em Environment Variables:
 
 ```env
+DATABASE_URL=mysql://USUARIO:SENHA@HOST:3306/NOME_DO_BANCO
+DATABASE_SSL=true
+DATABASE_SSL_REJECT_UNAUTHORIZED=true
 JWT_SECRET=gere_uma_chave_com_mais_de_32_caracteres
-ALLOW_EPHEMERAL_DB=true
+ALLOW_EPHEMERAL_DB=false
 VITE_ENABLE_DEV_LOGIN=false
 PUBLIC_APP_URL=https://econo-rotas.vercel.app
 ALLOWED_ORIGINS=https://econo-rotas.vercel.app,https://econo-rotas-bxso2tmdj-anderson-s-projects-ef32a938.vercel.app,capacitor://localhost,https://localhost,http://localhost
 NOMINATIM_CONTACT_EMAIL=placeiagestao@gmail.com
 ```
 
-`ALLOW_EPHEMERAL_DB=true` permite subir sem banco pago/cartao. Os dados podem ser perdidos em reinicios/cold starts da Vercel. Para producao real, troque por um MySQL externo e defina `DATABASE_URL`.
+`DATABASE_URL` e obrigatorio. O backend nao sobe em producao com banco temporario, porque isso apaga usuarios, rotas e historico em reinicios/cold starts.
 
 Antes de tratar como producao, rode:
 
@@ -75,7 +78,7 @@ $env:DATABASE_SSL="true"
 corepack pnpm run db:migrate
 ```
 
-Sem `DATABASE_URL`, a Vercel usa memoria temporaria. Isso serve para teste e demonstracao, mas nao garante permanencia das rotas.
+Sem `DATABASE_URL`, o deploy de producao falha por decisao do backend.
 
 ## Validacao
 
