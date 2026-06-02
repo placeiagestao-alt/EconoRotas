@@ -9,7 +9,12 @@ function normalizeVercelRewriteUrl(req: { url?: string }) {
   if (!route) return;
 
   const path = currentUrl.searchParams.get("path")?.replace(/^\/+/, "") ?? "";
-  const prefix = route === "manus-storage" ? "/manus-storage" : "/api";
+  const prefix =
+    route === "manus-storage"
+      ? "/manus-storage"
+      : route === "asset-missing"
+        ? "/assets"
+        : "/api";
 
   currentUrl.searchParams.delete("__route");
   currentUrl.searchParams.delete("path");

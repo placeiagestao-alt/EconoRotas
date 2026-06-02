@@ -10,17 +10,54 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import PwaStatusMonitor from "./components/PwaStatusMonitor";
 import { ThemeProvider } from "./contexts/ThemeContext";
 
-const Home = lazy(() => import("./pages/Home"));
-const Routes = lazy(() => import("./pages/Routes"));
-const RouteDetail = lazy(() => import("./pages/RouteDetail"));
-const CreateRoute = lazy(() => import("./pages/CreateRoute"));
-const Analytics = lazy(() => import("./pages/Analytics"));
-const Chat = lazy(() => import("./pages/Chat"));
-const Schedules = lazy(() => import("./pages/Schedules"));
-const History = lazy(() => import("./pages/History"));
-const Profile = lazy(() => import("./pages/Profile"));
-const DownloadApk = lazy(() => import("./pages/DownloadApk"));
-const Operations = lazy(() => import("./pages/Operations"));
+const CHUNK_REFRESH_KEY = "econorotas:chunk-refresh";
+
+function isChunkLoadError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  return /dynamically imported module|Failed to fetch|Importing a module script failed|error loading dynamically imported module/i.test(
+    error.message
+  );
+}
+
+function reloadOnceForChunkError() {
+  if (typeof window === "undefined") return false;
+
+  const now = Date.now();
+  const lastReload = Number(window.sessionStorage.getItem(CHUNK_REFRESH_KEY) || 0);
+  if (lastReload && now - lastReload < 30_000) return false;
+
+  window.sessionStorage.setItem(CHUNK_REFRESH_KEY, String(now));
+  window.dispatchEvent(new CustomEvent("econorotas:pwa-update"));
+  setTimeout(() => window.location.reload(), 50);
+  return true;
+}
+
+function lazyPage<T extends { default: ComponentType<any> }>(
+  importer: () => Promise<T>
+) {
+  return lazy(() =>
+    importer().catch((error) => {
+      if (isChunkLoadError(error) && reloadOnceForChunkError()) {
+        return {
+          default: () => <DashboardLayoutSkeleton />,
+        } as unknown as T;
+      }
+      throw error;
+    })
+  );
+}
+
+const Home = lazyPage(() => import("./pages/Home"));
+const Routes = lazyPage(() => import("./pages/Routes"));
+const RouteDetail = lazyPage(() => import("./pages/RouteDetail"));
+const CreateRoute = lazyPage(() => import("./pages/CreateRoute"));
+const Analytics = lazyPage(() => import("./pages/Analytics"));
+const Chat = lazyPage(() => import("./pages/Chat"));
+const Schedules = lazyPage(() => import("./pages/Schedules"));
+const History = lazyPage(() => import("./pages/History"));
+const Profile = lazyPage(() => import("./pages/Profile"));
+const DownloadApk = lazyPage(() => import("./pages/DownloadApk"));
+const Operations = lazyPage(() => import("./pages/Operations"));
 
 function ProtectedRoute({ component: Component }: { component: ComponentType }) {
   const { loading, isAuthenticated } = useAuth();

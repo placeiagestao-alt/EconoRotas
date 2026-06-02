@@ -40,6 +40,10 @@
       "destination": "/api?__route=manus-storage&path=:path*"
     },
     {
+      "source": "/assets/:path*",
+      "destination": "/api?__route=asset-missing&path=:path*"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

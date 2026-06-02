@@ -237,6 +237,32 @@ export function createApp(options: { serveClient?: boolean } = {}): Express {
 
     next();
   });
+  app.get("/assets/*", (req, res, next) => {
+    if (!req.path.endsWith(".js")) {
+      next();
+      return;
+    }
+
+    res
+      .status(200)
+      .type("application/javascript")
+      .setHeader("Cache-Control", "no-store, max-age=0")
+      .send(`
+const key = "econorotas:asset-refresh";
+try {
+  const now = Date.now();
+  const last = Number(sessionStorage.getItem(key) || 0);
+  if (!last || now - last > 30000) {
+    sessionStorage.setItem(key, String(now));
+    window.dispatchEvent(new CustomEvent("econorotas:pwa-update"));
+    setTimeout(() => window.location.reload(), 50);
+  }
+} catch {
+  setTimeout(() => window.location.reload(), 50);
+}
+export default function EconoRotasAssetRefresh() { return null; }
+`);
+  });
   app.get("/api/health", async (_req, res) => {
     const { database, fallbackStore, storageAvailable, mode } =
       await getStorageHealthSnapshot("api.health");
