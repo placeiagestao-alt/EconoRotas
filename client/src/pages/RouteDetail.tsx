@@ -3,6 +3,7 @@ import { Link, useParams } from "wouter";
 import { lazy, Suspense } from "react";
 import {
   ArrowLeft,
+  AlertTriangle,
   BellRing,
   CheckCircle2,
   Clock,
@@ -300,9 +301,14 @@ export default function RouteDetail() {
     { routeId },
     { enabled: Number.isFinite(routeId) }
   );
+  const auditQuery = trpc.routes.audit.useQuery(
+    { id: routeId },
+    { enabled: Number.isFinite(routeId) && Boolean(routeQuery.data) }
+  );
   const updateRouteMutation = trpc.routes.update.useMutation({
     onSuccess: () => {
       void utils.routes.get.invalidate({ id: routeId });
+      void utils.routes.audit.invalidate({ id: routeId });
       void utils.routes.list.invalidate();
     },
   });
@@ -311,6 +317,7 @@ export default function RouteDetail() {
       await Promise.all([
         utils.stops.list.invalidate({ routeId }),
         utils.routes.get.invalidate({ id: routeId }),
+        utils.routes.audit.invalidate({ id: routeId }),
         utils.routes.list.invalidate(),
       ]);
     },
@@ -320,6 +327,7 @@ export default function RouteDetail() {
       await Promise.all([
         utils.stops.list.invalidate({ routeId }),
         utils.routes.get.invalidate({ id: routeId }),
+        utils.routes.audit.invalidate({ id: routeId }),
         utils.routes.list.invalidate(),
       ]);
     },
@@ -333,6 +341,7 @@ export default function RouteDetail() {
         utils.routes.get.invalidate({ id: routeId }),
         utils.routes.list.invalidate(),
         utils.stops.list.invalidate({ routeId }),
+        utils.routes.audit.invalidate({ id: routeId }),
       ]);
       toast.success("Rota restante reotimizada.");
     },
@@ -347,6 +356,7 @@ export default function RouteDetail() {
         utils.routes.get.invalidate({ id: routeId }),
         utils.routes.list.invalidate(),
         utils.stops.list.invalidate({ routeId }),
+        utils.routes.audit.invalidate({ id: routeId }),
       ]);
       toast.success("Rota otimizada.");
     },
@@ -1398,6 +1408,56 @@ export default function RouteDetail() {
             </Button>
           </div>
         </div>
+
+        {auditQuery.data ? (
+          <Alert
+            className={
+              auditQuery.data.status === "approved"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-950"
+                : auditQuery.data.status === "critical"
+                ? "border-red-200 bg-red-50 text-red-950"
+                : "border-amber-200 bg-amber-50 text-amber-950"
+            }
+          >
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription>
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold">
+                    Auditor da rota:{" "}
+                    {auditQuery.data.status === "approved"
+                      ? "aprovada"
+                      : auditQuery.data.status === "critical"
+                      ? "crítica"
+                      : "atenção"}
+                  </span>
+                  <Badge variant="outline">Score {auditQuery.data.score}</Badge>
+                  <Badge variant="outline">
+                    {auditQuery.data.issueCount} alerta(s)
+                  </Badge>
+                  <Badge variant="outline">
+                    maior salto {auditQuery.data.maxLegKm.toFixed(2)} km
+                  </Badge>
+                </div>
+                {auditQuery.data.issues.length ? (
+                  <div className="space-y-1 text-sm">
+                    {auditQuery.data.issues.slice(0, 3).map((issue: any, index: number) => (
+                      <p key={`${issue.type}-${index}`}>
+                        <span className="font-medium">{issue.title}:</span>{" "}
+                        {issue.message}
+                      </p>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm">
+                    Nenhuma parada próxima pulada, salto longo ou coordenada repetida
+                    foi detectada.
+                  </p>
+                )}
+              </div>
+            </AlertDescription>
+          </Alert>
+        ) : null}
 
         {routeQuery.isLoading || stopsQuery.isLoading ? (
           <Card className="p-8 text-center text-muted-foreground">

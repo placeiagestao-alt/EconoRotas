@@ -3639,6 +3639,202 @@ async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startI
   );
 }
 
+// server/routeAudit.ts
+var IMMEDIATE_NEARBY_KM = 0.12;
+var IMMEDIATE_GAP_KM = 0.05;
+var LOCAL_NEARBY_KM = 1.5;
+var LOCAL_GAP_KM = 0.75;
+var REVISIT_RADIUS_KM = 0.25;
+var REVISIT_AFTER_JUMP_KM = 1.2;
+var FIRST_STOP_FAR_KM = 2;
+var ROAD_DETOUR_RATIO = 1.8;
+var LONG_JUMP_KM = 2.5;
+var COORDINATE_PRECISION = 5;
+function roundKm(value) {
+  return Math.round(value * 100) / 100;
+}
+function coordinateKey(stop) {
+  return `${stop.latitude.toFixed(COORDINATE_PRECISION)},${stop.longitude.toFixed(
+    COORDINATE_PRECISION
+  )}`;
+}
+function normalizeAddress(value) {
+  return (value || "").trim().toLowerCase();
+}
+function getReportStatus(criticalCount, warningCount) {
+  if (criticalCount > 0) return "critical";
+  if (warningCount > 0) return "attention";
+  return "approved";
+}
+function auditRouteSequence(stops2, options = {}) {
+  const orderedStops = [...stops2].sort((a, b) => a.sequence - b.sequence);
+  const issues = [];
+  let totalDistanceKm = 0;
+  let maxLegKm = 0;
+  if (options.requireStartLocation && !options.startLocation && orderedStops.length > 1) {
+    issues.push({
+      type: "missing_driver_origin",
+      severity: "medium",
+      title: "Rota criada sem origem do motorista",
+      message: "Sem a origem real, o sistema otimiza a sequencia entre paradas, mas pode escolher uma primeira entrega ruim para quem esta na rua."
+    });
+  }
+  if (options.usedRoadMetrics === false && orderedStops.length > 1) {
+    issues.push({
+      type: "osrm_fallback",
+      severity: "high",
+      title: "Otimizacao sem OSRM",
+      message: "A rota foi avaliada por distancia geografica. Isso pode ignorar sentidos de rua, retornos e caminhos reais."
+    });
+  }
+  for (let index2 = 0; index2 < orderedStops.length; index2 += 1) {
+    const planned = orderedStops[index2];
+    const origin = index2 === 0 ? options.startLocation : orderedStops[index2 - 1];
+    if (!origin) continue;
+    const plannedDistance = calculateDistance(origin, planned);
+    totalDistanceKm += plannedDistance;
+    maxLegKm = Math.max(maxLegKm, plannedDistance);
+    if (index2 === 0 && options.startLocation && plannedDistance >= FIRST_STOP_FAR_KM) {
+      issues.push({
+        type: "first_stop_far",
+        severity: "medium",
+        title: "Primeira parada longe da origem",
+        message: `A primeira parada esta a ${roundKm(
+          plannedDistance
+        )} km da posicao inicial informada.`,
+        toSequence: planned.sequence,
+        distanceKm: roundKm(plannedDistance)
+      });
+    }
+    if (plannedDistance >= LONG_JUMP_KM) {
+      issues.push({
+        type: "long_jump",
+        severity: "medium",
+        title: "Salto longo entre paradas",
+        message: `Trecho de ${roundKm(plannedDistance)} km entre paradas consecutivas.`,
+        fromSequence: index2 === 0 ? void 0 : orderedStops[index2 - 1].sequence,
+        toSequence: planned.sequence,
+        distanceKm: roundKm(plannedDistance)
+      });
+    }
+    const remaining = orderedStops.slice(index2 + 1);
+    let nearest = null;
+    let nearestDistance = Infinity;
+    for (const candidate of remaining) {
+      const distance = calculateDistance(origin, candidate);
+      if (distance < nearestDistance) {
+        nearest = candidate;
+        nearestDistance = distance;
+      }
+    }
+    if (!nearest) continue;
+    const gapKm = plannedDistance - nearestDistance;
+    const immediateSkip = nearestDistance <= IMMEDIATE_NEARBY_KM && gapKm >= IMMEDIATE_GAP_KM;
+    const localSkip = nearestDistance <= LOCAL_NEARBY_KM && gapKm >= LOCAL_GAP_KM;
+    if (immediateSkip || localSkip) {
+      issues.push({
+        type: "nearby_stop_skipped",
+        severity: immediateSkip ? "critical" : "high",
+        title: immediateSkip ? "Parada muito pr\xF3xima foi pulada" : "Parada pr\xF3xima deixada para depois",
+        message: `A sequ\xEAncia escolheu uma parada a ${roundKm(
+          plannedDistance
+        )} km, mas havia outra pendente a ${roundKm(nearestDistance)} km.`,
+        fromSequence: index2 === 0 ? void 0 : orderedStops[index2 - 1].sequence,
+        toSequence: planned.sequence,
+        nearestSequence: nearest.sequence,
+        distanceKm: roundKm(plannedDistance),
+        nearestDistanceKm: roundKm(nearestDistance),
+        gapKm: roundKm(gapKm)
+      });
+    }
+    for (const later of remaining) {
+      const returnDistance = calculateDistance(origin, later);
+      if (plannedDistance >= REVISIT_AFTER_JUMP_KM && returnDistance <= REVISIT_RADIUS_KM) {
+        issues.push({
+          type: "region_revisited",
+          severity: "high",
+          title: "Retorno desnecessario para regiao proxima",
+          message: `A rota sai para ${roundKm(
+            plannedDistance
+          )} km, mas ainda existe parada a ${roundKm(
+            returnDistance
+          )} km da regiao atual que ficara para depois.`,
+          fromSequence: index2 === 0 ? void 0 : orderedStops[index2 - 1].sequence,
+          toSequence: planned.sequence,
+          nearestSequence: later.sequence,
+          distanceKm: roundKm(plannedDistance),
+          nearestDistanceKm: roundKm(returnDistance)
+        });
+        break;
+      }
+    }
+  }
+  if (options.actualTotalDistanceKm && totalDistanceKm > 0 && options.actualTotalDistanceKm / totalDistanceKm >= ROAD_DETOUR_RATIO) {
+    issues.push({
+      type: "high_road_detour",
+      severity: "high",
+      title: "Distancia por rua muito maior que a estimada",
+      message: `A distancia por rua ficou ${roundKm(
+        options.actualTotalDistanceKm / totalDistanceKm
+      )}x maior que a distancia em linha reta. Verifique sentidos de rua, acessos e retornos.`,
+      distanceKm: roundKm(options.actualTotalDistanceKm),
+      nearestDistanceKm: roundKm(totalDistanceKm)
+    });
+  }
+  const coordinateGroups = /* @__PURE__ */ new Map();
+  for (const stop of orderedStops) {
+    if (!Number.isFinite(stop.latitude) || !Number.isFinite(stop.longitude)) {
+      continue;
+    }
+    const key = coordinateKey(stop);
+    coordinateGroups.set(key, [...coordinateGroups.get(key) || [], stop]);
+  }
+  for (const group of Array.from(coordinateGroups.values())) {
+    const uniqueAddresses = Array.from(
+      new Set(group.map((stop) => normalizeAddress(stop.address)).filter(Boolean))
+    );
+    if (group.length > 1 && uniqueAddresses.length > 1) {
+      issues.push({
+        type: "duplicate_coordinates",
+        severity: "medium",
+        title: "Endere\xE7os diferentes com a mesma coordenada",
+        message: `${group.length} paradas ca\xEDram no mesmo ponto do mapa. Isso pode indicar geocodifica\xE7\xE3o aproximada.`,
+        stopSequence: group[0].sequence,
+        addresses: group.map((stop) => stop.address || `Parada ${stop.sequence + 1}`)
+      });
+    }
+  }
+  const hasBadPreservedSequence = options.respectInputSequence && issues.length > 0;
+  if (hasBadPreservedSequence) {
+    issues.unshift({
+      type: "bad_preserved_sequence",
+      severity: "high",
+      title: "Sequencia da planilha preservada com alertas",
+      message: "A rota respeitou a ordem original da tabela, mas o auditor encontrou sinais de sequencia ruim. Use otimizar rota se a operacao permitir."
+    });
+  }
+  const finalCriticalCount = issues.filter((issue) => issue.severity === "critical").length;
+  const finalWarningCount = issues.filter((issue) => issue.severity !== "critical").length;
+  const highCount = issues.filter((issue) => issue.severity === "high").length;
+  const mediumCount = issues.filter((issue) => issue.severity === "medium").length;
+  const lowCount = issues.filter((issue) => issue.severity === "low").length;
+  const score = Math.max(
+    0,
+    100 - finalCriticalCount * 30 - highCount * 18 - mediumCount * 10 - lowCount * 4
+  );
+  return {
+    status: getReportStatus(finalCriticalCount, finalWarningCount),
+    score,
+    stopCount: orderedStops.length,
+    issueCount: issues.length,
+    criticalCount: finalCriticalCount,
+    warningCount: finalWarningCount,
+    totalDistanceKm: roundKm(totalDistanceKm),
+    maxLegKm: roundKm(maxLegKm),
+    issues
+  };
+}
+
 // server/_core/llm.ts
 init_env();
 var ensureArray = (value) => Array.isArray(value) ? value : [value];
@@ -4353,6 +4549,24 @@ function replaceImilePackageInNotes(notes, sequence) {
   const parts = (notes || "").split("|").map((part) => part.trim()).filter(Boolean).filter((part) => !/^(Pacote|STOP)\s*:/i.test(part));
   return [packageNote, ...parts].join(" | ");
 }
+function routeToAuditableStops(route) {
+  return route.waypoints.map((waypoint) => ({
+    latitude: waypoint.latitude,
+    longitude: waypoint.longitude,
+    address: waypoint.address,
+    notes: waypoint.notes,
+    sequence: waypoint.sequence
+  }));
+}
+function auditOptimizedRoute(route, options = {}) {
+  return auditRouteSequence(routeToAuditableStops(route), {
+    startLocation: options.startLocation,
+    requireStartLocation: true,
+    actualTotalDistanceKm: route.totalDistance,
+    usedRoadMetrics: options.usedRoadMetrics,
+    respectInputSequence: options.respectInputSequence
+  });
+}
 async function requireUserRoute(routeId, userId) {
   const route = await getRouteById(routeId, userId);
   if (!route) {
@@ -4430,8 +4644,29 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     endLocation,
     localityMode: options?.localityMode
   };
-  const optimizedWithRoadMetrics = options?.respectInputSequence ? await buildSequentialRouteWithRoadMetrics(locations, roadMetricOptions) : await optimizeRouteWithRoadMetrics(locations, mode, 0, roadMetricOptions);
+  let optimizedWithRoadMetrics = null;
+  let auditSource = "geo-default";
+  if (options?.respectInputSequence) {
+    optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
+      locations,
+      roadMetricOptions
+    );
+    auditSource = optimizedWithRoadMetrics ? "road-sequential" : "geo-sequential";
+  } else {
+    optimizedWithRoadMetrics = await optimizeRouteWithRoadMetrics(
+      locations,
+      mode,
+      0,
+      roadMetricOptions
+    );
+    auditSource = optimizedWithRoadMetrics ? "road-default" : "geo-default";
+  }
   const optimized = optimizedWithRoadMetrics ?? (options?.respectInputSequence ? buildSequentialRoute(locations, roadMetricOptions) : optimizeRoute(locations, mode, 0, roadMetricOptions));
+  const audit = auditOptimizedRoute(optimized, {
+    startLocation,
+    usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
+    respectInputSequence: Boolean(options?.respectInputSequence)
+  });
   await updateRoute(routeId, userId, {
     totalDistance: optimized.totalDistance,
     totalTime: optimized.totalTime,
@@ -4446,7 +4681,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     notes: replaceImilePackageInNotes(wp.notes, wp.sequence)
   }));
   await createStops(routeId, updatedStops);
-  return optimized;
+  return { ...optimized, audit, auditSource };
 }
 var credentialsSchema = z2.object({
   email: z2.string().email("Informe um e-mail valido."),
@@ -4542,6 +4777,29 @@ async function recordOperationalEvent(userId, input) {
     console.warn("[OperationalEvent] Failed to record event:", error);
     return null;
   }
+}
+async function recordRouteAuditEvent(userId, routeId, audit, source) {
+  if (!audit || audit.status === "approved") return;
+  const firstIssue = audit.issues[0];
+  await recordOperationalEvent(userId, {
+    type: "route_audit_flagged",
+    severity: audit.status === "critical" ? "error" : "warning",
+    source: "routes.audit",
+    title: audit.status === "critical" ? "Auditor reprovou a sequ\xEAncia" : "Auditor encontrou pontos de aten\xE7\xE3o",
+    routeId,
+    message: firstIssue?.message || "A rota tem sinais de sequ\xEAncia incoerente.",
+    metadata: {
+      auditSource: source,
+      status: audit.status,
+      score: audit.score,
+      issueCount: audit.issueCount,
+      criticalCount: audit.criticalCount,
+      warningCount: audit.warningCount,
+      totalDistanceKm: audit.totalDistanceKm,
+      maxLegKm: audit.maxLegKm,
+      issues: audit.issues.slice(0, 8)
+    }
+  });
 }
 async function setPasswordSession(ctx, openId, name, email) {
   const sessionToken = await sdk.createSessionToken(openId, {
@@ -4758,6 +5016,30 @@ var appRouter = router({
     get: protectedProcedure.input(z2.object({ id: z2.number() })).query(
       ({ ctx, input }) => getRouteById(input.id, ctx.user.id)
     ),
+    audit: protectedProcedure.input(z2.object({ id: z2.number() })).query(async ({ ctx, input }) => {
+      const route = await requireUserRoute(input.id, ctx.user.id);
+      const routeStops = await getRouteStops(input.id);
+      const startLocation = toOptionalLocation(
+        route.startLocation,
+        route.startLatitude,
+        route.startLongitude
+      );
+      return auditRouteSequence(
+        routeStops.map((stop) => ({
+          id: Number(stop.id),
+          latitude: parseFloat(String(stop.latitude ?? 0)),
+          longitude: parseFloat(String(stop.longitude ?? 0)),
+          address: stop.address,
+          notes: stop.notes ?? void 0,
+          sequence: Number(stop.sequence)
+        })),
+        {
+          startLocation,
+          requireStartLocation: false,
+          actualTotalDistanceKm: Number(route.totalDistance ?? 0)
+        }
+      );
+    }),
     create: protectedProcedure.input(routeCreateSchema).mutation(async ({ ctx, input }) => {
       const route = await createRoute(ctx.user.id, input);
       if (route) {
@@ -4803,9 +5085,19 @@ var appRouter = router({
             mode: input.mode,
             respectInputSequence: Boolean(respectInputSequence),
             totalDistance: optimized.totalDistance,
-            totalTime: optimized.totalTime
+            totalTime: optimized.totalTime,
+            auditSource: optimized.auditSource,
+            auditStatus: optimized.audit?.status,
+            auditScore: optimized.audit?.score,
+            auditIssueCount: optimized.audit?.issueCount
           }
         });
+        await recordRouteAuditEvent(
+          ctx.user.id,
+          route.id,
+          optimized.audit,
+          optimized.auditSource
+        );
         return {
           route: updatedRoute ?? route,
           optimization: optimized
@@ -4886,9 +5178,19 @@ var appRouter = router({
           localityMode: input.localityMode,
           totalDistance: optimized.totalDistance,
           totalTime: optimized.totalTime,
-          startedFromCurrentLocation: Boolean(startLocation)
+          startedFromCurrentLocation: Boolean(startLocation),
+          auditSource: optimized.auditSource,
+          auditStatus: optimized.audit?.status,
+          auditScore: optimized.audit?.score,
+          auditIssueCount: optimized.audit?.issueCount
         }
       });
+      await recordRouteAuditEvent(
+        ctx.user.id,
+        input.id,
+        optimized.audit,
+        optimized.auditSource
+      );
       return optimized;
     }),
     optimizeRemaining: protectedProcedure.input(z2.object({
@@ -4927,9 +5229,19 @@ var appRouter = router({
           localityMode: input.localityMode,
           totalDistance: optimized.totalDistance,
           totalTime: optimized.totalTime,
-          startedFromCurrentLocation: Boolean(startLocation)
+          startedFromCurrentLocation: Boolean(startLocation),
+          auditSource: optimized.auditSource,
+          auditStatus: optimized.audit?.status,
+          auditScore: optimized.audit?.score,
+          auditIssueCount: optimized.audit?.issueCount
         }
       });
+      await recordRouteAuditEvent(
+        ctx.user.id,
+        input.id,
+        optimized.audit,
+        optimized.auditSource
+      );
       return optimized;
     })
   }),

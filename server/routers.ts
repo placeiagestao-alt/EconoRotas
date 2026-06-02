@@ -27,6 +27,11 @@ import {
   buildSequentialRouteWithRoadMetrics,
   optimizeRouteWithRoadMetrics,
 } from "./osrm";
+import {
+  auditRouteSequence,
+  type AuditableStop,
+  type RouteAuditReport,
+} from "./routeAudit";
 import { chatWithLLM, formatChatHistory } from "./chat";
 import {
   fetchImileDeliveries,
@@ -185,6 +190,33 @@ function replaceImilePackageInNotes(notes: string | undefined, sequence: number)
   return [packageNote, ...parts].join(" | ");
 }
 
+function routeToAuditableStops(route: OptimizedRoute): AuditableStop[] {
+  return route.waypoints.map((waypoint) => ({
+    latitude: waypoint.latitude,
+    longitude: waypoint.longitude,
+    address: waypoint.address,
+    notes: waypoint.notes,
+    sequence: waypoint.sequence,
+  }));
+}
+
+function auditOptimizedRoute(
+  route: OptimizedRoute,
+  options: {
+    startLocation?: Location;
+    usedRoadMetrics?: boolean;
+    respectInputSequence?: boolean;
+  } = {}
+): RouteAuditReport {
+  return auditRouteSequence(routeToAuditableStops(route), {
+    startLocation: options.startLocation,
+    requireStartLocation: true,
+    actualTotalDistanceKm: route.totalDistance,
+    usedRoadMetrics: options.usedRoadMetrics,
+    respectInputSequence: options.respectInputSequence,
+  });
+}
+
 async function requireUserRoute(routeId: number, userId: number) {
   const route = await db.getRouteById(routeId, userId);
 
@@ -283,14 +315,34 @@ async function optimizeUserRoute(
     endLocation,
     localityMode: options?.localityMode,
   };
-  const optimizedWithRoadMetrics = options?.respectInputSequence
-    ? await buildSequentialRouteWithRoadMetrics(locations, roadMetricOptions)
-    : await optimizeRouteWithRoadMetrics(locations, mode, 0, roadMetricOptions);
-  const optimized =
-    optimizedWithRoadMetrics ??
-    (options?.respectInputSequence
+  let optimizedWithRoadMetrics: OptimizedRoute | null = null;
+  let auditSource = "geo-default";
+
+  if (options?.respectInputSequence) {
+    optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
+      locations,
+      roadMetricOptions
+    );
+    auditSource = optimizedWithRoadMetrics ? "road-sequential" : "geo-sequential";
+  } else {
+    optimizedWithRoadMetrics = await optimizeRouteWithRoadMetrics(
+      locations,
+      mode,
+      0,
+      roadMetricOptions
+    );
+    auditSource = optimizedWithRoadMetrics ? "road-default" : "geo-default";
+  }
+
+  const optimized = optimizedWithRoadMetrics
+    ?? (options?.respectInputSequence
       ? buildSequentialRoute(locations, roadMetricOptions)
       : optimizeRoute(locations, mode, 0, roadMetricOptions));
+  const audit = auditOptimizedRoute(optimized, {
+    startLocation,
+    usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
+    respectInputSequence: Boolean(options?.respectInputSequence),
+  });
 
   await db.updateRoute(routeId, userId, {
     totalDistance: optimized.totalDistance,
@@ -308,7 +360,7 @@ async function optimizeUserRoute(
   }));
   await db.createStops(routeId, updatedStops);
 
-  return optimized;
+  return { ...optimized, audit, auditSource };
 }
 
 const credentialsSchema = z.object({
@@ -411,6 +463,39 @@ async function recordOperationalEvent(
     console.warn("[OperationalEvent] Failed to record event:", error);
     return null;
   }
+}
+
+async function recordRouteAuditEvent(
+  userId: number,
+  routeId: number,
+  audit: RouteAuditReport | undefined,
+  source: string | undefined
+) {
+  if (!audit || audit.status === "approved") return;
+
+  const firstIssue = audit.issues[0];
+  await recordOperationalEvent(userId, {
+    type: "route_audit_flagged",
+    severity: audit.status === "critical" ? "error" : "warning",
+    source: "routes.audit",
+    title:
+      audit.status === "critical"
+        ? "Auditor reprovou a sequência"
+        : "Auditor encontrou pontos de atenção",
+    routeId,
+    message: firstIssue?.message || "A rota tem sinais de sequência incoerente.",
+    metadata: {
+      auditSource: source,
+      status: audit.status,
+      score: audit.score,
+      issueCount: audit.issueCount,
+      criticalCount: audit.criticalCount,
+      warningCount: audit.warningCount,
+      totalDistanceKm: audit.totalDistanceKm,
+      maxLegKm: audit.maxLegKm,
+      issues: audit.issues.slice(0, 8),
+    },
+  });
 }
 
 async function setPasswordSession(
@@ -665,6 +750,32 @@ export const appRouter = router({
       .query(({ ctx, input }) =>
         db.getRouteById(input.id, ctx.user.id)
       ),
+    audit: protectedProcedure.input(z.object({ id: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const route = await requireUserRoute(input.id, ctx.user.id);
+        const routeStops = await db.getRouteStops(input.id);
+        const startLocation = toOptionalLocation(
+          route.startLocation,
+          route.startLatitude,
+          route.startLongitude
+        );
+
+        return auditRouteSequence(
+          routeStops.map((stop: any) => ({
+            id: Number(stop.id),
+            latitude: parseFloat(String(stop.latitude ?? 0)),
+            longitude: parseFloat(String(stop.longitude ?? 0)),
+            address: stop.address,
+            notes: stop.notes ?? undefined,
+            sequence: Number(stop.sequence),
+          })),
+          {
+            startLocation,
+            requireStartLocation: false,
+            actualTotalDistanceKm: Number(route.totalDistance ?? 0),
+          }
+        );
+      }),
     create: protectedProcedure.input(routeCreateSchema)
       .mutation(async ({ ctx, input }) => {
         const route = await db.createRoute(ctx.user.id, input);
@@ -715,8 +826,18 @@ export const appRouter = router({
               respectInputSequence: Boolean(respectInputSequence),
               totalDistance: optimized.totalDistance,
               totalTime: optimized.totalTime,
+              auditSource: optimized.auditSource,
+              auditStatus: optimized.audit?.status,
+              auditScore: optimized.audit?.score,
+              auditIssueCount: optimized.audit?.issueCount,
             },
           });
+          await recordRouteAuditEvent(
+            ctx.user.id,
+            route.id,
+            optimized.audit,
+            optimized.auditSource
+          );
 
           return {
             route: updatedRoute ?? route,
@@ -808,8 +929,18 @@ export const appRouter = router({
             totalDistance: optimized.totalDistance,
             totalTime: optimized.totalTime,
             startedFromCurrentLocation: Boolean(startLocation),
+            auditSource: optimized.auditSource,
+            auditStatus: optimized.audit?.status,
+            auditScore: optimized.audit?.score,
+            auditIssueCount: optimized.audit?.issueCount,
           },
         });
+        await recordRouteAuditEvent(
+          ctx.user.id,
+          input.id,
+          optimized.audit,
+          optimized.auditSource
+        );
         return optimized;
       }),
     optimizeRemaining: protectedProcedure.input(z.object({
@@ -857,8 +988,18 @@ export const appRouter = router({
             totalDistance: optimized.totalDistance,
             totalTime: optimized.totalTime,
             startedFromCurrentLocation: Boolean(startLocation),
+            auditSource: optimized.auditSource,
+            auditStatus: optimized.audit?.status,
+            auditScore: optimized.audit?.score,
+            auditIssueCount: optimized.audit?.issueCount,
           },
         });
+        await recordRouteAuditEvent(
+          ctx.user.id,
+          input.id,
+          optimized.audit,
+          optimized.auditSource
+        );
         return optimized;
       }),
   }),
