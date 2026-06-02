@@ -323,6 +323,50 @@ describe("Route Optimization", () => {
     ]);
   });
 
+  it("does not leave a corner delivery behind when another stop is only meters away", () => {
+    const result = optimizeRoute(
+      [
+        { latitude: -22.120000, longitude: -51.400000, address: "next saved stop" },
+        { latitude: -22.120010, longitude: -51.400010, address: "corner house 10m away" },
+        { latitude: -22.124500, longitude: -51.404500, address: "farther stop" },
+        { latitude: -22.124600, longitude: -51.404600, address: "farther neighbor" },
+      ],
+      "shortest_distance",
+      0,
+      {
+        startLocation: { latitude: -22.119990, longitude: -51.399990 },
+        localityMode: "local",
+      }
+    );
+
+    expect(result.waypoints.slice(0, 2).map((waypoint) => waypoint.address)).toEqual([
+      "next saved stop",
+      "corner house 10m away",
+    ]);
+  });
+
+  it("prioritizes a pending stop within the immediate radius over a global detour", () => {
+    const result = optimizeRoute(
+      [
+        { latitude: -22.120000, longitude: -51.400000, address: "current street 1" },
+        { latitude: -22.120030, longitude: -51.400020, address: "current street 2" },
+        { latitude: -22.121100, longitude: -51.401000, address: "outside block" },
+        { latitude: -22.118900, longitude: -51.399100, address: "return later candidate" },
+      ],
+      "shortest_distance",
+      0,
+      {
+        startLocation: { latitude: -22.119990, longitude: -51.399990 },
+        localityMode: "strict",
+      }
+    );
+
+    expect(result.waypoints.slice(0, 2).map((waypoint) => waypoint.address)).toEqual([
+      "current street 1",
+      "current street 2",
+    ]);
+  });
+
   describe("calculateTotalDistance", () => {
     it("calculates total distance for sequence", () => {
       const locations: Location[] = [

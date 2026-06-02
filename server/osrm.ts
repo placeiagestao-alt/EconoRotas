@@ -23,6 +23,8 @@ type RoadMatrix = {
 };
 
 type LocalitySettings = {
+  immediateRadius: number;
+  immediateExtraThreshold: number;
   localRadius: number;
   ratioThreshold: number;
   extraThreshold: number;
@@ -35,6 +37,8 @@ function getLocalitySettings(
 ): LocalitySettings {
   if (localityMode === "strict") {
     return {
+      immediateRadius: 0.25,
+      immediateExtraThreshold: 0.03,
       localRadius: 2.5,
       ratioThreshold: 1.12,
       extraThreshold: 0.08,
@@ -45,6 +49,8 @@ function getLocalitySettings(
 
   if (localityMode === "balanced") {
     return {
+      immediateRadius: 0.08,
+      immediateExtraThreshold: 0.08,
       localRadius: 1.5,
       ratioThreshold: 1.55,
       extraThreshold: 0.35,
@@ -54,6 +60,8 @@ function getLocalitySettings(
   }
 
   return {
+    immediateRadius: 0.12,
+    immediateExtraThreshold: 0.05,
     localRadius: 2,
     ratioThreshold: 1.28,
     extraThreshold: 0.18,
@@ -67,6 +75,13 @@ function isAvoidableLocalJump(
   plannedMetric: number,
   settings: LocalitySettings
 ) {
+  if (
+    nearestMetric <= settings.immediateRadius &&
+    plannedMetric - nearestMetric >= settings.immediateExtraThreshold
+  ) {
+    return true;
+  }
+
   const significantlyCloser =
     plannedMetric >
     Math.max(
@@ -332,7 +347,7 @@ function enforceLocalNearestRoadSequence(
   initialSequence: number[],
   objective: MatrixMode,
   startNodeIndex?: number,
-  localityMode: RouteOptimizationOptions["localityMode"] = "balanced"
+  localityMode: RouteOptimizationOptions["localityMode"] = "local"
 ) {
   const remaining = new Set(initialSequence);
   const sequence: number[] = [];
@@ -454,60 +469,60 @@ export async function optimizeRouteWithRoadMetrics(
       objective,
       result.startNodeIndex
     );
-    const improved = improveSequenceWithTwoOpt(
-      result.matrix,
+    const seedSequences = [
       nearestSequence,
-      objective,
-      result.startNodeIndex,
-      result.endNodeIndex
-    );
-    const candidateSequences = [
-      nearestSequence,
-      improved,
-      enforceLocalNearestRoadSequence(
-        result.matrix,
-        improved,
-        objective,
-        result.startNodeIndex,
-        options.localityMode
-      ),
+      deliveryNodeIndexes,
+      [...deliveryNodeIndexes].reverse(),
     ];
 
-    for (const candidateSequence of candidateSequences) {
-      const metric = calculateSequenceMetric(
+    for (const seedSequence of seedSequences) {
+      const improved = improveSequenceWithTwoOpt(
         result.matrix,
-        candidateSequence,
+        seedSequence,
         objective,
         result.startNodeIndex,
         result.endNodeIndex
       );
-      const penalty = calculateAvoidableJumpPenalty(
-        result.matrix,
-        candidateSequence,
-        objective,
-        result.startNodeIndex,
-        options.localityMode
-      );
-      const score = metric + penalty;
+      const candidateSequences = [
+        seedSequence,
+        improved,
+        enforceLocalNearestRoadSequence(
+          result.matrix,
+          improved,
+          objective,
+          result.startNodeIndex,
+          options.localityMode
+        ),
+      ];
 
-      if (score < bestScore) {
-        bestScore = score;
-        bestSequence = candidateSequence;
+      for (const candidateSequence of candidateSequences) {
+        const metric = calculateSequenceMetric(
+          result.matrix,
+          candidateSequence,
+          objective,
+          result.startNodeIndex,
+          result.endNodeIndex
+        );
+        const penalty = calculateAvoidableJumpPenalty(
+          result.matrix,
+          candidateSequence,
+          objective,
+          result.startNodeIndex,
+          options.localityMode
+        );
+        const score = metric + penalty;
+
+        if (score < bestScore) {
+          bestScore = score;
+          bestSequence = candidateSequence;
+        }
       }
     }
   }
 
-  const driverFriendlySequence = enforceLocalNearestRoadSequence(
-    result.matrix,
-    bestSequence ?? deliveryNodeIndexes,
-    objective,
-    result.startNodeIndex,
-    options.localityMode
-  );
-
   return buildRoadRoute(
     result.matrix,
-    driverFriendlySequence,
+    bestSequence ?? deliveryNodeIndexes,
     result.startNodeIndex,
     result.endNodeIndex
   );

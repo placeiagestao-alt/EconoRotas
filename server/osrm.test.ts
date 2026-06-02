@@ -146,4 +146,39 @@ describe("OSRM route metrics", () => {
       "near 2",
     ]);
   });
+
+  it("keeps a road-immediate corner delivery before leaving the block", async () => {
+    mockOsrmTable([
+      [0, 0.02, 0.9, 0.9, 0.02],
+      [0.02, 0, 0.88, 0.88, 0.03],
+      [0.9, 0.88, 0, 0.02, 0.9],
+      [0.9, 0.88, 0.02, 0, 0.9],
+      [0.02, 0.03, 0.9, 0.9, 0],
+    ]);
+
+    const locations: Location[] = [
+      { latitude: -22.12, longitude: -51.4, address: "corner 1" },
+      { latitude: -22.12001, longitude: -51.40001, address: "corner 2" },
+      { latitude: -22.125, longitude: -51.405, address: "far 1" },
+      { latitude: -22.12501, longitude: -51.40501, address: "far 2" },
+    ];
+
+    const result = await optimizeRouteWithRoadMetrics(
+      locations,
+      "shortest_distance",
+      0,
+      {
+        startLocation: {
+          latitude: -22.11999,
+          longitude: -51.39999,
+          address: "current driver location",
+        },
+      }
+    );
+
+    expect(result?.waypoints.slice(0, 2).map((waypoint) => waypoint.address)).toEqual([
+      "corner 1",
+      "corner 2",
+    ]);
+  });
 });

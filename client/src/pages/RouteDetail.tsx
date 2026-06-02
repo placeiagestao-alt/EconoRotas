@@ -90,6 +90,8 @@ const DEFAULT_DELIVERY_STATE: DeliveryState = {
 const EMPTY_ROUTE_POINT: RoutePoint = { address: "", latitude: 0, longitude: 0 };
 const FAR_FROM_STOP_ALERT_KM = 0.5;
 const SEQUENCE_INCOHERENCE_ALERT_KM = 0.45;
+const AUTO_SELECT_NEARBY_STOP_RADIUS_KM = 0.12;
+const AUTO_SELECT_NEARBY_STOP_EXTRA_KM = 0.05;
 const PROXIMITY_ALERT_RADIUS_METERS = 20;
 const PROXIMITY_ALERT_REPEAT_INTERVAL_MS = 2 * 60 * 1000;
 const PROXIMITY_WATCH_OPTIONS: PositionOptions = {
@@ -844,6 +846,9 @@ export default function RouteDetail() {
     let nearestPendingIndex = -1;
     let distanceFromExpectedStopKm: number | undefined;
     let sequenceGapKm: number | undefined;
+    let sequenceDistanceKm: number | undefined;
+    let nearestDistanceKm: number | undefined;
+    let autoSelectedNearbyStop = false;
 
     if (!finished) {
       try {
@@ -872,18 +877,24 @@ export default function RouteDetail() {
           Number.isFinite(nearestStop.latitude) &&
           Number.isFinite(nearestStop.longitude)
         ) {
-          const sequenceDistanceKm = calculateDistanceKm(currentPosition, {
+          sequenceDistanceKm = calculateDistanceKm(currentPosition, {
             latitude: sequenceStop.latitude,
             longitude: sequenceStop.longitude,
           });
-          const nearestDistanceKm = calculateDistanceKm(currentPosition, {
+          nearestDistanceKm = calculateDistanceKm(currentPosition, {
             latitude: nearestStop.latitude,
             longitude: nearestStop.longitude,
           });
           sequenceGapKm = sequenceDistanceKm - nearestDistanceKm;
-        }
 
-        nextIndex = firstPendingIndex;
+          if (
+            nearestDistanceKm <= AUTO_SELECT_NEARBY_STOP_RADIUS_KM &&
+            sequenceGapKm >= AUTO_SELECT_NEARBY_STOP_EXTRA_KM
+          ) {
+            nextIndex = nearestPendingIndex;
+            autoSelectedNearbyStop = true;
+          }
+        }
       } catch {
         nextIndex = firstPendingIndex;
       }
@@ -923,6 +934,15 @@ export default function RouteDetail() {
         nextStopPackage: nextStop
           ? getStopDisplayLabel(nextStop, nextIndex)
           : undefined,
+        autoSelectedNearbyStop,
+        sequenceDistanceKm:
+          typeof sequenceDistanceKm === "number"
+            ? Number(sequenceDistanceKm.toFixed(3))
+            : undefined,
+        nearestDistanceKm:
+          typeof nearestDistanceKm === "number"
+            ? Number(nearestDistanceKm.toFixed(3))
+            : undefined,
         remainingCount,
         driverLatitude: roundCoordinate(currentPosition?.latitude),
         driverLongitude: roundCoordinate(currentPosition?.longitude),
@@ -952,7 +972,7 @@ export default function RouteDetail() {
 
     if (
       typeof sequenceGapKm === "number" &&
-      sequenceGapKm > SEQUENCE_INCOHERENCE_ALERT_KM &&
+      (sequenceGapKm > SEQUENCE_INCOHERENCE_ALERT_KM || autoSelectedNearbyStop) &&
       nearestPendingIndex >= 0 &&
       nearestPendingIndex !== firstPendingIndex
     ) {
@@ -962,7 +982,9 @@ export default function RouteDetail() {
         type: "route_sequence_incoherent_detected",
         severity: "warning",
         title: "Sequência de rota possivelmente incoerente",
-        message: `A parada mais próxima estava ${sequenceGapRounded} km melhor que a sequência salva.`,
+        message: autoSelectedNearbyStop
+          ? `O app selecionou a parada pendente mais próxima, ${sequenceGapRounded} km melhor que a sequência salva.`
+          : `A parada mais próxima estava ${sequenceGapRounded} km melhor que a sequência salva.`,
         stopId: nearestStop?.id,
         metadata: {
           firstPendingIndex,
@@ -971,6 +993,7 @@ export default function RouteDetail() {
           nearestPendingIndex,
           nearestPendingStopId: nearestStop?.id,
           nearestPendingAddress: nearestStop?.address,
+          autoSelectedNearbyStop,
           sequenceGapKm: sequenceGapRounded,
           driverLatitude: roundCoordinate(currentPosition?.latitude),
           driverLongitude: roundCoordinate(currentPosition?.longitude),
@@ -991,10 +1014,21 @@ export default function RouteDetail() {
     }
 
     if (result === "delivered") {
+      if (autoSelectedNearbyStop && nextStop) {
+        toast.warning(
+          `Próxima parada ajustada para ${getStopDisplayLabel(nextStop, nextIndex)} por proximidade.`
+        );
+      }
       toast.success(
         `Entrega registrada para parada ${getStopDisplayLabel(targetStop, stopIndex)}.`
       );
       return;
+    }
+
+    if (autoSelectedNearbyStop && nextStop) {
+      toast.warning(
+        `Próxima parada ajustada para ${getStopDisplayLabel(nextStop, nextIndex)} por proximidade.`
+      );
     }
 
     toast.warning(

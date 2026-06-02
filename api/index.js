@@ -3021,6 +3021,8 @@ async function verifyPassword(password, storedHash) {
 function getLocalitySettings(localityMode = "local") {
   if (localityMode === "strict") {
     return {
+      immediateRadiusKm: 0.25,
+      immediateExtraKmThreshold: 0.03,
       localRadiusKm: 2.5,
       ratioThreshold: 1.12,
       extraKmThreshold: 0.08,
@@ -3030,6 +3032,8 @@ function getLocalitySettings(localityMode = "local") {
   }
   if (localityMode === "balanced") {
     return {
+      immediateRadiusKm: 0.08,
+      immediateExtraKmThreshold: 0.08,
       localRadiusKm: 1.5,
       ratioThreshold: 1.55,
       extraKmThreshold: 0.35,
@@ -3038,6 +3042,8 @@ function getLocalitySettings(localityMode = "local") {
     };
   }
   return {
+    immediateRadiusKm: 0.12,
+    immediateExtraKmThreshold: 0.05,
     localRadiusKm: 2,
     ratioThreshold: 1.28,
     extraKmThreshold: 0.18,
@@ -3046,6 +3052,9 @@ function getLocalitySettings(localityMode = "local") {
   };
 }
 function isAvoidableLocalJump(nearestDistance, plannedDistance, settings) {
+  if (nearestDistance <= settings.immediateRadiusKm && plannedDistance - nearestDistance >= settings.immediateExtraKmThreshold) {
+    return true;
+  }
   const significantlyCloser = plannedDistance > Math.max(
     nearestDistance * settings.ratioThreshold,
     nearestDistance + settings.extraKmThreshold
@@ -3241,34 +3250,37 @@ function optimizeOpenRoute(locations, startIndex = 0, options = {}) {
       candidateStartIndex,
       options
     );
-    const improvedSequence = improveSequenceWithTwoOpt(
-      locations,
+    const inputSequence = locations.map((_, index2) => index2);
+    const seedSequences = [
       nearestSequence,
-      options
-    );
-    const candidateSequences = [
-      nearestSequence,
-      improvedSequence,
-      enforceLocalNearestSequence(locations, improvedSequence, options)
+      inputSequence,
+      [...inputSequence].reverse()
     ];
-    for (const candidateSequence of candidateSequences) {
-      const score = calculateDriverFriendlyScore(
+    for (const seedSequence of seedSequences) {
+      const improvedSequence = improveSequenceWithTwoOpt(
         locations,
-        candidateSequence,
+        seedSequence,
         options
       );
-      if (score < bestScore) {
-        bestScore = score;
-        bestSequence = candidateSequence;
+      const candidateSequences = [
+        seedSequence,
+        improvedSequence,
+        enforceLocalNearestSequence(locations, improvedSequence, options)
+      ];
+      for (const candidateSequence of candidateSequences) {
+        const score = calculateDriverFriendlyScore(
+          locations,
+          candidateSequence,
+          options
+        );
+        if (score < bestScore) {
+          bestScore = score;
+          bestSequence = candidateSequence;
+        }
       }
     }
   }
-  const driverFriendlySequence = enforceLocalNearestSequence(
-    locations,
-    bestSequence ?? [],
-    options
-  );
-  return buildOptimizedRoute(locations, driverFriendlySequence, options);
+  return buildOptimizedRoute(locations, bestSequence ?? [], options);
 }
 function optimizeRoute(locations, mode = "balanced", startIndex = 0, options = {}) {
   return optimizeOpenRoute(locations, startIndex, options);
@@ -3297,6 +3309,8 @@ init_env();
 function getLocalitySettings2(localityMode = "local") {
   if (localityMode === "strict") {
     return {
+      immediateRadius: 0.25,
+      immediateExtraThreshold: 0.03,
       localRadius: 2.5,
       ratioThreshold: 1.12,
       extraThreshold: 0.08,
@@ -3306,6 +3320,8 @@ function getLocalitySettings2(localityMode = "local") {
   }
   if (localityMode === "balanced") {
     return {
+      immediateRadius: 0.08,
+      immediateExtraThreshold: 0.08,
       localRadius: 1.5,
       ratioThreshold: 1.55,
       extraThreshold: 0.35,
@@ -3314,6 +3330,8 @@ function getLocalitySettings2(localityMode = "local") {
     };
   }
   return {
+    immediateRadius: 0.12,
+    immediateExtraThreshold: 0.05,
     localRadius: 2,
     ratioThreshold: 1.28,
     extraThreshold: 0.18,
@@ -3322,6 +3340,9 @@ function getLocalitySettings2(localityMode = "local") {
   };
 }
 function isAvoidableLocalJump2(nearestMetric, plannedMetric, settings) {
+  if (nearestMetric <= settings.immediateRadius && plannedMetric - nearestMetric >= settings.immediateExtraThreshold) {
+    return true;
+  }
   const significantlyCloser = plannedMetric > Math.max(
     nearestMetric * settings.ratioThreshold,
     nearestMetric + settings.extraThreshold
@@ -3485,7 +3506,7 @@ function improveSequenceWithTwoOpt2(matrix, initialSequence, objective, startNod
   }
   return sequence;
 }
-function enforceLocalNearestRoadSequence(matrix, initialSequence, objective, startNodeIndex, localityMode = "balanced") {
+function enforceLocalNearestRoadSequence(matrix, initialSequence, objective, startNodeIndex, localityMode = "local") {
   const remaining = new Set(initialSequence);
   const sequence = [];
   let currentNodeIndex = startNodeIndex ?? initialSequence[0];
@@ -3563,56 +3584,56 @@ async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startI
       objective,
       result.startNodeIndex
     );
-    const improved = improveSequenceWithTwoOpt2(
-      result.matrix,
+    const seedSequences = [
       nearestSequence,
-      objective,
-      result.startNodeIndex,
-      result.endNodeIndex
-    );
-    const candidateSequences = [
-      nearestSequence,
-      improved,
-      enforceLocalNearestRoadSequence(
-        result.matrix,
-        improved,
-        objective,
-        result.startNodeIndex,
-        options.localityMode
-      )
+      deliveryNodeIndexes,
+      [...deliveryNodeIndexes].reverse()
     ];
-    for (const candidateSequence of candidateSequences) {
-      const metric = calculateSequenceMetric(
+    for (const seedSequence of seedSequences) {
+      const improved = improveSequenceWithTwoOpt2(
         result.matrix,
-        candidateSequence,
+        seedSequence,
         objective,
         result.startNodeIndex,
         result.endNodeIndex
       );
-      const penalty = calculateAvoidableJumpPenalty2(
-        result.matrix,
-        candidateSequence,
-        objective,
-        result.startNodeIndex,
-        options.localityMode
-      );
-      const score = metric + penalty;
-      if (score < bestScore) {
-        bestScore = score;
-        bestSequence = candidateSequence;
+      const candidateSequences = [
+        seedSequence,
+        improved,
+        enforceLocalNearestRoadSequence(
+          result.matrix,
+          improved,
+          objective,
+          result.startNodeIndex,
+          options.localityMode
+        )
+      ];
+      for (const candidateSequence of candidateSequences) {
+        const metric = calculateSequenceMetric(
+          result.matrix,
+          candidateSequence,
+          objective,
+          result.startNodeIndex,
+          result.endNodeIndex
+        );
+        const penalty = calculateAvoidableJumpPenalty2(
+          result.matrix,
+          candidateSequence,
+          objective,
+          result.startNodeIndex,
+          options.localityMode
+        );
+        const score = metric + penalty;
+        if (score < bestScore) {
+          bestScore = score;
+          bestSequence = candidateSequence;
+        }
       }
     }
   }
-  const driverFriendlySequence = enforceLocalNearestRoadSequence(
-    result.matrix,
-    bestSequence ?? deliveryNodeIndexes,
-    objective,
-    result.startNodeIndex,
-    options.localityMode
-  );
   return buildRoadRoute(
     result.matrix,
-    driverFriendlySequence,
+    bestSequence ?? deliveryNodeIndexes,
     result.startNodeIndex,
     result.endNodeIndex
   );
