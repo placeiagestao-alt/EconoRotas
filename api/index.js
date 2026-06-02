@@ -489,9 +489,22 @@ function readNonNegativeIntegerEnv(name, fallback) {
   const parsed = Number(process.env[name]);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
 }
+function getMysqlDriverUrl(databaseUrl) {
+  try {
+    const url = new URL(databaseUrl);
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (key.toLowerCase().startsWith("ssl")) {
+        url.searchParams.delete(key);
+      }
+    }
+    return url.toString();
+  } catch {
+    return databaseUrl;
+  }
+}
 function getDatabasePoolOptions(databaseUrl) {
   const poolOptions = {
-    uri: databaseUrl,
+    uri: getMysqlDriverUrl(databaseUrl),
     waitForConnections: true,
     connectionLimit: readPositiveIntegerEnv("DB_CONNECTION_LIMIT", 5),
     queueLimit: readNonNegativeIntegerEnv("DB_QUEUE_LIMIT", 0),
