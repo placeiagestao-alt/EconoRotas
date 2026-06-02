@@ -5,7 +5,9 @@ import { DashboardLayoutSkeleton } from "@/components/DashboardLayoutSkeleton";
 import NotFound from "@/pages/NotFound";
 import { lazy, Suspense, useEffect, type ComponentType } from "react";
 import { Route, Switch, useLocation } from "wouter";
+import ErrorReportMonitor from "./components/ErrorReportMonitor";
 import ErrorBoundary from "./components/ErrorBoundary";
+import PwaStatusMonitor from "./components/PwaStatusMonitor";
 import { ThemeProvider } from "./contexts/ThemeContext";
 
 const Home = lazy(() => import("./pages/Home"));
@@ -17,6 +19,8 @@ const Chat = lazy(() => import("./pages/Chat"));
 const Schedules = lazy(() => import("./pages/Schedules"));
 const History = lazy(() => import("./pages/History"));
 const Profile = lazy(() => import("./pages/Profile"));
+const DownloadApk = lazy(() => import("./pages/DownloadApk"));
+const Operations = lazy(() => import("./pages/Operations"));
 
 function ProtectedRoute({ component: Component }: { component: ComponentType }) {
   const { loading, isAuthenticated } = useAuth();
@@ -38,6 +42,10 @@ function Router() {
     <Suspense fallback={<DashboardLayoutSkeleton />}>
       <Switch>
         <Route path={"/"} component={Home} />
+        <Route path={"/baixar-apk"} component={DownloadApk} />
+        <Route path={"/baixar-aplicativo"} component={DownloadApk} />
+        <Route path={"/apk"} component={DownloadApk} />
+        <Route path={"/aplicativo"} component={DownloadApk} />
         <Route path={"/routes"}>
           <ProtectedRoute component={Routes} />
         </Route>
@@ -65,6 +73,9 @@ function Router() {
         <Route path={"/profile"}>
           <ProtectedRoute component={Profile} />
         </Route>
+        <Route path={"/operations"}>
+          <ProtectedRoute component={Operations} />
+        </Route>
         <Route path={"/404"} component={NotFound} />
         {/* Final fallback route */}
         <Route component={NotFound} />
@@ -87,6 +98,8 @@ function App() {
       >
         <TooltipProvider>
           <Toaster />
+          <ErrorReportMonitor />
+          <PwaStatusMonitor />
           <Router />
         </TooltipProvider>
       </ThemeProvider>

@@ -1,4 +1,4 @@
-import { decimal, int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, json, foreignKey } from "drizzle-orm/mysql-core";
+import { decimal, int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, json, foreignKey, uniqueIndex, index } from "drizzle-orm/mysql-core";
 import { relations } from "drizzle-orm";
 
 /**
@@ -16,6 +16,12 @@ export const users = mysqlTable("users", {
   openId: varchar("openId", { length: 64 }).notNull().unique(),
   name: text("name"),
   email: varchar("email", { length: 320 }).unique(),
+  phone: varchar("phone", { length: 32 }),
+  companyName: varchar("companyName", { length: 255 }),
+  city: varchar("city", { length: 128 }),
+  state: varchar("state", { length: 64 }),
+  vehicleType: varchar("vehicleType", { length: 64 }),
+  acceptedTermsAt: timestamp("acceptedTermsAt"),
   passwordHash: text("passwordHash"),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
@@ -142,6 +148,68 @@ export type ChatMessage = typeof chatHistory.$inferSelect;
 export type InsertChatMessage = typeof chatHistory.$inferInsert;
 
 /**
+ * User integrations - encrypted external service credentials per user.
+ */
+export const userIntegrations = mysqlTable("userIntegrations", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  provider: varchar("provider", { length: 64 }).notNull(),
+  label: varchar("label", { length: 255 }),
+  baseUrl: varchar("baseUrl", { length: 500 }),
+  fallbackBaseUrls: text("fallbackBaseUrls"),
+  deliveriesPath: varchar("deliveriesPath", { length: 500 }),
+  authHeader: varchar("authHeader", { length: 128 }),
+  authTokenEncrypted: text("authTokenEncrypted").notNull(),
+  country: varchar("country", { length: 16 }),
+  lang: varchar("lang", { length: 32 }),
+  resourceCode: varchar("resourceCode", { length: 64 }),
+  timezone: varchar("timezone", { length: 64 }),
+  hubCode: varchar("hubCode", { length: 128 }),
+  appVersion: varchar("appVersion", { length: 32 }),
+  sourceName: varchar("sourceName", { length: 128 }),
+  isActive: boolean("isActive").default(true).notNull(),
+  lastValidatedAt: timestamp("lastValidatedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => ({
+  userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("cascade"),
+  userProviderUnique: uniqueIndex("userIntegrations_user_provider_unique").on(table.userId, table.provider),
+}));
+
+export type UserIntegration = typeof userIntegrations.$inferSelect;
+export type InsertUserIntegration = typeof userIntegrations.$inferInsert;
+
+/**
+ * Operational events - central audit and anomaly stream for support/admin.
+ */
+export const operationalEvents = mysqlTable("operationalEvents", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId"),
+  routeId: int("routeId"),
+  stopId: int("stopId"),
+  type: varchar("type", { length: 96 }).notNull(),
+  severity: mysqlEnum("severity", ["info", "warning", "error", "fatal"]).default("info").notNull(),
+  source: varchar("source", { length: 128 }).notNull(),
+  title: varchar("title", { length: 255 }).notNull(),
+  message: text("message"),
+  runtime: varchar("runtime", { length: 64 }),
+  url: varchar("url", { length: 700 }),
+  userAgent: varchar("userAgent", { length: 700 }),
+  appVersion: varchar("appVersion", { length: 64 }),
+  metadata: json("metadata"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => ({
+  userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("set null"),
+  routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("set null"),
+  createdAtIdx: index("operationalEvents_createdAt_idx").on(table.createdAt),
+  severityIdx: index("operationalEvents_severity_idx").on(table.severity),
+  typeIdx: index("operationalEvents_type_idx").on(table.type),
+}));
+
+export type OperationalEvent = typeof operationalEvents.$inferSelect;
+export type InsertOperationalEvent = typeof operationalEvents.$inferInsert;
+
+/**
  * Relations
  */
 export const usersRelations = relations(users, ({ many }) => ({
@@ -149,6 +217,8 @@ export const usersRelations = relations(users, ({ many }) => ({
   routeSchedules: many(routeSchedules),
   routeHistory: many(routeHistory),
   chatHistory: many(chatHistory),
+  userIntegrations: many(userIntegrations),
+  operationalEvents: many(operationalEvents),
 }));
 
 export const routesRelations = relations(routes, ({ one, many }) => ({
@@ -157,6 +227,7 @@ export const routesRelations = relations(routes, ({ one, many }) => ({
   schedules: many(routeSchedules),
   history: many(routeHistory),
   chats: many(chatHistory),
+  operationalEvents: many(operationalEvents),
 }));
 
 export const stopsRelations = relations(stops, ({ one }) => ({
@@ -176,4 +247,13 @@ export const routeHistoryRelations = relations(routeHistory, ({ one }) => ({
 export const chatHistoryRelations = relations(chatHistory, ({ one }) => ({
   user: one(users, { fields: [chatHistory.userId], references: [users.id] }),
   route: one(routes, { fields: [chatHistory.routeId], references: [routes.id] }),
+}));
+
+export const userIntegrationsRelations = relations(userIntegrations, ({ one }) => ({
+  user: one(users, { fields: [userIntegrations.userId], references: [users.id] }),
+}));
+
+export const operationalEventsRelations = relations(operationalEvents, ({ one }) => ({
+  user: one(users, { fields: [operationalEvents.userId], references: [users.id] }),
+  route: one(routes, { fields: [operationalEvents.routeId], references: [routes.id] }),
 }));

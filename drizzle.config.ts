@@ -1,4 +1,5 @@
 import { defineConfig } from "drizzle-kit";
+import fs from "node:fs";
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -20,8 +21,22 @@ function getDbCredentials() {
     ssl: {
       minVersion: "TLSv1.2",
       rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
+      ca: getDatabaseSslCa(),
     },
   };
+}
+
+function getDatabaseSslCa() {
+  if (process.env.DATABASE_SSL_CA) {
+    return process.env.DATABASE_SSL_CA.replace(/\\n/g, "\n");
+  }
+
+  const caPath = process.env.DATABASE_SSL_CA_PATH;
+  if (caPath && fs.existsSync(caPath)) {
+    return fs.readFileSync(caPath, "utf8");
+  }
+
+  return undefined;
 }
 
 export default defineConfig({

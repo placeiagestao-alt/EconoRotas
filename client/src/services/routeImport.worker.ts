@@ -19,7 +19,7 @@ self.onmessage = (event: MessageEvent<ParseWorkbookRequest>) => {
     const firstSheetName = workbook.SheetNames[0];
 
     if (!firstSheetName) {
-      throw new Error("A planilha nao possui abas.");
+      throw new Error("A planilha não possui abas.");
     }
 
     const sheet = workbook.Sheets[firstSheetName];
@@ -33,7 +33,7 @@ self.onmessage = (event: MessageEvent<ParseWorkbookRequest>) => {
   } catch (error: any) {
     self.postMessage({
       ok: false,
-      message: error?.message || "Nao foi possivel processar a planilha.",
+      message: error?.message || "Não foi possível processar a planilha.",
     });
   }
 };

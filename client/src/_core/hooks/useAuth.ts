@@ -1,4 +1,5 @@
 import { getLoginUrl } from "@/const";
+import { clearAuthSessionToken } from "@/lib/authSession";
 import { trpc } from "@/lib/trpc";
 import { TRPCClientError } from "@trpc/client";
 import { useCallback, useEffect, useMemo } from "react";
@@ -20,6 +21,16 @@ function readCachedUser() {
   } catch {
     return null;
   }
+}
+
+function clearCachedUser() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(AUTH_CACHE_KEY);
+}
+
+function clearAuthState() {
+  clearCachedUser();
+  clearAuthSessionToken();
 }
 
 function isUnauthorizedError(error: unknown) {
@@ -47,6 +58,7 @@ export function useAuth(options?: UseAuthOptions) {
   const logoutMutation = trpc.auth.logout.useMutation({
     onSuccess: () => {
       utils.auth.me.setData(undefined, null);
+      clearAuthState();
     },
   });
 
@@ -63,11 +75,16 @@ export function useAuth(options?: UseAuthOptions) {
       throw error;
     } finally {
       utils.auth.me.setData(undefined, null);
+      clearAuthState();
       await utils.auth.me.invalidate();
     }
   }, [logoutMutation, utils]);
 
   const state = useMemo(() => {
+    if (isUnauthorizedError(meQuery.error)) {
+      clearAuthState();
+    }
+
     if (typeof window !== "undefined" && meQuery.data) {
       window.localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(meQuery.data));
     }
@@ -102,7 +119,7 @@ export function useAuth(options?: UseAuthOptions) {
     if (typeof window === "undefined") return;
     if (window.location.pathname === redirectPath) return;
 
-    window.location.href = redirectPath
+    window.location.href = redirectPath;
   }, [
     redirectOnUnauthenticated,
     redirectPath,

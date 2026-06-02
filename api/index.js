@@ -9,9 +9,9 @@ var __export = (target, all) => {
 };
 
 // drizzle/schema.ts
-import { decimal, int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, foreignKey } from "drizzle-orm/mysql-core";
+import { decimal, int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, json, foreignKey, uniqueIndex, index } from "drizzle-orm/mysql-core";
 import { relations } from "drizzle-orm";
-var users, routes, stops, routeSchedules, routeHistory, chatHistory, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations;
+var users, routes, stops, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations;
 var init_schema = __esm({
   "drizzle/schema.ts"() {
     "use strict";
@@ -25,6 +25,12 @@ var init_schema = __esm({
       openId: varchar("openId", { length: 64 }).notNull().unique(),
       name: text("name"),
       email: varchar("email", { length: 320 }).unique(),
+      phone: varchar("phone", { length: 32 }),
+      companyName: varchar("companyName", { length: 255 }),
+      city: varchar("city", { length: 128 }),
+      state: varchar("state", { length: 64 }),
+      vehicleType: varchar("vehicleType", { length: 64 }),
+      acceptedTermsAt: timestamp("acceptedTermsAt"),
       passwordHash: text("passwordHash"),
       loginMethod: varchar("loginMethod", { length: 64 }),
       role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
@@ -118,18 +124,69 @@ var init_schema = __esm({
       userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("cascade"),
       routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("set null")
     }));
+    userIntegrations = mysqlTable("userIntegrations", {
+      id: int("id").autoincrement().primaryKey(),
+      userId: int("userId").notNull(),
+      provider: varchar("provider", { length: 64 }).notNull(),
+      label: varchar("label", { length: 255 }),
+      baseUrl: varchar("baseUrl", { length: 500 }),
+      fallbackBaseUrls: text("fallbackBaseUrls"),
+      deliveriesPath: varchar("deliveriesPath", { length: 500 }),
+      authHeader: varchar("authHeader", { length: 128 }),
+      authTokenEncrypted: text("authTokenEncrypted").notNull(),
+      country: varchar("country", { length: 16 }),
+      lang: varchar("lang", { length: 32 }),
+      resourceCode: varchar("resourceCode", { length: 64 }),
+      timezone: varchar("timezone", { length: 64 }),
+      hubCode: varchar("hubCode", { length: 128 }),
+      appVersion: varchar("appVersion", { length: 32 }),
+      sourceName: varchar("sourceName", { length: 128 }),
+      isActive: boolean("isActive").default(true).notNull(),
+      lastValidatedAt: timestamp("lastValidatedAt"),
+      createdAt: timestamp("createdAt").defaultNow().notNull(),
+      updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull()
+    }, (table) => ({
+      userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("cascade"),
+      userProviderUnique: uniqueIndex("userIntegrations_user_provider_unique").on(table.userId, table.provider)
+    }));
+    operationalEvents = mysqlTable("operationalEvents", {
+      id: int("id").autoincrement().primaryKey(),
+      userId: int("userId"),
+      routeId: int("routeId"),
+      stopId: int("stopId"),
+      type: varchar("type", { length: 96 }).notNull(),
+      severity: mysqlEnum("severity", ["info", "warning", "error", "fatal"]).default("info").notNull(),
+      source: varchar("source", { length: 128 }).notNull(),
+      title: varchar("title", { length: 255 }).notNull(),
+      message: text("message"),
+      runtime: varchar("runtime", { length: 64 }),
+      url: varchar("url", { length: 700 }),
+      userAgent: varchar("userAgent", { length: 700 }),
+      appVersion: varchar("appVersion", { length: 64 }),
+      metadata: json("metadata"),
+      createdAt: timestamp("createdAt").defaultNow().notNull()
+    }, (table) => ({
+      userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("set null"),
+      routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("set null"),
+      createdAtIdx: index("operationalEvents_createdAt_idx").on(table.createdAt),
+      severityIdx: index("operationalEvents_severity_idx").on(table.severity),
+      typeIdx: index("operationalEvents_type_idx").on(table.type)
+    }));
     usersRelations = relations(users, ({ many }) => ({
       routes: many(routes),
       routeSchedules: many(routeSchedules),
       routeHistory: many(routeHistory),
-      chatHistory: many(chatHistory)
+      chatHistory: many(chatHistory),
+      userIntegrations: many(userIntegrations),
+      operationalEvents: many(operationalEvents)
     }));
     routesRelations = relations(routes, ({ one, many }) => ({
       user: one(users, { fields: [routes.userId], references: [users.id] }),
       stops: many(stops),
       schedules: many(routeSchedules),
       history: many(routeHistory),
-      chats: many(chatHistory)
+      chats: many(chatHistory),
+      operationalEvents: many(operationalEvents)
     }));
     stopsRelations = relations(stops, ({ one }) => ({
       route: one(routes, { fields: [stops.routeId], references: [routes.id] })
@@ -146,10 +203,33 @@ var init_schema = __esm({
       user: one(users, { fields: [chatHistory.userId], references: [users.id] }),
       route: one(routes, { fields: [chatHistory.routeId], references: [routes.id] })
     }));
+    userIntegrationsRelations = relations(userIntegrations, ({ one }) => ({
+      user: one(users, { fields: [userIntegrations.userId], references: [users.id] })
+    }));
+    operationalEventsRelations = relations(operationalEvents, ({ one }) => ({
+      user: one(users, { fields: [operationalEvents.userId], references: [users.id] }),
+      route: one(routes, { fields: [operationalEvents.routeId], references: [routes.id] })
+    }));
   }
 });
 
 // server/_core/env.ts
+function isDockerOrLocalDatabaseUrl(value) {
+  if (!value) return false;
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return [
+      "mysql",
+      "localhost",
+      "127.0.0.1",
+      "0.0.0.0",
+      "::1",
+      "host.docker.internal"
+    ].includes(hostname);
+  } catch {
+    return true;
+  }
+}
 var hasConfiguredCookieSecret, ENV;
 var init_env = __esm({
   "server/_core/env.ts"() {
@@ -164,12 +244,17 @@ var init_env = __esm({
       databaseSsl: process.env.DATABASE_SSL ?? "",
       databaseSslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? "",
       oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
-      ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
+      authLoginProvider: process.env.AUTH_LOGIN_PROVIDER ?? "",
+      googleClientId: process.env.GOOGLE_CLIENT_ID ?? "",
+      googleClientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
+      adminEmails: [process.env.ADMIN_EMAILS, process.env.OWNER_EMAIL].filter(Boolean).join(","),
       ownerEmail: process.env.OWNER_EMAIL ?? "",
       publicAppUrl: process.env.PUBLIC_APP_URL ?? "",
       allowedOrigins: process.env.ALLOWED_ORIGINS ?? "",
       isProduction: process.env.NODE_ENV === "production",
+      hasInvalidProductionDatabaseUrl: process.env.NODE_ENV === "production" && isDockerOrLocalDatabaseUrl(process.env.DATABASE_URL ?? ""),
       allowEphemeralDb: process.env.ALLOW_EPHEMERAL_DB === "true",
+      requireManagedDatabase: process.env.REQUIRE_MANAGED_DATABASE === "true",
       forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
       forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
       androidUpdateLatestVersion: process.env.ANDROID_UPDATE_LATEST_VERSION ?? "",
@@ -177,7 +262,26 @@ var init_env = __esm({
       androidUpdateRequired: process.env.ANDROID_UPDATE_REQUIRED === "true",
       androidMinimumSupportedVersion: process.env.ANDROID_MINIMUM_SUPPORTED_VERSION ?? "",
       androidUpdateMessage: process.env.ANDROID_UPDATE_MESSAGE ?? "",
-      androidUpdatePublishedAt: process.env.ANDROID_UPDATE_PUBLISHED_AT ?? ""
+      androidUpdatePublishedAt: process.env.ANDROID_UPDATE_PUBLISHED_AT ?? "",
+      imileApiBaseUrl: process.env.IMILE_API_BASE_URL ?? "",
+      imileDeliveriesPath: process.env.IMILE_DELIVERIES_PATH ?? "",
+      imileCustomerId: process.env.IMILE_CUSTOMER_ID ?? "",
+      imileSign: process.env.IMILE_SIGN ?? "",
+      imileAuthHeader: process.env.IMILE_AUTH_HEADER ?? "",
+      imileAuthToken: process.env.IMILE_AUTH_TOKEN ?? "",
+      imileCountry: process.env.IMILE_COUNTRY ?? "",
+      imileLang: process.env.IMILE_LANG ?? "",
+      imileResourceCode: process.env.IMILE_RESOURCE_CODE ?? "",
+      imileTimezone: process.env.IMILE_TIMEZONE ?? "",
+      imileHubCode: process.env.IMILE_HUB_CODE ?? "",
+      imileAppVersion: process.env.IMILE_APP_VERSION ?? "",
+      imileSourceName: process.env.IMILE_SOURCE_NAME ?? "",
+      imileFallbackBaseUrls: process.env.IMILE_FALLBACK_BASE_URLS ?? "",
+      imileCaptureUploadToken: process.env.IMILE_CAPTURE_UPLOAD_TOKEN ?? "",
+      osrmEnabled: process.env.VITEST === "true" ? false : process.env.OSRM_ENABLED !== "false",
+      osrmBaseUrl: process.env.OSRM_BASE_URL ?? "https://router.project-osrm.org",
+      osrmRequestTimeoutMs: Number(process.env.OSRM_REQUEST_TIMEOUT_MS || 8e3),
+      integrationCredentialsSecret: process.env.INTEGRATION_CREDENTIALS_SECRET ?? process.env.JWT_SECRET ?? ""
     };
   }
 });
@@ -191,6 +295,51 @@ import mysql from "mysql2/promise";
 function shouldPersistLocalDb() {
   return (!ENV.isProduction || ENV.allowEphemeralDb) && process.env.NODE_ENV !== "test" && process.env.VITEST !== "true";
 }
+function getRedisRestConfig() {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "";
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "";
+  if (!url || !token) return null;
+  return {
+    url: url.replace(/\/+$/, ""),
+    token
+  };
+}
+function hasPersistentFallbackDbConfigured() {
+  if (ENV.isProduction && ENV.requireManagedDatabase) return false;
+  return Boolean(getRedisRestConfig());
+}
+function getPersistentFallbackDbHealth() {
+  return {
+    configured: hasPersistentFallbackDbConfigured(),
+    loaded: remoteDbLoaded,
+    error: lastRemoteFallbackError
+  };
+}
+async function ensurePersistentFallbackDbLoaded() {
+  if (ENV.isProduction && ENV.requireManagedDatabase) return;
+  if (!hasPersistentFallbackDbConfigured()) return;
+  await loadRemoteDb();
+}
+function hydrateMemory(data) {
+  memory.users = Array.isArray(data.users) ? data.users : [];
+  memory.routes = Array.isArray(data.routes) ? data.routes : [];
+  memory.stops = Array.isArray(data.stops) ? data.stops : [];
+  memory.routeSchedules = Array.isArray(data.routeSchedules) ? data.routeSchedules : [];
+  memory.routeHistory = Array.isArray(data.routeHistory) ? data.routeHistory : [];
+  memory.chatHistory = Array.isArray(data.chatHistory) ? data.chatHistory : [];
+  memory.userIntegrations = Array.isArray(data.userIntegrations) ? data.userIntegrations : [];
+  memory.operationalEvents = Array.isArray(data.operationalEvents) ? data.operationalEvents : [];
+  memory.ids = {
+    users: Number(data.ids?.users) || 1,
+    routes: Number(data.ids?.routes) || 1,
+    stops: Number(data.ids?.stops) || 1,
+    routeSchedules: Number(data.ids?.routeSchedules) || 1,
+    routeHistory: Number(data.ids?.routeHistory) || 1,
+    chatHistory: Number(data.ids?.chatHistory) || 1,
+    userIntegrations: Number(data.ids?.userIntegrations) || 1,
+    operationalEvents: Number(data.ids?.operationalEvents) || 1
+  };
+}
 function loadLocalDb() {
   if (localDbLoaded) return;
   localDbLoaded = true;
@@ -199,25 +348,90 @@ function loadLocalDb() {
   }
   try {
     const data = JSON.parse(fs.readFileSync(LOCAL_DB_FILE, "utf-8"));
-    memory.users = Array.isArray(data.users) ? data.users : [];
-    memory.routes = Array.isArray(data.routes) ? data.routes : [];
-    memory.stops = Array.isArray(data.stops) ? data.stops : [];
-    memory.routeSchedules = Array.isArray(data.routeSchedules) ? data.routeSchedules : [];
-    memory.routeHistory = Array.isArray(data.routeHistory) ? data.routeHistory : [];
-    memory.chatHistory = Array.isArray(data.chatHistory) ? data.chatHistory : [];
-    memory.ids = {
-      users: Number(data.ids?.users) || 1,
-      routes: Number(data.ids?.routes) || 1,
-      stops: Number(data.ids?.stops) || 1,
-      routeSchedules: Number(data.ids?.routeSchedules) || 1,
-      routeHistory: Number(data.ids?.routeHistory) || 1,
-      chatHistory: Number(data.ids?.chatHistory) || 1
-    };
+    hydrateMemory(data);
   } catch (error) {
     console.warn("[Database] Failed to load local fallback database:", error);
   }
 }
-function persistLocalDb() {
+async function callRedisCommand(command) {
+  const config = getRedisRestConfig();
+  if (!config) return null;
+  const response = await fetch(config.url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(command)
+  });
+  const payload = await response.json().catch(() => void 0);
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || `Redis fallback respondeu HTTP ${response.status}`
+    );
+  }
+  return payload?.result;
+}
+function getLocalKvPath(key) {
+  const safeName = Buffer.from(key).toString("base64url");
+  return path.join(LOCAL_DB_DIR, "kv", `${safeName}.txt`);
+}
+async function getPersistentValue(key) {
+  const redisKey = `${FALLBACK_KV_PREFIX}${key}`;
+  if (hasPersistentFallbackDbConfigured()) {
+    const result = await callRedisCommand(["GET", redisKey]);
+    return typeof result === "string" ? result : null;
+  }
+  if (!shouldPersistLocalDb()) return null;
+  const filePath = getLocalKvPath(redisKey);
+  if (!fs.existsSync(filePath)) return null;
+  return fs.readFileSync(filePath, "utf8");
+}
+async function setPersistentValue(key, value) {
+  const redisKey = `${FALLBACK_KV_PREFIX}${key}`;
+  if (hasPersistentFallbackDbConfigured()) {
+    await callRedisCommand(["SET", redisKey, value]);
+    return;
+  }
+  if (!shouldPersistLocalDb()) return;
+  const filePath = getLocalKvPath(redisKey);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, value, "utf8");
+}
+async function loadRemoteDb() {
+  if (remoteDbLoaded) return;
+  if (!hasPersistentFallbackDbConfigured()) return;
+  if (!remoteDbLoadPromise) {
+    remoteDbLoadPromise = (async () => {
+      try {
+        const result = await callRedisCommand(["GET", FALLBACK_DB_KEY]);
+        if (typeof result === "string" && result.trim()) {
+          hydrateMemory(JSON.parse(result));
+        } else if (result && typeof result === "object") {
+          hydrateMemory(result);
+        }
+        remoteDbLoaded = true;
+        lastRemoteFallbackError = null;
+      } catch (error) {
+        lastRemoteFallbackError = error instanceof Error ? error.message : "Erro desconhecido ao carregar fallback persistente.";
+        remoteDbLoadPromise = null;
+        throw error;
+      }
+    })();
+  }
+  await remoteDbLoadPromise;
+}
+async function persistFallbackDb() {
+  if (hasPersistentFallbackDbConfigured()) {
+    try {
+      await callRedisCommand(["SET", FALLBACK_DB_KEY, JSON.stringify(memory)]);
+      lastRemoteFallbackError = null;
+    } catch (error) {
+      lastRemoteFallbackError = error instanceof Error ? error.message : "Erro desconhecido ao persistir fallback.";
+      console.warn("[Database] Failed to persist remote fallback database:", error);
+      throw error;
+    }
+  }
   if (!shouldPersistLocalDb()) return;
   try {
     fs.mkdirSync(LOCAL_DB_DIR, { recursive: true });
@@ -226,8 +440,20 @@ function persistLocalDb() {
     console.warn("[Database] Failed to persist local fallback database:", error);
   }
 }
-function shouldUseMemoryDb() {
-  if (ENV.isProduction && !ENV.allowEphemeralDb) return false;
+async function shouldUseMemoryDb() {
+  if (ENV.isProduction && ENV.requireManagedDatabase) {
+    return false;
+  }
+  if (ENV.isProduction && !ENV.allowEphemeralDb && !hasPersistentFallbackDbConfigured()) {
+    return false;
+  }
+  if (ENV.hasInvalidProductionDatabaseUrl && !hasPersistentFallbackDbConfigured()) {
+    return false;
+  }
+  if (hasPersistentFallbackDbConfigured()) {
+    await loadRemoteDb();
+    return true;
+  }
   loadLocalDb();
   return true;
 }
@@ -245,18 +471,82 @@ function shouldUseDatabaseSsl(databaseUrl) {
     databaseUrl
   );
 }
-function createDatabasePool(databaseUrl) {
-  if (!shouldUseDatabaseSsl(databaseUrl)) {
-    return mysql.createPool(databaseUrl);
+function getDatabaseSslCa() {
+  if (process.env.DATABASE_SSL_CA) {
+    return process.env.DATABASE_SSL_CA.replace(/\\n/g, "\n");
   }
+  const caPath = process.env.DATABASE_SSL_CA_PATH;
+  if (caPath && fs.existsSync(caPath)) {
+    return fs.readFileSync(caPath, "utf8");
+  }
+  return void 0;
+}
+function readPositiveIntegerEnv(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+function readNonNegativeIntegerEnv(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+function getDatabasePoolOptions(databaseUrl) {
   const poolOptions = {
     uri: databaseUrl,
-    ssl: {
-      minVersion: "TLSv1.2",
-      rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false"
-    }
+    waitForConnections: true,
+    connectionLimit: readPositiveIntegerEnv("DB_CONNECTION_LIMIT", 5),
+    queueLimit: readNonNegativeIntegerEnv("DB_QUEUE_LIMIT", 0),
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0
   };
-  return mysql.createPool(poolOptions);
+  if (shouldUseDatabaseSsl(databaseUrl)) {
+    poolOptions.ssl = {
+      minVersion: "TLSv1.2",
+      rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
+      ca: getDatabaseSslCa()
+    };
+  }
+  return poolOptions;
+}
+function createDatabasePool(databaseUrl) {
+  return mysql.createPool(getDatabasePoolOptions(databaseUrl));
+}
+async function getDatabaseSchemaHealth() {
+  if (!_pool) {
+    return {
+      ok: false,
+      checkedColumns: REQUIRED_SCHEMA_COLUMNS.length,
+      missing: REQUIRED_SCHEMA_COLUMNS.map(([table, column]) => `${table}.${column}`),
+      error: "Pool MySQL indisponivel."
+    };
+  }
+  try {
+    const [rows] = await _pool.query(
+      `
+        SELECT TABLE_NAME as tableName, COLUMN_NAME as columnName
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME IN (?)
+      `,
+      [Array.from(new Set(REQUIRED_SCHEMA_COLUMNS.map(([table]) => table)))]
+    );
+    const existing = new Set(
+      rows.map((row) => `${String(row.tableName)}.${String(row.columnName)}`)
+    );
+    const missing = REQUIRED_SCHEMA_COLUMNS.map(([table, column]) => `${table}.${column}`).filter((key) => !existing.has(key));
+    return {
+      ok: missing.length === 0,
+      checkedColumns: REQUIRED_SCHEMA_COLUMNS.length,
+      missing,
+      error: null
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      checkedColumns: REQUIRED_SCHEMA_COLUMNS.length,
+      missing: REQUIRED_SCHEMA_COLUMNS.map(([table, column]) => `${table}.${column}`),
+      error: error instanceof Error ? error.message : "Erro desconhecido ao validar schema."
+    };
+  }
 }
 function sortByDateDesc(items, field) {
   return [...items].sort(
@@ -274,20 +564,25 @@ function toDateKey(value) {
 async function getDb() {
   if (_db) return _db;
   if (!process.env.DATABASE_URL) return null;
+  if (ENV.hasInvalidProductionDatabaseUrl) {
+    _lastDbConnectionError = "DATABASE_URL usa host local/Docker; configure um MySQL gerenciado acessivel pela Vercel.";
+    return null;
+  }
   const now = Date.now();
   if (!ENV.isProduction && now - _lastDbConnectAttempt < DB_CONNECT_RETRY_MS) {
     return null;
   }
   _lastDbConnectAttempt = now;
   try {
-    const pool = createDatabasePool(process.env.DATABASE_URL);
-    await pool.query("SELECT 1");
-    _db = drizzle(pool);
+    _pool = _pool ?? createDatabasePool(process.env.DATABASE_URL);
+    await _pool.query("SELECT 1");
+    _db = drizzle(_pool);
     _lastDbConnectionError = null;
   } catch (error) {
     console.warn("[Database] Failed to connect:", error);
     _lastDbConnectionError = error instanceof Error ? error.message : "Erro desconhecido ao conectar.";
     _db = null;
+    _pool = null;
   }
   return _db;
 }
@@ -298,14 +593,23 @@ async function getDatabaseHealth() {
       configured,
       connected: false,
       ssl: shouldUseDatabaseSsl(""),
+      pool: null,
       error: null
     };
   }
   const db = await getDb();
+  const schema = db ? await getDatabaseSchemaHealth() : null;
   return {
     configured,
-    connected: Boolean(db),
+    reachable: Boolean(db),
+    connected: Boolean(db) && Boolean(schema?.ok),
     ssl: shouldUseDatabaseSsl(process.env.DATABASE_URL || ""),
+    pool: {
+      connectionLimit: readPositiveIntegerEnv("DB_CONNECTION_LIMIT", 5),
+      queueLimit: readNonNegativeIntegerEnv("DB_QUEUE_LIMIT", 0),
+      lifecycle: "mysql2-native"
+    },
+    schema,
     error: _lastDbConnectionError
   };
 }
@@ -315,7 +619,7 @@ async function upsertUser(user) {
   }
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const existing = memory.users.find((item) => item.openId === user.openId);
       const now = /* @__PURE__ */ new Date();
       const nextUser = {
@@ -323,9 +627,15 @@ async function upsertUser(user) {
         openId: user.openId,
         name: user.name ?? existing?.name ?? null,
         email: user.email ?? existing?.email ?? null,
+        phone: user.phone ?? existing?.phone ?? null,
+        companyName: user.companyName ?? existing?.companyName ?? null,
+        city: user.city ?? existing?.city ?? null,
+        state: user.state ?? existing?.state ?? null,
+        vehicleType: user.vehicleType ?? existing?.vehicleType ?? null,
+        acceptedTermsAt: user.acceptedTermsAt ?? existing?.acceptedTermsAt ?? null,
         passwordHash: user.passwordHash ?? existing?.passwordHash ?? null,
         loginMethod: user.loginMethod ?? existing?.loginMethod ?? null,
-        role: user.role ?? existing?.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user"),
+        role: user.role ?? existing?.role ?? "user",
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
         lastSignedIn: user.lastSignedIn ?? now
@@ -335,7 +645,7 @@ async function upsertUser(user) {
       } else {
         memory.users.push(nextUser);
       }
-      persistLocalDb();
+      await persistFallbackDb();
       return;
     }
     console.warn("[Database] Cannot upsert user: database not available");
@@ -345,8 +655,20 @@ async function upsertUser(user) {
     const values = {
       openId: user.openId
     };
-    const updateSet = {};
-    const textFields = ["name", "email", "passwordHash", "loginMethod"];
+    const updateSet = {
+      openId: user.openId
+    };
+    const textFields = [
+      "name",
+      "email",
+      "phone",
+      "companyName",
+      "city",
+      "state",
+      "vehicleType",
+      "passwordHash",
+      "loginMethod"
+    ];
     const assignNullable = (field) => {
       const value = user[field];
       if (value === void 0) return;
@@ -359,12 +681,13 @@ async function upsertUser(user) {
       values.lastSignedIn = user.lastSignedIn;
       updateSet.lastSignedIn = user.lastSignedIn;
     }
+    if (user.acceptedTermsAt !== void 0) {
+      values.acceptedTermsAt = user.acceptedTermsAt;
+      updateSet.acceptedTermsAt = user.acceptedTermsAt;
+    }
     if (user.role !== void 0) {
       values.role = user.role;
       updateSet.role = user.role;
-    } else if (user.openId === ENV.ownerOpenId) {
-      values.role = "admin";
-      updateSet.role = "admin";
     }
     if (!values.lastSignedIn) {
       values.lastSignedIn = /* @__PURE__ */ new Date();
@@ -383,7 +706,7 @@ async function upsertUser(user) {
 async function getUserByOpenId(openId) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return memory.users.find((item) => item.openId === openId);
     }
     console.warn("[Database] Cannot get user: database not available");
@@ -396,7 +719,7 @@ async function getUserByEmail(email) {
   const normalizedEmail = email.trim().toLowerCase();
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return memory.users.find(
         (item) => typeof item.email === "string" && item.email.trim().toLowerCase() === normalizedEmail
       );
@@ -407,16 +730,54 @@ async function getUserByEmail(email) {
   const result = await db.select().from(users).where(eq(users.email, normalizedEmail)).limit(1);
   return result.length > 0 ? result[0] : void 0;
 }
-async function countUsers() {
+async function getUserById(userId) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
-      return memory.users.length;
+    if (await shouldUseMemoryDb()) {
+      return memory.users.find((item) => item.id === userId);
+    }
+    console.warn("[Database] Cannot get user by id: database not available");
+    return void 0;
+  }
+  const result = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  return result.length > 0 ? result[0] : void 0;
+}
+async function cleanupE2eTestUsers() {
+  const db = await getDb();
+  const isE2eUser = (user) => {
+    const email = user.email?.trim().toLowerCase() ?? "";
+    const openId = user.openId?.trim().toLowerCase() ?? "";
+    return email.startsWith("codex-e2e-") && email.endsWith("@example.com") || openId.startsWith("codex-e2e-");
+  };
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const deletedUsers2 = memory.users.filter(isE2eUser);
+      memory.users = memory.users.filter((user) => !isE2eUser(user));
+      await persistFallbackDb();
+      return {
+        deletedCount: deletedUsers2.length,
+        deletedUsers: deletedUsers2.map((user) => ({
+          id: user.id,
+          email: user.email ?? null,
+          openId: user.openId ?? null
+        }))
+      };
     }
     requireConfiguredDatabase();
   }
-  const result = await db.select({ count: sql`COUNT(*)` }).from(users);
-  return Number(result[0]?.count || 0);
+  const e2eUserWhere = sql`(${users.email} LIKE 'codex-e2e-%@example.com' OR ${users.openId} LIKE 'codex-e2e-%')`;
+  const deletedUsers = await db.select({
+    id: users.id,
+    email: users.email,
+    openId: users.openId
+  }).from(users).where(e2eUserWhere);
+  if (deletedUsers.length > 0) {
+    await db.delete(users).where(e2eUserWhere);
+  }
+  return {
+    deletedCount: deletedUsers.length,
+    deletedUsers
+  };
 }
 async function createPasswordUser(user) {
   const now = /* @__PURE__ */ new Date();
@@ -424,6 +785,12 @@ async function createPasswordUser(user) {
     openId: user.openId,
     name: user.name,
     email: user.email.trim().toLowerCase(),
+    phone: user.phone ?? null,
+    companyName: user.companyName ?? null,
+    city: user.city ?? null,
+    state: user.state ?? null,
+    vehicleType: user.vehicleType ?? null,
+    acceptedTermsAt: user.acceptedTermsAt ?? null,
     passwordHash: user.passwordHash,
     loginMethod: "password",
     role: user.role ?? "user",
@@ -431,9 +798,9 @@ async function createPasswordUser(user) {
   };
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       if (memory.users.some((item) => item.openId === user.openId)) {
-        throw new Error("Usuario ja existe");
+        throw new Error("Usu\xE1rio j\xE1 existe");
       }
       const created = {
         id: memory.ids.users++,
@@ -442,7 +809,7 @@ async function createPasswordUser(user) {
         updatedAt: now
       };
       memory.users.push(created);
-      persistLocalDb();
+      await persistFallbackDb();
       return created;
     }
     requireConfiguredDatabase();
@@ -450,10 +817,114 @@ async function createPasswordUser(user) {
   await db.insert(users).values(values);
   return getUserByOpenId(user.openId);
 }
+async function updateUserProfile(userId, profile) {
+  const db = await getDb();
+  const now = /* @__PURE__ */ new Date();
+  const values = {
+    name: profile.name,
+    phone: profile.phone,
+    companyName: profile.companyName ?? null,
+    city: profile.city,
+    state: profile.state,
+    vehicleType: profile.vehicleType,
+    acceptedTermsAt: profile.acceptedTermsAt ?? null,
+    updatedAt: now
+  };
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.users.find((item) => item.id === userId);
+      if (!existing) return void 0;
+      Object.assign(existing, values);
+      await persistFallbackDb();
+      return existing;
+    }
+    requireConfiguredDatabase();
+  }
+  await db.update(users).set(values).where(eq(users.id, userId));
+  return getUserById(userId);
+}
+async function getUserIntegration(userId, provider) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.userIntegrations.find(
+        (item) => item.userId === userId && item.provider === provider && item.isActive !== false
+      );
+    }
+    requireConfiguredDatabase();
+  }
+  const result = await db.select().from(userIntegrations).where(
+    and(
+      eq(userIntegrations.userId, userId),
+      eq(userIntegrations.provider, provider),
+      eq(userIntegrations.isActive, true)
+    )
+  ).limit(1);
+  return result[0];
+}
+async function upsertUserIntegration(userId, provider, data) {
+  const db = await getDb();
+  const now = /* @__PURE__ */ new Date();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing2 = memory.userIntegrations.find(
+        (item) => item.userId === userId && item.provider === provider
+      );
+      const nextIntegration = {
+        id: existing2?.id ?? memory.ids.userIntegrations++,
+        userId,
+        provider,
+        ...data,
+        isActive: data.isActive ?? true,
+        createdAt: existing2?.createdAt ?? now,
+        updatedAt: now
+      };
+      if (existing2) {
+        Object.assign(existing2, nextIntegration);
+      } else {
+        memory.userIntegrations.push(nextIntegration);
+      }
+      await persistFallbackDb();
+      return nextIntegration;
+    }
+    requireConfiguredDatabase();
+  }
+  const existing = await db.select().from(userIntegrations).where(and(eq(userIntegrations.userId, userId), eq(userIntegrations.provider, provider))).limit(1);
+  const values = {
+    ...data,
+    userId,
+    provider,
+    isActive: data.isActive ?? true
+  };
+  if (existing[0]) {
+    await db.update(userIntegrations).set(values).where(eq(userIntegrations.id, existing[0].id));
+    return getUserIntegration(userId, provider);
+  }
+  await db.insert(userIntegrations).values(values);
+  return getUserIntegration(userId, provider);
+}
+async function deleteUserIntegration(userId, provider) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.userIntegrations.find(
+        (item) => item.userId === userId && item.provider === provider
+      );
+      if (existing) {
+        existing.isActive = false;
+        existing.updatedAt = /* @__PURE__ */ new Date();
+        await persistFallbackDb();
+      }
+      return;
+    }
+    requireConfiguredDatabase();
+  }
+  await db.update(userIntegrations).set({ isActive: false }).where(and(eq(userIntegrations.userId, userId), eq(userIntegrations.provider, provider)));
+}
 async function createRoute(userId, data) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = /* @__PURE__ */ new Date();
       const route = {
         id: memory.ids.routes++,
@@ -474,7 +945,7 @@ async function createRoute(userId, data) {
         updatedAt: now
       };
       memory.routes.push(route);
-      persistLocalDb();
+      await persistFallbackDb();
       return route;
     }
     requireConfiguredDatabase();
@@ -500,7 +971,7 @@ async function createRoute(userId, data) {
 async function getRouteById(routeId, userId) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return memory.routes.find(
         (route) => route.id === routeId && route.userId === userId
       ) ?? null;
@@ -513,7 +984,7 @@ async function getRouteById(routeId, userId) {
 async function getUserRoutes(userId, limit = 50, offset = 0) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateDesc(
         memory.routes.filter((route) => route.userId === userId),
         "createdAt"
@@ -526,13 +997,13 @@ async function getUserRoutes(userId, limit = 50, offset = 0) {
 async function updateRoute(routeId, userId, data) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const route = memory.routes.find(
         (item) => item.id === routeId && item.userId === userId
       );
       if (route) {
         Object.assign(route, data, { updatedAt: /* @__PURE__ */ new Date() });
-        persistLocalDb();
+        await persistFallbackDb();
       }
       return;
     }
@@ -543,7 +1014,7 @@ async function updateRoute(routeId, userId, data) {
 async function deleteRoute(routeId, userId) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       memory.routes = memory.routes.filter(
         (route) => !(route.id === routeId && route.userId === userId)
       );
@@ -557,7 +1028,7 @@ async function deleteRoute(routeId, userId) {
       memory.chatHistory = memory.chatHistory.filter(
         (message) => message.routeId !== routeId
       );
-      persistLocalDb();
+      await persistFallbackDb();
       return;
     }
     requireConfiguredDatabase();
@@ -567,7 +1038,7 @@ async function deleteRoute(routeId, userId) {
 async function createStops(routeId, stopsData) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = /* @__PURE__ */ new Date();
       const createdStops = stopsData.map((stop) => ({
         id: memory.ids.stops++,
@@ -580,7 +1051,7 @@ async function createStops(routeId, stopsData) {
         createdAt: now
       }));
       memory.stops.push(...createdStops);
-      persistLocalDb();
+      await persistFallbackDb();
       return getRouteStops(routeId);
     }
     requireConfiguredDatabase();
@@ -599,19 +1070,66 @@ async function createStops(routeId, stopsData) {
 async function getRouteStops(routeId) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return [...memory.stops].filter((stop) => stop.routeId === routeId).sort((a, b) => a.sequence - b.sequence);
     }
     requireConfiguredDatabase();
   }
   return db.select().from(stops).where(eq(stops.routeId, routeId)).orderBy(asc(stops.sequence));
 }
+async function updateStop(routeId, stopId, data) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const stop = memory.stops.find(
+        (item) => item.id === stopId && item.routeId === routeId
+      );
+      if (!stop) return null;
+      Object.assign(stop, {
+        ...data,
+        latitude: data.latitude !== void 0 ? data.latitude === null ? null : String(data.latitude) : stop.latitude,
+        longitude: data.longitude !== void 0 ? data.longitude === null ? null : String(data.longitude) : stop.longitude
+      });
+      await persistFallbackDb();
+      return stop;
+    }
+    requireConfiguredDatabase();
+  }
+  await db.update(stops).set({
+    ...data,
+    latitude: data.latitude !== void 0 ? data.latitude === null ? null : String(data.latitude) : void 0,
+    longitude: data.longitude !== void 0 ? data.longitude === null ? null : String(data.longitude) : void 0
+  }).where(and(eq(stops.id, stopId), eq(stops.routeId, routeId)));
+  const [updatedStop] = await db.select().from(stops).where(and(eq(stops.id, stopId), eq(stops.routeId, routeId))).limit(1);
+  return updatedStop ?? null;
+}
+async function deleteStop(routeId, stopId) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const initialLength = memory.stops.length;
+      memory.stops = memory.stops.filter(
+        (stop) => !(stop.id === stopId && stop.routeId === routeId)
+      );
+      const deleted = memory.stops.length < initialLength;
+      if (deleted) {
+        await persistFallbackDb();
+      }
+      return deleted;
+    }
+    requireConfiguredDatabase();
+  }
+  const [existingStop] = await db.select().from(stops).where(and(eq(stops.id, stopId), eq(stops.routeId, routeId))).limit(1);
+  if (!existingStop) return false;
+  await db.delete(stops).where(and(eq(stops.id, stopId), eq(stops.routeId, routeId)));
+  return true;
+}
 async function deleteRouteStops(routeId) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       memory.stops = memory.stops.filter((stop) => stop.routeId !== routeId);
-      persistLocalDb();
+      await persistFallbackDb();
       return;
     }
     requireConfiguredDatabase();
@@ -621,7 +1139,7 @@ async function deleteRouteStops(routeId) {
 async function createSchedule(userId, data) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = /* @__PURE__ */ new Date();
       const schedule = {
         id: memory.ids.routeSchedules++,
@@ -639,7 +1157,7 @@ async function createSchedule(userId, data) {
         updatedAt: now
       };
       memory.routeSchedules.push(schedule);
-      persistLocalDb();
+      await persistFallbackDb();
       return schedule;
     }
     requireConfiguredDatabase();
@@ -660,7 +1178,7 @@ async function createSchedule(userId, data) {
 async function getScheduleById(scheduleId, userId) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return memory.routeSchedules.find(
         (schedule) => schedule.id === scheduleId && schedule.userId === userId
       ) ?? null;
@@ -673,7 +1191,7 @@ async function getScheduleById(scheduleId, userId) {
 async function getUserSchedules(userId) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateDesc(
         memory.routeSchedules.filter((schedule) => schedule.userId === userId),
         "nextExecution"
@@ -686,13 +1204,13 @@ async function getUserSchedules(userId) {
 async function updateSchedule(scheduleId, userId, data) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const schedule = memory.routeSchedules.find(
         (item) => item.id === scheduleId && item.userId === userId
       );
       if (schedule) {
         Object.assign(schedule, data, { updatedAt: /* @__PURE__ */ new Date() });
-        persistLocalDb();
+        await persistFallbackDb();
       }
       return;
     }
@@ -703,7 +1221,7 @@ async function updateSchedule(scheduleId, userId, data) {
 async function createHistory(userId, data) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = /* @__PURE__ */ new Date();
       const history = {
         id: memory.ids.routeHistory++,
@@ -721,7 +1239,7 @@ async function createHistory(userId, data) {
         updatedAt: now
       };
       memory.routeHistory.push(history);
-      persistLocalDb();
+      await persistFallbackDb();
       return history;
     }
     requireConfiguredDatabase();
@@ -741,7 +1259,7 @@ async function createHistory(userId, data) {
 async function getUserRouteHistory(userId, limit = 50, offset = 0) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateDesc(
         memory.routeHistory.filter((history) => history.userId === userId).map((history) => {
           const route = memory.routes.find((item) => item.id === history.routeId);
@@ -775,7 +1293,7 @@ async function getUserRouteHistory(userId, limit = 50, offset = 0) {
 async function getRouteHistory(routeId, userId) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateDesc(
         memory.routeHistory.filter(
           (history) => history.routeId === routeId && history.userId === userId
@@ -790,7 +1308,7 @@ async function getRouteHistory(routeId, userId) {
 async function updateHistory(historyId, userId, data) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const history = memory.routeHistory.find(
         (item) => item.id === historyId && item.userId === userId
       );
@@ -799,7 +1317,7 @@ async function updateHistory(historyId, userId, data) {
         if (data.actualDistance !== void 0) {
           history.actualDistance = String(data.actualDistance);
         }
-        persistLocalDb();
+        await persistFallbackDb();
       }
       return;
     }
@@ -818,7 +1336,7 @@ async function updateHistory(historyId, userId, data) {
 async function addChatMessage(userId, data) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = /* @__PURE__ */ new Date();
       const message = {
         id: memory.ids.chatHistory++,
@@ -829,7 +1347,7 @@ async function addChatMessage(userId, data) {
         createdAt: now
       };
       memory.chatHistory.push(message);
-      persistLocalDb();
+      await persistFallbackDb();
       return message;
     }
     requireConfiguredDatabase();
@@ -846,7 +1364,7 @@ async function addChatMessage(userId, data) {
 async function getUserChatHistory(userId, routeId, limit = 100) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateAsc(
         memory.chatHistory.filter(
           (message) => message.userId === userId && (routeId === void 0 || message.routeId === routeId)
@@ -859,10 +1377,182 @@ async function getUserChatHistory(userId, routeId, limit = 100) {
   const whereCondition = routeId ? and(eq(chatHistory.userId, userId), eq(chatHistory.routeId, routeId)) : eq(chatHistory.userId, userId);
   return db.select().from(chatHistory).where(whereCondition).orderBy(asc(chatHistory.createdAt)).limit(limit);
 }
+async function createOperationalEvent(data) {
+  const event = {
+    userId: data.userId ?? null,
+    routeId: data.routeId ?? null,
+    stopId: data.stopId ?? null,
+    type: data.type.slice(0, 96),
+    severity: data.severity ?? "info",
+    source: data.source.slice(0, 128),
+    title: data.title.slice(0, 255),
+    message: data.message ?? null,
+    runtime: data.runtime?.slice(0, 64) ?? null,
+    url: data.url?.slice(0, 700) ?? null,
+    userAgent: data.userAgent?.slice(0, 700) ?? null,
+    appVersion: data.appVersion?.slice(0, 64) ?? null,
+    metadata: data.metadata ?? null
+  };
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const created = {
+        id: memory.ids.operationalEvents++,
+        ...event,
+        createdAt: /* @__PURE__ */ new Date()
+      };
+      memory.operationalEvents.push(created);
+      await persistFallbackDb();
+      return created;
+    }
+    requireConfiguredDatabase();
+  }
+  const inserted = await db.insert(operationalEvents).values(event).$returningId();
+  const insertedId = inserted[0]?.id;
+  if (insertedId) {
+    const result2 = await db.select().from(operationalEvents).where(eq(operationalEvents.id, insertedId)).limit(1);
+    return result2[0] ?? null;
+  }
+  const result = await db.select().from(operationalEvents).where(
+    and(
+      data.userId == null ? sql`${operationalEvents.userId} IS NULL` : eq(operationalEvents.userId, data.userId),
+      eq(operationalEvents.type, event.type),
+      eq(operationalEvents.source, event.source),
+      eq(operationalEvents.title, event.title)
+    )
+  ).orderBy(desc(operationalEvents.id)).limit(1);
+  return result[0] ?? null;
+}
+async function getRecentOperationalEvents(limit = 100) {
+  const safeLimit = Math.min(Math.max(limit, 1), 200);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return sortByDateDesc(memory.operationalEvents, "createdAt").slice(0, safeLimit).map((event) => ({
+        ...event,
+        userName: memory.users.find((user) => user.id === event.userId)?.name ?? null,
+        userEmail: memory.users.find((user) => user.id === event.userId)?.email ?? null,
+        routeName: memory.routes.find((route) => route.id === event.routeId)?.name ?? null
+      }));
+    }
+    requireConfiguredDatabase();
+  }
+  return db.select({
+    id: operationalEvents.id,
+    userId: operationalEvents.userId,
+    routeId: operationalEvents.routeId,
+    stopId: operationalEvents.stopId,
+    type: operationalEvents.type,
+    severity: operationalEvents.severity,
+    source: operationalEvents.source,
+    title: operationalEvents.title,
+    message: operationalEvents.message,
+    runtime: operationalEvents.runtime,
+    url: operationalEvents.url,
+    userAgent: operationalEvents.userAgent,
+    appVersion: operationalEvents.appVersion,
+    metadata: operationalEvents.metadata,
+    createdAt: operationalEvents.createdAt,
+    userName: users.name,
+    userEmail: users.email,
+    routeName: routes.name
+  }).from(operationalEvents).leftJoin(users, eq(operationalEvents.userId, users.id)).leftJoin(routes, eq(operationalEvents.routeId, routes.id)).orderBy(desc(operationalEvents.createdAt)).limit(safeLimit);
+}
+async function getAdminOperationalDashboard() {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const now = Date.now();
+      const oneDay = 24 * 60 * 60 * 1e3;
+      const sevenDaysAgo = now - 7 * oneDay;
+      const today = /* @__PURE__ */ new Date();
+      today.setHours(0, 0, 0, 0);
+      const events = sortByDateDesc(memory.operationalEvents, "createdAt");
+      const recentUsers2 = sortByDateDesc(memory.users, "createdAt").slice(0, 8);
+      const recentRoutes2 = sortByDateDesc(memory.routes, "createdAt").slice(0, 8);
+      return {
+        stats: {
+          usersTotal: memory.users.length,
+          usersToday: memory.users.filter((user) => new Date(user.createdAt) >= today).length,
+          activeUsers7d: new Set(
+            memory.operationalEvents.filter((event) => new Date(event.createdAt).getTime() >= sevenDaysAgo && event.userId).map((event) => event.userId)
+          ).size,
+          routesTotal: memory.routes.length,
+          routesToday: memory.routes.filter((route) => new Date(route.createdAt) >= today).length,
+          events24h: events.filter((event) => now - new Date(event.createdAt).getTime() <= oneDay).length,
+          criticalEvents24h: events.filter(
+            (event) => now - new Date(event.createdAt).getTime() <= oneDay && ["error", "fatal"].includes(event.severity)
+          ).length,
+          routeWarnings24h: events.filter(
+            (event) => now - new Date(event.createdAt).getTime() <= oneDay && event.severity === "warning" && event.type.startsWith("route_")
+          ).length
+        },
+        recentUsers: recentUsers2,
+        recentRoutes: recentRoutes2,
+        recentEvents: events.slice(0, 12)
+      };
+    }
+    requireConfiguredDatabase();
+  }
+  const [usersTotal] = await db.select({ count: sql`COUNT(*)` }).from(users);
+  const [usersToday] = await db.select({ count: sql`COUNT(*)` }).from(users).where(sql`DATE(${users.createdAt}) = CURRENT_DATE()`);
+  const [activeUsers7d] = await db.select({ count: sql`COUNT(DISTINCT ${operationalEvents.userId})` }).from(operationalEvents).where(sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 7 DAY)`);
+  const [routesTotal] = await db.select({ count: sql`COUNT(*)` }).from(routes);
+  const [routesToday] = await db.select({ count: sql`COUNT(*)` }).from(routes).where(sql`DATE(${routes.createdAt}) = CURRENT_DATE()`);
+  const [events24h] = await db.select({ count: sql`COUNT(*)` }).from(operationalEvents).where(sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`);
+  const [criticalEvents24h] = await db.select({ count: sql`COUNT(*)` }).from(operationalEvents).where(
+    and(
+      sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`,
+      sql`${operationalEvents.severity} IN ('error', 'fatal')`
+    )
+  );
+  const [routeWarnings24h] = await db.select({ count: sql`COUNT(*)` }).from(operationalEvents).where(
+    and(
+      sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`,
+      eq(operationalEvents.severity, "warning"),
+      sql`${operationalEvents.type} LIKE 'route_%'`
+    )
+  );
+  const recentUsers = await db.select({
+    id: users.id,
+    name: users.name,
+    email: users.email,
+    role: users.role,
+    createdAt: users.createdAt,
+    lastSignedIn: users.lastSignedIn
+  }).from(users).orderBy(desc(users.createdAt)).limit(8);
+  const recentRoutes = await db.select({
+    id: routes.id,
+    userId: routes.userId,
+    name: routes.name,
+    status: routes.status,
+    totalDistance: routes.totalDistance,
+    totalTime: routes.totalTime,
+    createdAt: routes.createdAt,
+    updatedAt: routes.updatedAt,
+    userName: users.name,
+    userEmail: users.email
+  }).from(routes).leftJoin(users, eq(routes.userId, users.id)).orderBy(desc(routes.createdAt)).limit(8);
+  return {
+    stats: {
+      usersTotal: Number(usersTotal?.count || 0),
+      usersToday: Number(usersToday?.count || 0),
+      activeUsers7d: Number(activeUsers7d?.count || 0),
+      routesTotal: Number(routesTotal?.count || 0),
+      routesToday: Number(routesToday?.count || 0),
+      events24h: Number(events24h?.count || 0),
+      criticalEvents24h: Number(criticalEvents24h?.count || 0),
+      routeWarnings24h: Number(routeWarnings24h?.count || 0)
+    },
+    recentUsers,
+    recentRoutes,
+    recentEvents: await getRecentOperationalEvents(12)
+  };
+}
 async function getUserStats(userId, days = 30) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const cutoffDate2 = /* @__PURE__ */ new Date();
       cutoffDate2.setDate(cutoffDate2.getDate() - days);
       const userRoutes = memory.routes.filter(
@@ -898,7 +1588,7 @@ async function getUserStats(userId, days = 30) {
 async function getRouteStatsOverTime(userId, days = 30) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const startDate2 = /* @__PURE__ */ new Date();
       startDate2.setDate(startDate2.getDate() - days);
       const grouped = /* @__PURE__ */ new Map();
@@ -931,19 +1621,25 @@ async function getRouteStatsOverTime(userId, days = 30) {
     sql`executedDate >= ${startDate}`
   )).groupBy(sql`DATE(executedDate)`).orderBy(asc(sql`DATE(executedDate)`));
 }
-var _db, _lastDbConnectAttempt, _lastDbConnectionError, DB_CONNECT_RETRY_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, localDbLoaded, memory;
+var _db, _pool, _lastDbConnectAttempt, _lastDbConnectionError, DB_CONNECT_RETRY_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, FALLBACK_DB_KEY, FALLBACK_KV_PREFIX, localDbLoaded, remoteDbLoaded, remoteDbLoadPromise, lastRemoteFallbackError, memory, REQUIRED_SCHEMA_COLUMNS;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
     init_schema();
     init_env();
     _db = null;
+    _pool = null;
     _lastDbConnectAttempt = 0;
     _lastDbConnectionError = null;
     DB_CONNECT_RETRY_MS = 3e4;
     LOCAL_DB_DIR = path.join(process.cwd(), ".data");
     LOCAL_DB_FILE = path.join(LOCAL_DB_DIR, "routing-pwa-db.json");
+    FALLBACK_DB_KEY = process.env.FALLBACK_DB_KEY || "econorotas:fallback-db:v1";
+    FALLBACK_KV_PREFIX = process.env.FALLBACK_KV_PREFIX || "econorotas:kv:v1:";
     localDbLoaded = false;
+    remoteDbLoaded = false;
+    remoteDbLoadPromise = null;
+    lastRemoteFallbackError = null;
     memory = {
       users: [],
       routes: [],
@@ -951,15 +1647,33 @@ var init_db = __esm({
       routeSchedules: [],
       routeHistory: [],
       chatHistory: [],
+      userIntegrations: [],
+      operationalEvents: [],
       ids: {
         users: 1,
         routes: 1,
         stops: 1,
         routeSchedules: 1,
         routeHistory: 1,
-        chatHistory: 1
+        chatHistory: 1,
+        userIntegrations: 1,
+        operationalEvents: 1
       }
     };
+    REQUIRED_SCHEMA_COLUMNS = [
+      ["users", "id"],
+      ["users", "openId"],
+      ["users", "email"],
+      ["users", "role"],
+      ["users", "phone"],
+      ["routes", "id"],
+      ["routes", "userId"],
+      ["stops", "routeId"],
+      ["stops", "sequence"],
+      ["userIntegrations", "authTokenEncrypted"],
+      ["operationalEvents", "type"],
+      ["operationalEvents", "severity"]
+    ];
   }
 });
 
@@ -1172,9 +1886,18 @@ var init_export = __esm({
   }
 });
 
+// server/_core/runtimeWarnings.ts
+if (process.env.SUPPRESS_NODE_DEPRECATION_WARNINGS === "true") {
+  process.noDeprecation = true;
+}
+
 // server/_core/index.ts
 import "dotenv/config";
 import express2 from "express";
+import { execFile } from "node:child_process";
+import fs3 from "node:fs";
+import path3 from "node:path";
+import { promisify as promisify2 } from "node:util";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 
 // shared/const.ts
@@ -1187,7 +1910,21 @@ var NOT_ADMIN_ERR_MSG = "You do not have required permission (10002)";
 // server/_core/oauth.ts
 init_db();
 import { parse as parseCookieHeader2 } from "cookie";
+import { createRemoteJWKSet, jwtVerify as jwtVerify2 } from "jose";
 import { randomBytes } from "node:crypto";
+
+// shared/adminAccess.ts
+function normalizeEmail(value) {
+  return value?.trim().toLowerCase() || "";
+}
+function getAdminEmailAllowlist(configuredEmails = "") {
+  return Array.from(new Set(configuredEmails.split(",").map(normalizeEmail).filter(Boolean)));
+}
+function isAdminEmail(email, configuredEmails = "") {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return false;
+  return getAdminEmailAllowlist(configuredEmails).includes(normalizedEmail);
+}
 
 // server/_core/cookies.ts
 function isSecureRequest(req) {
@@ -1197,12 +1934,28 @@ function isSecureRequest(req) {
   const protoList = Array.isArray(forwardedProto) ? forwardedProto : forwardedProto.split(",");
   return protoList.some((proto) => proto.trim().toLowerCase() === "https");
 }
+function getRequestOrigin(req) {
+  const forwardedHost = req.headers["x-forwarded-host"];
+  const host = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost || req.headers.host;
+  if (!host) return null;
+  const protocol = isSecureRequest(req) ? "https" : req.protocol || "http";
+  return `${protocol}://${host}`;
+}
+function requiresCrossSiteCookie(req) {
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  if (origin === "https://localhost" || origin === "capacitor://localhost" || origin === "ionic://localhost") {
+    return true;
+  }
+  return origin !== getRequestOrigin(req);
+}
 function getSessionCookieOptions(req) {
   const secure = isSecureRequest(req);
+  const crossSiteCookie = secure && requiresCrossSiteCookie(req);
   return {
     httpOnly: true,
     path: "/",
-    sameSite: secure ? "none" : "lax",
+    sameSite: crossSiteCookie ? "none" : "lax",
     secure
   };
 }
@@ -1222,10 +1975,10 @@ var ForbiddenError = (msg) => new HttpError(403, msg);
 
 // server/_core/sdk.ts
 init_db();
-init_env();
 import axios from "axios";
 import { parse as parseCookieHeader } from "cookie";
 import { SignJWT, jwtVerify } from "jose";
+init_env();
 var isNonEmptyString = (value) => typeof value === "string" && value.length > 0;
 var EXCHANGE_TOKEN_PATH = `/webdev.v1.WebDevAuthPublicService/ExchangeToken`;
 var GET_USER_INFO_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserInfo`;
@@ -1234,7 +1987,9 @@ var OAuthService = class {
   constructor(client) {
     this.client = client;
     if (!ENV.oAuthServerUrl) {
-      console.info("[OAuth] Disabled: OAUTH_SERVER_URL is not configured.");
+      if (!ENV.googleClientId || !ENV.googleClientSecret) {
+        console.info("[OAuth] Disabled: no OAuth provider is configured.");
+      }
       return;
     }
     console.log("[OAuth] Initialized with baseURL:", ENV.oAuthServerUrl);
@@ -1362,6 +2117,13 @@ var SDKServer = class {
     const parsed = parseCookieHeader(cookieHeader);
     return new Map(Object.entries(parsed));
   }
+  getBearerSessionToken(req) {
+    const authorization = req.headers.authorization;
+    const value = Array.isArray(authorization) ? authorization[0] : authorization;
+    if (!value) return null;
+    const match = value.match(/^Bearer\s+(.+)$/i);
+    return match?.[1]?.trim() || null;
+  }
   getSessionSecret() {
     const secret = ENV.cookieSecret || (!ENV.isProduction ? "local-development-secret" : "");
     if (!secret) {
@@ -1399,7 +2161,6 @@ var SDKServer = class {
   }
   async verifySession(cookieValue) {
     if (!cookieValue) {
-      console.warn("[Auth] Missing session cookie");
       return null;
     }
     try {
@@ -1456,8 +2217,8 @@ var SDKServer = class {
       return await getUserByOpenId(devUser.openId) ?? devUser;
     }
     const cookies = this.parseCookies(req.headers.cookie);
-    const sessionCookie = cookies.get(COOKIE_NAME);
-    const session = await this.verifySession(sessionCookie);
+    const sessionToken = cookies.get(COOKIE_NAME) ?? this.getBearerSessionToken(req);
+    const session = await this.verifySession(sessionToken);
     if (!session) {
       throw ForbiddenError("Invalid session cookie");
     }
@@ -1474,7 +2235,7 @@ var SDKServer = class {
       return await getUserByOpenId(devUser.openId) ?? devUser;
     }
     if (session.openId.startsWith(CRON_OPEN_ID_PREFIX)) {
-      const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
+      const userInfo = await this.getUserInfoWithJwt(sessionToken ?? "");
       const taskUid = userInfo.taskUid ?? null;
       if (!taskUid) {
         throw ForbiddenError("Cron session missing task_uid");
@@ -1485,27 +2246,38 @@ var SDKServer = class {
     const signedInAt = /* @__PURE__ */ new Date();
     let user = await getUserByOpenId(sessionUserId);
     if (!user && session.openId.startsWith("pwd_") && ENV.allowEphemeralDb) {
-      const ownerEmail = ENV.ownerEmail.trim().toLowerCase();
       const email = session.email?.trim().toLowerCase() || null;
-      const usersCount = await countUsers();
       await upsertUser({
         openId: session.openId,
         name: session.name || null,
         email,
         loginMethod: "password",
-        role: usersCount === 0 || email && ownerEmail === email ? "admin" : "user",
+        role: email && isAdminEmail(email, ENV.adminEmails) ? "admin" : "user",
         lastSignedIn: signedInAt
       });
       user = await getUserByOpenId(session.openId);
     }
-    if (!user) {
+    if (!user && session.openId.startsWith("google_")) {
+      const email = session.email?.trim().toLowerCase() || null;
+      await upsertUser({
+        openId: session.openId,
+        name: session.name || null,
+        email,
+        loginMethod: "google",
+        role: email && isAdminEmail(email, ENV.adminEmails) ? "admin" : "user",
+        lastSignedIn: signedInAt
+      });
+      user = await getUserByOpenId(session.openId);
+    }
+    if (!user && ENV.oAuthServerUrl) {
       try {
-        const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
+        const userInfo = await this.getUserInfoWithJwt(sessionToken ?? "");
         await upsertUser({
           openId: userInfo.openId,
           name: userInfo.name || null,
           email: userInfo.email ?? null,
           loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
+          role: isAdminEmail(userInfo.email ?? null, ENV.adminEmails) ? "admin" : "user",
           lastSignedIn: signedInAt
         });
         user = await getUserByOpenId(userInfo.openId);
@@ -1560,6 +2332,10 @@ var sdk = new SDKServer();
 // server/_core/oauth.ts
 var OAUTH_STATE_COOKIE_NAME = "oauth_state_nonce";
 var OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1e3;
+var GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
+var GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+var GOOGLE_ISSUER = "https://accounts.google.com";
+var GOOGLE_JWKS = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
 function getQueryParam(req, key) {
   const value = req.query[key];
   return typeof value === "string" ? value : void 0;
@@ -1604,6 +2380,96 @@ function createStatePayload(redirectUri, nonce) {
     })
   ).toString("base64url");
 }
+function decodeStatePayload(state, expectedNonce) {
+  const padded = state.replace(/-/g, "+").replace(/_/g, "/");
+  const missingPadding = padded.length % 4;
+  const normalized = missingPadding === 0 ? padded : `${padded}${"=".repeat(4 - missingPadding)}`;
+  const parsed = JSON.parse(Buffer.from(normalized, "base64").toString("utf8"));
+  if (typeof parsed.redirectUri !== "string" || typeof parsed.nonce !== "string" || parsed.nonce !== expectedNonce || typeof parsed.issuedAt !== "number" || Date.now() - parsed.issuedAt > OAUTH_STATE_MAX_AGE_MS) {
+    throw new Error("Invalid OAuth state");
+  }
+  return parsed.redirectUri;
+}
+function isGoogleOAuthConfigured() {
+  return Boolean(ENV.googleClientId && ENV.googleClientSecret);
+}
+function getLoginProvider() {
+  const configured = ENV.authLoginProvider.trim().toLowerCase();
+  const googleConfigured = isGoogleOAuthConfigured();
+  const legacyConfigured = Boolean(getOAuthPortalUrl() && ENV.appId);
+  if (configured) {
+    if (configured !== "google" && configured !== "legacy") {
+      throw new Error("AUTH_LOGIN_PROVIDER deve ser google ou legacy.");
+    }
+    return configured;
+  }
+  if (googleConfigured && !legacyConfigured) return "google";
+  if (!googleConfigured && legacyConfigured) return "legacy";
+  if (!googleConfigured && !legacyConfigured) return null;
+  throw new Error(
+    "AUTH_LOGIN_PROVIDER e obrigatorio quando Google e OAuth legado estao configurados."
+  );
+}
+function assertConfiguredProvider(provider) {
+  if (provider === "google" && !isGoogleOAuthConfigured()) {
+    throw new Error("Google OAuth nao esta configurado.");
+  }
+  if (provider === "legacy" && (!getOAuthPortalUrl() || !ENV.appId)) {
+    throw new Error("OAuth legado nao esta configurado.");
+  }
+}
+async function exchangeGoogleCodeForUserInfo(code, state, expectedNonce) {
+  const redirectUri = decodeStatePayload(state, expectedNonce);
+  const tokenResponse = await fetch(GOOGLE_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      client_id: ENV.googleClientId,
+      client_secret: ENV.googleClientSecret,
+      code,
+      grant_type: "authorization_code",
+      redirect_uri: redirectUri
+    })
+  });
+  const tokenPayload = await tokenResponse.json().catch(() => ({}));
+  if (!tokenResponse.ok || typeof tokenPayload.id_token !== "string") {
+    throw new Error(
+      `Google token exchange failed: ${tokenPayload.error_description || tokenPayload.error || tokenResponse.statusText}`
+    );
+  }
+  const { payload } = await jwtVerify2(tokenPayload.id_token, GOOGLE_JWKS, {
+    issuer: GOOGLE_ISSUER,
+    audience: ENV.googleClientId
+  });
+  if (payload.nonce !== expectedNonce) {
+    throw new Error("Google id_token nonce mismatch");
+  }
+  if (payload.email_verified !== true) {
+    throw new Error("Google account email is not verified");
+  }
+  if (typeof payload.sub !== "string" || typeof payload.email !== "string") {
+    throw new Error("Google id_token is missing required claims");
+  }
+  return {
+    openId: `google_${payload.sub}`,
+    name: typeof payload.name === "string" && payload.name.trim() ? payload.name : "Google User",
+    email: payload.email,
+    platform: "google",
+    loginMethod: "google"
+  };
+}
+async function exchangeLegacyCodeForUserInfo(code, state, expectedNonce) {
+  const tokenResponse = await sdk.exchangeCodeForToken(code, state, expectedNonce);
+  return sdk.getUserInfo(tokenResponse.accessToken);
+}
+async function getOAuthUserInfo(provider, code, state, expectedNonce) {
+  if (provider === "google") {
+    return exchangeGoogleCodeForUserInfo(code, state, expectedNonce);
+  }
+  return exchangeLegacyCodeForUserInfo(code, state, expectedNonce);
+}
 function registerOAuthRoutes(app2) {
   if (!ENV.isProduction) {
     app2.get("/api/dev/login", async (req, res) => {
@@ -1628,13 +2494,19 @@ function registerOAuthRoutes(app2) {
     });
   }
   app2.get("/api/oauth/login", (req, res) => {
-    const oauthPortalUrl = getOAuthPortalUrl();
-    if (!oauthPortalUrl || !ENV.appId) {
-      if (!ENV.isProduction) {
+    let provider;
+    try {
+      provider = getLoginProvider();
+      if (!provider) throw new Error("OAuth login is not configured");
+      assertConfiguredProvider(provider);
+    } catch (error) {
+      if (!ENV.isProduction && !isGoogleOAuthConfigured() && !getOAuthPortalUrl()) {
         res.redirect(302, "/api/dev/login");
         return;
       }
-      res.status(503).json({ error: "OAuth login is not configured" });
+      res.status(503).json({
+        error: error instanceof Error ? error.message : "OAuth login is not configured"
+      });
       return;
     }
     const redirectUri = buildOAuthRedirectUri(req);
@@ -1649,6 +2521,19 @@ function registerOAuthRoutes(app2) {
       ...cookieOptions,
       maxAge: OAUTH_STATE_MAX_AGE_MS
     });
+    if (provider === "google") {
+      const googleUrl = new URL(GOOGLE_AUTH_URL);
+      googleUrl.searchParams.set("client_id", ENV.googleClientId);
+      googleUrl.searchParams.set("redirect_uri", redirectUri);
+      googleUrl.searchParams.set("response_type", "code");
+      googleUrl.searchParams.set("scope", "openid email profile");
+      googleUrl.searchParams.set("state", state);
+      googleUrl.searchParams.set("nonce", nonce);
+      googleUrl.searchParams.set("prompt", "select_account");
+      res.redirect(302, googleUrl.toString());
+      return;
+    }
+    const oauthPortalUrl = getOAuthPortalUrl();
     const oauthUrl = new URL("/app-auth", oauthPortalUrl);
     oauthUrl.searchParams.set("appId", ENV.appId);
     oauthUrl.searchParams.set("redirectUri", redirectUri);
@@ -1674,8 +2559,13 @@ function registerOAuthRoutes(app2) {
       return;
     }
     try {
-      const tokenResponse = await sdk.exchangeCodeForToken(code, state, expectedNonce);
-      const userInfo = await sdk.getUserInfo(tokenResponse.accessToken);
+      const provider = getLoginProvider();
+      if (!provider) {
+        res.status(503).json({ error: "OAuth login is not configured" });
+        return;
+      }
+      assertConfiguredProvider(provider);
+      const userInfo = await getOAuthUserInfo(provider, code, state, expectedNonce);
       if (!userInfo.openId) {
         res.status(400).json({ error: "openId missing from user info" });
         return;
@@ -1685,10 +2575,12 @@ function registerOAuthRoutes(app2) {
         name: userInfo.name || null,
         email: userInfo.email ?? null,
         loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
+        role: isAdminEmail(userInfo.email ?? null, ENV.adminEmails) ? "admin" : "user",
         lastSignedIn: /* @__PURE__ */ new Date()
       });
       const sessionToken = await sdk.createSessionToken(userInfo.openId, {
         name: userInfo.name || "",
+        email: userInfo.email ?? null,
         expiresInMs: ONE_YEAR_MS
       });
       const cookieOptions2 = getSessionCookieOptions(req);
@@ -1748,28 +2640,93 @@ function registerStorageProxy(app2) {
 }
 
 // server/_core/geocodingProxy.ts
+init_db();
 var NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 var CACHE_TTL_MS = 24 * 60 * 60 * 1e3;
 var RATE_LIMIT_WINDOW_MS = 60 * 1e3;
 var RATE_LIMIT_MAX_REQUESTS = Math.max(
   1,
-  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 30)
+  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 240)
+);
+var EXTERNAL_MIN_INTERVAL_MS = Math.max(
+  0,
+  Number(process.env.GEOCODING_EXTERNAL_MIN_INTERVAL_MS || 350)
 );
 var cache = /* @__PURE__ */ new Map();
 var rateLimiter = /* @__PURE__ */ new Map();
+var inFlightSearches = /* @__PURE__ */ new Map();
+var lastExternalSearchAt = 0;
 function getNominatimUserAgent() {
   return process.env.NOMINATIM_USER_AGENT || `routing-pwa/1.0 (${process.env.NOMINATIM_CONTACT_EMAIL || "local-development"})`;
 }
-function getCached(cacheKey) {
+function getPersistentCacheKey(cacheKey) {
+  return `geocoding:${Buffer.from(cacheKey).toString("base64url")}`;
+}
+async function waitForExternalSearchSlot() {
+  if (EXTERNAL_MIN_INTERVAL_MS <= 0) return;
+  const elapsed = Date.now() - lastExternalSearchAt;
+  if (elapsed < EXTERNAL_MIN_INTERVAL_MS) {
+    await new Promise(
+      (resolve) => setTimeout(resolve, EXTERNAL_MIN_INTERVAL_MS - elapsed)
+    );
+  }
+  lastExternalSearchAt = Date.now();
+}
+function setMemoryCache(cacheKey, data) {
+  cache.set(cacheKey, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+async function getCached(cacheKey) {
   const cached = cache.get(cacheKey);
-  if (!cached) {
-    return void 0;
-  }
-  if (cached.expiresAt <= Date.now()) {
+  if (cached) {
+    if (cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
     cache.delete(cacheKey);
+  }
+  const persistentValue = await getPersistentValue(getPersistentCacheKey(cacheKey));
+  if (!persistentValue) return void 0;
+  try {
+    const payload = JSON.parse(persistentValue);
+    if (Number(payload.expiresAt) <= Date.now()) return void 0;
+    setMemoryCache(cacheKey, payload.data);
+    return payload.data;
+  } catch {
     return void 0;
   }
-  return cached.data;
+}
+async function setCached(cacheKey, data) {
+  setMemoryCache(cacheKey, data);
+  await setPersistentValue(
+    getPersistentCacheKey(cacheKey),
+    JSON.stringify({ data, expiresAt: Date.now() + CACHE_TTL_MS })
+  ).catch((error) => {
+    console.warn("[Geocoding] Failed to persist cache:", error);
+  });
+}
+async function fetchExternalSearch(cacheKey, url) {
+  const existing = inFlightSearches.get(cacheKey);
+  if (existing) return existing;
+  const request = (async () => {
+    await waitForExternalSearchSlot();
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": getNominatimUserAgent()
+      }
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      const error = new Error(body.slice(0, 200));
+      error.status = response.status;
+      error.retryAfter = response.headers.get("retry-after") || void 0;
+      throw error;
+    }
+    return response.json();
+  })().finally(() => {
+    inFlightSearches.delete(cacheKey);
+  });
+  inFlightSearches.set(cacheKey, request);
+  return request;
 }
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
@@ -1804,18 +2761,19 @@ function registerGeocodingProxy(app2) {
       res.json([]);
       return;
     }
+    const cacheKey = `${q.toLowerCase()}|${limit}`;
+    const cached = await getCached(cacheKey);
+    if (cached) {
+      res.setHeader("X-EconoRotas-Geocoding-Cache", "hit");
+      res.json(cached);
+      return;
+    }
     const rateLimit = checkRateLimit(req);
     if (!rateLimit.allowed) {
       res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
       res.status(429).json({
-        error: "Limite de consultas excedido. Tente novamente em instantes."
+        error: "Limite de consultas excedido. Aguarde alguns segundos e tente novamente."
       });
-      return;
-    }
-    const cacheKey = `${q.toLowerCase()}|${limit}`;
-    const cached = getCached(cacheKey);
-    if (cached) {
-      res.json(cached);
       return;
     }
     const params = new URLSearchParams({
@@ -1827,24 +2785,33 @@ function registerGeocodingProxy(app2) {
       "accept-language": "pt-BR,pt,en"
     });
     try {
-      const response = await fetch(`${NOMINATIM_SEARCH_URL}?${params.toString()}`, {
-        headers: {
-          Accept: "application/json",
-          "User-Agent": getNominatimUserAgent()
-        }
-      });
-      if (!response.ok) {
-        const body = await response.text();
-        res.status(response.status).json({
-          error: "Nao foi possivel consultar o servico de enderecos.",
-          details: body.slice(0, 200)
+      const data = await fetchExternalSearch(
+        cacheKey,
+        `${NOMINATIM_SEARCH_URL}?${params.toString()}`
+      );
+      await setCached(cacheKey, data);
+      res.setHeader("X-EconoRotas-Geocoding-Cache", "miss");
+      res.json(data);
+    } catch (error) {
+      const status = error.status;
+      if (status === 429) {
+        res.setHeader(
+          "Retry-After",
+          error.retryAfter || "3"
+        );
+        res.status(429).json({
+          error: "Servico de enderecos ocupado. Aguarde alguns segundos e tente novamente.",
+          details: error instanceof Error ? error.message : void 0
         });
         return;
       }
-      const data = await response.json();
-      cache.set(cacheKey, { data, expiresAt: Date.now() + CACHE_TTL_MS });
-      res.json(data);
-    } catch (error) {
+      if (status) {
+        res.status(status).json({
+          error: "Nao foi possivel consultar o servico de enderecos.",
+          details: error instanceof Error ? error.message : void 0
+        });
+        return;
+      }
       res.status(502).json({
         error: error instanceof Error ? error.message : "Falha ao consultar o servico de enderecos."
       });
@@ -1942,6 +2909,7 @@ async function notifyOwner(payload) {
 }
 
 // server/_core/trpc.ts
+init_env();
 import { initTRPC, TRPCError as TRPCError2 } from "@trpc/server";
 import superjson from "superjson";
 var t = initTRPC.context().create({
@@ -1965,7 +2933,7 @@ var protectedProcedure = t.procedure.use(requireUser);
 var adminProcedure = t.procedure.use(
   t.middleware(async (opts) => {
     const { ctx, next } = opts;
-    if (!ctx.user || ctx.user.role !== "admin") {
+    if (!ctx.user || ctx.user.role !== "admin" || !isAdminEmail(ctx.user.email, ENV.adminEmails)) {
       throw new TRPCError2({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
     }
     return next({
@@ -2010,11 +2978,11 @@ import { promisify } from "node:util";
 var scrypt = promisify(scryptCallback);
 var KEY_LENGTH = 64;
 var HASH_PREFIX = "scrypt";
-function normalizeEmail(email) {
+function normalizeEmail2(email) {
   return email.trim().toLowerCase();
 }
 function buildPasswordOpenId(email) {
-  const digest = createHash("sha256").update(normalizeEmail(email)).digest("hex");
+  const digest = createHash("sha256").update(normalizeEmail2(email)).digest("hex");
   return `pwd_${digest.slice(0, 60)}`;
 }
 async function hashPassword(password) {
@@ -2037,6 +3005,42 @@ async function verifyPassword(password, storedHash) {
 }
 
 // server/optimization.ts
+function getLocalitySettings(localityMode = "local") {
+  if (localityMode === "strict") {
+    return {
+      localRadiusKm: 2.5,
+      ratioThreshold: 1.12,
+      extraKmThreshold: 0.08,
+      longJumpThresholdKm: 0.35,
+      penaltyMultiplier: 4
+    };
+  }
+  if (localityMode === "balanced") {
+    return {
+      localRadiusKm: 1.5,
+      ratioThreshold: 1.55,
+      extraKmThreshold: 0.35,
+      longJumpThresholdKm: 1.25,
+      penaltyMultiplier: 2
+    };
+  }
+  return {
+    localRadiusKm: 2,
+    ratioThreshold: 1.28,
+    extraKmThreshold: 0.18,
+    longJumpThresholdKm: 0.7,
+    penaltyMultiplier: 3
+  };
+}
+function isAvoidableLocalJump(nearestDistance, plannedDistance, settings) {
+  const significantlyCloser = plannedDistance > Math.max(
+    nearestDistance * settings.ratioThreshold,
+    nearestDistance + settings.extraKmThreshold
+  );
+  const nearbyContext = nearestDistance <= settings.localRadiusKm || plannedDistance <= settings.localRadiusKm * 2.5;
+  const longJump = plannedDistance - nearestDistance >= settings.longJumpThresholdKm;
+  return significantlyCloser && (nearbyContext || longJump);
+}
 function calculateDistance(loc1, loc2) {
   const R = 6371;
   const dLat = toRad(loc2.latitude - loc1.latitude);
@@ -2052,120 +3056,209 @@ function estimateTravelTime(distance) {
   const avgSpeed = 50;
   return Math.round(distance / avgSpeed * 60);
 }
-function optimizeRouteNearestNeighbor(locations, startIndex = 0, options = {}) {
-  if (locations.length === 0) {
+function buildRouteLegs(locations, sequence, options = {}) {
+  const legs = [];
+  if (sequence.length === 0) {
     if (options.startLocation && options.endLocation) {
-      const distance = calculateDistance(options.startLocation, options.endLocation);
-      return {
-        sequence: [],
-        totalDistance: Math.round(distance * 100) / 100,
-        totalTime: estimateTravelTime(distance),
-        waypoints: []
-      };
+      legs.push({ from: options.startLocation, to: options.endLocation });
     }
-    return {
-      sequence: [],
-      totalDistance: 0,
-      totalTime: 0,
-      waypoints: []
-    };
+    return legs;
   }
-  if (options.startLocation || options.endLocation) {
-    const n2 = locations.length;
-    const visited2 = new Array(n2).fill(false);
-    const sequence2 = [];
-    let totalDistance2 = 0;
-    let totalTime2 = 0;
-    let currentLocation = options.startLocation ?? locations[startIndex];
-    if (!options.startLocation) {
-      visited2[startIndex] = true;
-      sequence2.push(startIndex);
-    }
-    while (sequence2.length < n2) {
-      let nearestIndex = -1;
-      let nearestDistance = Infinity;
-      for (let i = 0; i < n2; i++) {
-        if (visited2[i]) continue;
-        const distance = calculateDistance(currentLocation, locations[i]);
-        if (distance < nearestDistance) {
-          nearestDistance = distance;
-          nearestIndex = i;
-        }
-      }
-      if (nearestIndex === -1) {
-        break;
-      }
-      visited2[nearestIndex] = true;
-      sequence2.push(nearestIndex);
-      totalDistance2 += nearestDistance;
-      totalTime2 += estimateTravelTime(nearestDistance);
-      currentLocation = locations[nearestIndex];
-    }
-    if (options.endLocation) {
-      const distanceToEnd = calculateDistance(currentLocation, options.endLocation);
-      totalDistance2 += distanceToEnd;
-      totalTime2 += estimateTravelTime(distanceToEnd);
-    }
-    const waypoints2 = sequence2.map((idx, seq) => ({
-      ...locations[idx],
-      sequence: seq
-    }));
-    return {
-      sequence: sequence2,
-      totalDistance: Math.round(totalDistance2 * 100) / 100,
-      totalTime: totalTime2,
-      waypoints: waypoints2
-    };
+  if (options.startLocation) {
+    legs.push({ from: options.startLocation, to: locations[sequence[0]] });
   }
-  if (locations.length === 1) {
-    return {
-      sequence: [0],
-      totalDistance: 0,
-      totalTime: 0,
-      waypoints: [{ ...locations[0], sequence: 0 }]
-    };
+  for (let i = 0; i < sequence.length - 1; i++) {
+    legs.push({
+      from: locations[sequence[i]],
+      to: locations[sequence[i + 1]]
+    });
   }
-  const n = locations.length;
-  const visited = new Array(n).fill(false);
-  const sequence = [];
-  let currentIndex = startIndex;
-  let totalDistance = 0;
-  let totalTime = 0;
-  visited[currentIndex] = true;
-  sequence.push(currentIndex);
-  for (let i = 1; i < n; i++) {
-    let nearestIndex = -1;
-    let nearestDistance = Infinity;
-    for (let j = 0; j < n; j++) {
-      if (!visited[j]) {
-        const distance = calculateDistance(locations[currentIndex], locations[j]);
-        if (distance < nearestDistance) {
-          nearestDistance = distance;
-          nearestIndex = j;
-        }
-      }
-    }
-    if (nearestIndex !== -1) {
-      visited[nearestIndex] = true;
-      sequence.push(nearestIndex);
-      totalDistance += nearestDistance;
-      totalTime += estimateTravelTime(nearestDistance);
-      currentIndex = nearestIndex;
-    }
+  if (options.endLocation) {
+    legs.push({
+      from: locations[sequence[sequence.length - 1]],
+      to: options.endLocation
+    });
   }
-  const waypoints = sequence.map((idx, seq) => ({
-    ...locations[idx],
-    sequence: seq
-  }));
+  return legs;
+}
+function calculateSequenceDistance(locations, sequence, options = {}) {
+  return buildRouteLegs(locations, sequence, options).reduce(
+    (total, leg) => total + calculateDistance(leg.from, leg.to),
+    0
+  );
+}
+function calculateSequenceTime(locations, sequence, options = {}) {
+  return buildRouteLegs(locations, sequence, options).reduce(
+    (total, leg) => total + estimateTravelTime(calculateDistance(leg.from, leg.to)),
+    0
+  );
+}
+function buildOptimizedRoute(locations, sequence, options = {}) {
+  const totalDistance = calculateSequenceDistance(locations, sequence, options);
   return {
     sequence,
     totalDistance: Math.round(totalDistance * 100) / 100,
-    totalTime,
-    waypoints
+    totalTime: calculateSequenceTime(locations, sequence, options),
+    waypoints: sequence.map((idx, seq) => ({
+      ...locations[idx],
+      sequence: seq
+    }))
   };
 }
+function buildNearestNeighborSequence(locations, startIndex, options = {}) {
+  const n = locations.length;
+  const visited = new Array(n).fill(false);
+  const sequence = [];
+  let currentLocation = options.startLocation ?? locations[startIndex];
+  if (!options.startLocation) {
+    visited[startIndex] = true;
+    sequence.push(startIndex);
+  }
+  while (sequence.length < n) {
+    let nearestIndex = -1;
+    let nearestDistance = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (visited[i]) continue;
+      const distance = calculateDistance(currentLocation, locations[i]);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = i;
+      }
+    }
+    if (nearestIndex === -1) break;
+    visited[nearestIndex] = true;
+    sequence.push(nearestIndex);
+    currentLocation = locations[nearestIndex];
+  }
+  return sequence;
+}
+function improveSequenceWithTwoOpt(locations, initialSequence, options = {}) {
+  let sequence = [...initialSequence];
+  let bestDistance = calculateSequenceDistance(locations, sequence, options);
+  let improved = true;
+  let passes = 0;
+  const firstMutableIndex = options.startLocation ? 1 : 0;
+  while (improved && passes < 8) {
+    improved = false;
+    passes += 1;
+    for (let i = firstMutableIndex; i < sequence.length - 1; i++) {
+      for (let k = i + 1; k < sequence.length; k++) {
+        const candidate = [
+          ...sequence.slice(0, i),
+          ...sequence.slice(i, k + 1).reverse(),
+          ...sequence.slice(k + 1)
+        ];
+        const candidateDistance = calculateSequenceDistance(
+          locations,
+          candidate,
+          options
+        );
+        if (candidateDistance + 1e-6 < bestDistance) {
+          sequence = candidate;
+          bestDistance = candidateDistance;
+          improved = true;
+        }
+      }
+    }
+  }
+  return sequence;
+}
+function enforceLocalNearestSequence(locations, initialSequence, options = {}) {
+  const remaining = new Set(initialSequence);
+  const sequence = [];
+  let currentLocation = options.startLocation ?? locations[initialSequence[0]];
+  const localitySettings = getLocalitySettings(options.localityMode);
+  while (remaining.size > 0) {
+    const plannedNext = initialSequence.find((index2) => remaining.has(index2));
+    if (plannedNext === void 0) break;
+    let nearestIndex = plannedNext;
+    let nearestDistance = calculateDistance(currentLocation, locations[plannedNext]);
+    for (const candidateIndex of Array.from(remaining)) {
+      const distance = calculateDistance(currentLocation, locations[candidateIndex]);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = candidateIndex;
+      }
+    }
+    const plannedDistance = calculateDistance(currentLocation, locations[plannedNext]);
+    const jumpIsOperationallyBad = nearestIndex !== plannedNext && isAvoidableLocalJump(nearestDistance, plannedDistance, localitySettings);
+    const nextIndex = jumpIsOperationallyBad ? nearestIndex : plannedNext;
+    remaining.delete(nextIndex);
+    sequence.push(nextIndex);
+    currentLocation = locations[nextIndex];
+  }
+  return sequence;
+}
+function calculateAvoidableJumpPenalty(locations, sequence, options = {}) {
+  const settings = getLocalitySettings(options.localityMode);
+  const remaining = new Set(sequence);
+  let currentLocation = options.startLocation ?? locations[sequence[0]];
+  let penalty = 0;
+  for (const plannedNext of sequence) {
+    remaining.delete(plannedNext);
+    const plannedDistance = calculateDistance(currentLocation, locations[plannedNext]);
+    let nearestDistance = plannedDistance;
+    for (const candidateIndex of [plannedNext, ...Array.from(remaining)]) {
+      const distance = calculateDistance(currentLocation, locations[candidateIndex]);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+      }
+    }
+    if (isAvoidableLocalJump(nearestDistance, plannedDistance, settings)) {
+      penalty += (plannedDistance - nearestDistance) * settings.penaltyMultiplier;
+    }
+    currentLocation = locations[plannedNext];
+  }
+  return penalty;
+}
+function calculateDriverFriendlyScore(locations, sequence, options = {}) {
+  return calculateSequenceDistance(locations, sequence, options) + calculateAvoidableJumpPenalty(locations, sequence, options);
+}
+function optimizeOpenRoute(locations, startIndex = 0, options = {}) {
+  if (locations.length === 0) {
+    return buildOptimizedRoute(locations, [], options);
+  }
+  const startIndexes = options.startLocation ? [0] : locations.length > 40 ? [startIndex] : locations.map((_, index2) => index2);
+  const uniqueStartIndexes = Array.from(/* @__PURE__ */ new Set([startIndex, ...startIndexes])).filter((index2) => index2 >= 0 && index2 < locations.length);
+  let bestSequence = null;
+  let bestScore = Infinity;
+  for (const candidateStartIndex of uniqueStartIndexes) {
+    const nearestSequence = buildNearestNeighborSequence(
+      locations,
+      candidateStartIndex,
+      options
+    );
+    const improvedSequence = improveSequenceWithTwoOpt(
+      locations,
+      nearestSequence,
+      options
+    );
+    const candidateSequences = [
+      nearestSequence,
+      improvedSequence,
+      enforceLocalNearestSequence(locations, improvedSequence, options)
+    ];
+    for (const candidateSequence of candidateSequences) {
+      const score = calculateDriverFriendlyScore(
+        locations,
+        candidateSequence,
+        options
+      );
+      if (score < bestScore) {
+        bestScore = score;
+        bestSequence = candidateSequence;
+      }
+    }
+  }
+  const driverFriendlySequence = enforceLocalNearestSequence(
+    locations,
+    bestSequence ?? [],
+    options
+  );
+  return buildOptimizedRoute(locations, driverFriendlySequence, options);
+}
 function optimizeRoute(locations, mode = "balanced", startIndex = 0, options = {}) {
-  return optimizeRouteNearestNeighbor(locations, startIndex, options);
+  return optimizeOpenRoute(locations, startIndex, options);
 }
 function validateLocations(locations) {
   if (!locations || locations.length === 0) {
@@ -2184,6 +3277,332 @@ function validateLocations(locations) {
     }
   }
   return { valid: true };
+}
+
+// server/osrm.ts
+init_env();
+function getLocalitySettings2(localityMode = "local") {
+  if (localityMode === "strict") {
+    return {
+      localRadius: 2.5,
+      ratioThreshold: 1.12,
+      extraThreshold: 0.08,
+      longJumpThreshold: 0.35,
+      penaltyMultiplier: 4
+    };
+  }
+  if (localityMode === "balanced") {
+    return {
+      localRadius: 1.5,
+      ratioThreshold: 1.55,
+      extraThreshold: 0.35,
+      longJumpThreshold: 1.25,
+      penaltyMultiplier: 2
+    };
+  }
+  return {
+    localRadius: 2,
+    ratioThreshold: 1.28,
+    extraThreshold: 0.18,
+    longJumpThreshold: 0.7,
+    penaltyMultiplier: 3
+  };
+}
+function isAvoidableLocalJump2(nearestMetric, plannedMetric, settings) {
+  const significantlyCloser = plannedMetric > Math.max(
+    nearestMetric * settings.ratioThreshold,
+    nearestMetric + settings.extraThreshold
+  );
+  const nearbyContext = nearestMetric <= settings.localRadius || plannedMetric <= settings.localRadius * 2.5;
+  const longJump = plannedMetric - nearestMetric >= settings.longJumpThreshold;
+  return significantlyCloser && (nearbyContext || longJump);
+}
+function isValidCoordinate(location) {
+  return Number.isFinite(location.latitude) && Number.isFinite(location.longitude) && location.latitude >= -90 && location.latitude <= 90 && location.longitude >= -180 && location.longitude <= 180;
+}
+function buildNodes(locations, options = {}) {
+  const nodes = locations.map((location, deliveryIndex) => ({
+    location,
+    deliveryIndex,
+    role: "delivery"
+  }));
+  const startNodeIndex = options.startLocation && isValidCoordinate(options.startLocation) ? nodes.push({ location: options.startLocation, role: "start" }) - 1 : void 0;
+  const endNodeIndex = options.endLocation && isValidCoordinate(options.endLocation) ? nodes.push({ location: options.endLocation, role: "end" }) - 1 : void 0;
+  return { nodes, startNodeIndex, endNodeIndex };
+}
+function buildOsrmTableUrl(nodes) {
+  const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const coordinates = nodes.map(({ location }) => `${location.longitude},${location.latitude}`).join(";");
+  return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
+}
+function normalizeMatrix(values, factor) {
+  if (!values?.length) return null;
+  const normalized = values.map(
+    (row) => row.map(
+      (value) => typeof value === "number" && Number.isFinite(value) ? value / factor : Infinity
+    )
+  );
+  return normalized.some((row) => row.some((value) => !Number.isFinite(value))) ? null : normalized;
+}
+async function fetchRoadMatrix(locations, options = {}) {
+  if (!ENV.osrmEnabled || locations.length === 0) return null;
+  const { nodes, startNodeIndex, endNodeIndex } = buildNodes(locations, options);
+  if (nodes.length < 2 || nodes.some((node) => !isValidCoordinate(node.location))) {
+    return null;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
+  try {
+    const response = await fetch(buildOsrmTableUrl(nodes), {
+      signal: controller.signal,
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data.code !== "Ok") return null;
+    const distancesKm = normalizeMatrix(data.distances, 1e3);
+    const durationsMinutes = normalizeMatrix(data.durations, 60);
+    if (!distancesKm || !durationsMinutes) return null;
+    return {
+      matrix: { nodes, distancesKm, durationsMinutes },
+      startNodeIndex,
+      endNodeIndex
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+function getMetric(matrix, mode, from, to) {
+  return mode === "duration" ? matrix.durationsMinutes[from][to] : matrix.distancesKm[from][to];
+}
+function calculateSequenceMetric(matrix, sequence, mode, startNodeIndex, endNodeIndex) {
+  let total = 0;
+  if (sequence.length === 0) {
+    return startNodeIndex !== void 0 && endNodeIndex !== void 0 ? getMetric(matrix, mode, startNodeIndex, endNodeIndex) : 0;
+  }
+  if (startNodeIndex !== void 0) {
+    total += getMetric(matrix, mode, startNodeIndex, sequence[0]);
+  }
+  for (let index2 = 0; index2 < sequence.length - 1; index2 += 1) {
+    total += getMetric(matrix, mode, sequence[index2], sequence[index2 + 1]);
+  }
+  if (endNodeIndex !== void 0) {
+    total += getMetric(matrix, mode, sequence[sequence.length - 1], endNodeIndex);
+  }
+  return total;
+}
+function buildRoadRoute(matrix, sequence, startNodeIndex, endNodeIndex) {
+  return {
+    sequence: sequence.map((nodeIndex) => matrix.nodes[nodeIndex].deliveryIndex ?? nodeIndex),
+    totalDistance: Math.round(
+      calculateSequenceMetric(matrix, sequence, "distance", startNodeIndex, endNodeIndex) * 100
+    ) / 100,
+    totalTime: Math.round(
+      calculateSequenceMetric(matrix, sequence, "duration", startNodeIndex, endNodeIndex)
+    ),
+    waypoints: sequence.map((nodeIndex, sequenceIndex) => ({
+      ...matrix.nodes[nodeIndex].location,
+      sequence: sequenceIndex
+    }))
+  };
+}
+function buildNearestSequence(matrix, deliveryNodeIndexes, startIndex, objective, startNodeIndex) {
+  const available = new Set(deliveryNodeIndexes);
+  const sequence = [];
+  let currentNodeIndex = startNodeIndex ?? deliveryNodeIndexes[startIndex] ?? deliveryNodeIndexes[0];
+  if (startNodeIndex === void 0) {
+    available.delete(currentNodeIndex);
+    sequence.push(currentNodeIndex);
+  }
+  while (available.size > 0) {
+    let nearestIndex = -1;
+    let nearestMetric = Infinity;
+    for (const candidateIndex of Array.from(available)) {
+      const metric = getMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
+        nearestIndex = candidateIndex;
+      }
+    }
+    if (nearestIndex === -1) break;
+    available.delete(nearestIndex);
+    sequence.push(nearestIndex);
+    currentNodeIndex = nearestIndex;
+  }
+  return sequence;
+}
+function improveSequenceWithTwoOpt2(matrix, initialSequence, objective, startNodeIndex, endNodeIndex) {
+  let sequence = [...initialSequence];
+  let bestMetric = calculateSequenceMetric(
+    matrix,
+    sequence,
+    objective,
+    startNodeIndex,
+    endNodeIndex
+  );
+  let improved = true;
+  let passes = 0;
+  const firstMutableIndex = startNodeIndex !== void 0 ? 1 : 0;
+  while (improved && passes < 8) {
+    improved = false;
+    passes += 1;
+    for (let i = firstMutableIndex; i < sequence.length - 1; i += 1) {
+      for (let k = i + 1; k < sequence.length; k += 1) {
+        const candidate = [
+          ...sequence.slice(0, i),
+          ...sequence.slice(i, k + 1).reverse(),
+          ...sequence.slice(k + 1)
+        ];
+        const candidateMetric = calculateSequenceMetric(
+          matrix,
+          candidate,
+          objective,
+          startNodeIndex,
+          endNodeIndex
+        );
+        if (candidateMetric + 1e-6 < bestMetric) {
+          sequence = candidate;
+          bestMetric = candidateMetric;
+          improved = true;
+        }
+      }
+    }
+  }
+  return sequence;
+}
+function enforceLocalNearestRoadSequence(matrix, initialSequence, objective, startNodeIndex, localityMode = "balanced") {
+  const remaining = new Set(initialSequence);
+  const sequence = [];
+  let currentNodeIndex = startNodeIndex ?? initialSequence[0];
+  const localitySettings = getLocalitySettings2(localityMode);
+  while (remaining.size > 0) {
+    const plannedNext = initialSequence.find((nodeIndex) => remaining.has(nodeIndex));
+    if (plannedNext === void 0) break;
+    let nearestIndex = plannedNext;
+    let nearestMetric = getMetric(matrix, objective, currentNodeIndex, plannedNext);
+    for (const candidateIndex of Array.from(remaining)) {
+      const metric = getMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
+        nearestIndex = candidateIndex;
+      }
+    }
+    const plannedMetric = getMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const jumpIsOperationallyBad = nearestIndex !== plannedNext && isAvoidableLocalJump2(nearestMetric, plannedMetric, localitySettings);
+    const nextIndex = jumpIsOperationallyBad ? nearestIndex : plannedNext;
+    remaining.delete(nextIndex);
+    sequence.push(nextIndex);
+    currentNodeIndex = nextIndex;
+  }
+  return sequence;
+}
+function calculateAvoidableJumpPenalty2(matrix, sequence, objective, startNodeIndex, localityMode = "local") {
+  const settings = getLocalitySettings2(localityMode);
+  const remaining = new Set(sequence);
+  let currentNodeIndex = startNodeIndex ?? sequence[0];
+  let penalty = 0;
+  for (const plannedNext of sequence) {
+    remaining.delete(plannedNext);
+    const plannedMetric = getMetric(matrix, objective, currentNodeIndex, plannedNext);
+    let nearestMetric = plannedMetric;
+    for (const candidateIndex of [plannedNext, ...Array.from(remaining)]) {
+      const metric = getMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
+      }
+    }
+    if (isAvoidableLocalJump2(nearestMetric, plannedMetric, settings)) {
+      penalty += (plannedMetric - nearestMetric) * settings.penaltyMultiplier;
+    }
+    currentNodeIndex = plannedNext;
+  }
+  return penalty;
+}
+function chooseObjective(mode) {
+  return mode === "shortest_time" ? "duration" : "distance";
+}
+async function buildSequentialRouteWithRoadMetrics(locations, options = {}) {
+  const result = await fetchRoadMatrix(locations, options);
+  if (!result) return null;
+  const deliveryNodeIndexes = result.matrix.nodes.map((node, nodeIndex) => node.role === "delivery" ? nodeIndex : -1).filter((nodeIndex) => nodeIndex >= 0);
+  return buildRoadRoute(
+    result.matrix,
+    deliveryNodeIndexes,
+    result.startNodeIndex,
+    result.endNodeIndex
+  );
+}
+async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startIndex = 0, options = {}) {
+  const result = await fetchRoadMatrix(locations, options);
+  if (!result) return null;
+  const deliveryNodeIndexes = result.matrix.nodes.map((node, nodeIndex) => node.role === "delivery" ? nodeIndex : -1).filter((nodeIndex) => nodeIndex >= 0);
+  const objective = chooseObjective(mode);
+  const startCandidates = result.startNodeIndex !== void 0 || deliveryNodeIndexes.length > 40 ? [Math.min(Math.max(startIndex, 0), Math.max(deliveryNodeIndexes.length - 1, 0))] : deliveryNodeIndexes.map((_, index2) => index2);
+  let bestSequence = null;
+  let bestScore = Infinity;
+  for (const candidateStartIndex of startCandidates) {
+    const nearestSequence = buildNearestSequence(
+      result.matrix,
+      deliveryNodeIndexes,
+      candidateStartIndex,
+      objective,
+      result.startNodeIndex
+    );
+    const improved = improveSequenceWithTwoOpt2(
+      result.matrix,
+      nearestSequence,
+      objective,
+      result.startNodeIndex,
+      result.endNodeIndex
+    );
+    const candidateSequences = [
+      nearestSequence,
+      improved,
+      enforceLocalNearestRoadSequence(
+        result.matrix,
+        improved,
+        objective,
+        result.startNodeIndex,
+        options.localityMode
+      )
+    ];
+    for (const candidateSequence of candidateSequences) {
+      const metric = calculateSequenceMetric(
+        result.matrix,
+        candidateSequence,
+        objective,
+        result.startNodeIndex,
+        result.endNodeIndex
+      );
+      const penalty = calculateAvoidableJumpPenalty2(
+        result.matrix,
+        candidateSequence,
+        objective,
+        result.startNodeIndex,
+        options.localityMode
+      );
+      const score = metric + penalty;
+      if (score < bestScore) {
+        bestScore = score;
+        bestSequence = candidateSequence;
+      }
+    }
+  }
+  const driverFriendlySequence = enforceLocalNearestRoadSequence(
+    result.matrix,
+    bestSequence ?? deliveryNodeIndexes,
+    objective,
+    result.startNodeIndex,
+    options.localityMode
+  );
+  return buildRoadRoute(
+    result.matrix,
+    driverFriendlySequence,
+    result.startNodeIndex,
+    result.endNodeIndex
+  );
 }
 
 // server/_core/llm.ts
@@ -2400,9 +3819,24 @@ Estat\xEDsticas do Usu\xE1rio:
   }
   return context;
 }
+function buildFallbackAssistantResponse(routeContext) {
+  return [
+    "No momento o assistente de IA n\xE3o conseguiu acessar o provedor externo, mas o EconoRotas continua operacional.",
+    "",
+    "Resumo dispon\xEDvel:",
+    routeContext,
+    "",
+    "Recomenda\xE7\xF5es pr\xE1ticas:",
+    "- confira se todos os endere\xE7os t\xEAm n\xFAmero, bairro, cidade e UF;",
+    "- use a otimiza\xE7\xE3o por dist\xE2ncia para reduzir deslocamento;",
+    "- revise paradas sem coordenadas antes de iniciar a rota;",
+    "- escolha Google Maps ou Waze no menu lateral antes de abrir a navega\xE7\xE3o."
+  ].join("\n");
+}
 async function chatWithLLM(userId, userMessage, routeId, previousMessages = []) {
+  let routeContext = "";
   try {
-    const routeContext = await buildRouteContext(userId, routeId);
+    routeContext = await buildRouteContext(userId, routeId);
     const messages = [
       {
         role: "system",
@@ -2429,7 +3863,9 @@ forne\xE7a recomenda\xE7\xF5es pr\xE1ticas baseadas em seus dados. Use markdown 
     return assistantMessage;
   } catch (error) {
     console.error("[Chat] LLM Error:", error);
-    throw new Error("Erro ao processar mensagem com IA");
+    return buildFallbackAssistantResponse(
+      routeContext || "N\xE3o foi poss\xEDvel carregar o contexto das rotas agora."
+    );
   }
 }
 function formatChatHistory(messages) {
@@ -2439,7 +3875,375 @@ function formatChatHistory(messages) {
   }));
 }
 
+// server/imile.ts
+init_env();
+var DEFAULT_IMILE_API_BASE_URL = "https://driverapp.imile.com";
+var DEFAULT_IMILE_FALLBACK_BASE_URLS = [
+  "https://driverapp-zen.imile.com",
+  "https://driverapp-cf.imile.com",
+  "https://driverapp-sgaws.imile.com"
+];
+var DEFAULT_IMILE_DELIVERIES_PATH = "/lm/express/driver/v1/driver/delivery/delivery/queryDeliveryListV2";
+var DEFAULT_IMILE_APP_VERSION = "2.2.78";
+var DEFAULT_IMILE_SOURCE_NAME = "REDeliveryApp";
+var DIRECT_FIELDS = {
+  trackingNumber: [
+    "trackingNumber",
+    "trackingNo",
+    "waybillNo",
+    "wayBillNo",
+    "awbNo",
+    "billCode",
+    "orderNo",
+    "shipmentNo",
+    "scanNumber",
+    "referenceNo",
+    "taskNo"
+  ],
+  address: [
+    "address",
+    "destinationAddress",
+    "receiverAddress",
+    "recipientAddress",
+    "consigneeAddress",
+    "deliveryAddress",
+    "addressDetail",
+    "detailAddress",
+    "consigneeStreet",
+    "lastConsigneeAddress"
+  ],
+  city: ["city", "receiverCity", "recipientCity", "consigneeCity", "addressCity"],
+  neighborhood: ["neighborhood", "district", "bairro", "receiverDistrict", "consigneeSuburb"],
+  postalCode: ["postalCode", "zipCode", "zipcode", "cep", "consigneeZipCode"],
+  latitude: [
+    "latitude",
+    "lat",
+    "receiverLatitude",
+    "recipientLatitude",
+    "consigneeLatitude",
+    "addressLatitude"
+  ],
+  longitude: [
+    "longitude",
+    "lng",
+    "lon",
+    "receiverLongitude",
+    "recipientLongitude",
+    "consigneeLongitude",
+    "addressLongitude"
+  ],
+  recipientName: ["recipientName", "receiverName", "consigneeName", "customerName"],
+  recipientPhone: [
+    "recipientPhone",
+    "receiverPhone",
+    "consigneePhone",
+    "consigneeMobile",
+    "phone",
+    "mobile"
+  ],
+  status: ["status", "deliveryStatus", "shipmentStatus", "state"]
+};
+function readFirstString(record, keys) {
+  for (const key of keys) {
+    const value = record[key];
+    if (value === null || value === void 0) continue;
+    const text2 = String(value).trim();
+    if (text2) return text2;
+  }
+  return "";
+}
+function readCoordinate(record, keys) {
+  const value = readFirstString(record, keys).replace(",", ".");
+  const coordinate = Number(value);
+  return Number.isFinite(coordinate) ? coordinate : 0;
+}
+function compactJoin(parts) {
+  return parts.map((part) => part.trim()).filter(Boolean).filter(
+    (part, index2, all) => all.findIndex((candidate) => candidate.toLowerCase() === part.toLowerCase()) === index2
+  ).join(", ");
+}
+function pickArray(payload) {
+  if (Array.isArray(payload)) return payload.filter(isRecord);
+  if (!isRecord(payload)) return [];
+  const candidateKeys = ["data", "list", "rows", "records", "result", "orders", "deliveries"];
+  for (const key of candidateKeys) {
+    const value = payload[key];
+    if (Array.isArray(value)) return value.filter(isRecord);
+    if (isRecord(value)) {
+      const nested = pickArray(value);
+      if (nested.length) return nested;
+    }
+  }
+  return [];
+}
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function buildNotes(stop) {
+  return [
+    stop.trackingNumber ? `Rastreio: ${stop.trackingNumber}` : "",
+    stop.status ? `Status iMile: ${stop.status}` : "",
+    stop.recipientName ? `Destinatario: ${stop.recipientName}` : "",
+    stop.recipientPhone ? `Telefone: ${stop.recipientPhone}` : ""
+  ].filter(Boolean).join(" | ");
+}
+function normalizeDelivery(record, index2) {
+  const trackingNumber = readFirstString(record, DIRECT_FIELDS.trackingNumber);
+  const address = compactJoin([
+    readFirstString(record, DIRECT_FIELDS.address),
+    readFirstString(record, DIRECT_FIELDS.neighborhood),
+    readFirstString(record, DIRECT_FIELDS.city),
+    readFirstString(record, DIRECT_FIELDS.postalCode)
+  ]);
+  const stop = {
+    address,
+    latitude: readCoordinate(record, DIRECT_FIELDS.latitude),
+    longitude: readCoordinate(record, DIRECT_FIELDS.longitude),
+    packageNumber: String(index2 + 1).padStart(2, "0"),
+    trackingNumber,
+    recipientName: readFirstString(record, DIRECT_FIELDS.recipientName),
+    recipientPhone: readFirstString(record, DIRECT_FIELDS.recipientPhone),
+    status: readFirstString(record, DIRECT_FIELDS.status)
+  };
+  return {
+    ...stop,
+    notes: buildNotes(stop)
+  };
+}
+function normalizeFallbackBaseUrls(value, baseUrl) {
+  const raw = Array.isArray(value) ? value.join(",") : value;
+  return (raw || DEFAULT_IMILE_FALLBACK_BASE_URLS.join(",")).split(",").map((value2) => value2.trim().replace(/\/+$/, "")).filter(Boolean).filter((value2) => value2 !== baseUrl);
+}
+function getImileConfig(overrides = {}) {
+  const baseUrl = (overrides.baseUrl || ENV.imileApiBaseUrl || DEFAULT_IMILE_API_BASE_URL).replace(
+    /\/+$/,
+    ""
+  );
+  const deliveriesPath = overrides.deliveriesPath || ENV.imileDeliveriesPath || DEFAULT_IMILE_DELIVERIES_PATH;
+  const fallbackBaseUrls = normalizeFallbackBaseUrls(
+    overrides.fallbackBaseUrls || ENV.imileFallbackBaseUrls,
+    baseUrl
+  );
+  const authToken = overrides.authToken || ENV.imileAuthToken;
+  return {
+    configured: Boolean(baseUrl && authToken),
+    baseUrl,
+    fallbackBaseUrls,
+    deliveriesPath,
+    customerId: overrides.customerId || ENV.imileCustomerId,
+    sign: overrides.sign || ENV.imileSign,
+    authHeader: overrides.authHeader || ENV.imileAuthHeader || "Authorization",
+    authToken,
+    country: overrides.country || ENV.imileCountry || "BRA",
+    lang: overrides.lang || ENV.imileLang || "pt-BR",
+    resourceCode: overrides.resourceCode || ENV.imileResourceCode || "BRA",
+    timezone: overrides.timezone || ENV.imileTimezone || "America/Sao_Paulo",
+    hubCode: overrides.hubCode || ENV.imileHubCode,
+    appVersion: overrides.appVersion || ENV.imileAppVersion || DEFAULT_IMILE_APP_VERSION,
+    sourceName: overrides.sourceName || ENV.imileSourceName || DEFAULT_IMILE_SOURCE_NAME
+  };
+}
+function getImileConnectionStatus(overrides = {}) {
+  const config = getImileConfig(overrides);
+  return {
+    configured: config.configured,
+    baseUrlConfigured: Boolean(config.baseUrl),
+    baseUrl: config.baseUrl,
+    fallbackBaseUrls: config.fallbackBaseUrls,
+    deliveriesPath: config.deliveriesPath,
+    customerIdConfigured: Boolean(config.customerId),
+    signConfigured: Boolean(config.sign),
+    authTokenConfigured: Boolean(config.authToken),
+    country: config.country,
+    sourceName: config.sourceName,
+    appVersion: config.appVersion
+  };
+}
+function buildImileHeaders(config) {
+  const headers = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "IM-Language": config.lang,
+    "IM-SourceName": config.sourceName,
+    "IM-TimeZone": config.timezone,
+    "IM-APP-Version": config.appVersion,
+    "IM-APP-Timestamp": String(Date.now()),
+    lang: config.lang,
+    "resource-code": config.resourceCode,
+    timezone: config.timezone
+  };
+  if (config.hubCode) {
+    headers["IM-HubId"] = config.hubCode;
+    headers.hubcode = config.hubCode;
+  }
+  if (config.customerId) headers.customerId = config.customerId;
+  if (config.sign) headers.sign = config.sign;
+  if (config.authHeader && config.authToken) {
+    headers[config.authHeader] = config.authHeader.toLowerCase() === "authorization" && !config.authToken.toLowerCase().startsWith("bearer ") ? `Bearer ${config.authToken}` : config.authToken;
+  }
+  return headers;
+}
+function extractResponseMessage(payload, fallback) {
+  if (!isRecord(payload)) return fallback;
+  return String(payload.message || payload.msg || payload.error || payload.resultMessage || fallback);
+}
+function assertImilePayloadOk(payload, baseUrl) {
+  if (!isRecord(payload)) return;
+  const status = String(payload.status ?? "").toLowerCase();
+  const resultCode = String(payload.resultCode ?? "");
+  const success = payload.success;
+  const authenticated = /auth|token|login/i.test(extractResponseMessage(payload, ""));
+  if (resultCode === "00002" || authenticated) {
+    throw new Error(
+      `iMile exige autenticacao valida em ${baseUrl}. Cadastre a credencial Rider Delivery no perfil ou configure IMILE_AUTH_TOKEN no servidor.`
+    );
+  }
+  if (success === false || status === "failure") {
+    throw new Error(`iMile recusou a consulta em ${baseUrl}: ${extractResponseMessage(payload, "falha")}`);
+  }
+}
+async function requestDeliveriesFromBaseUrl(baseUrl, path4, headers, body) {
+  const url = new URL(path4, `${baseUrl}/`);
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(async () => ({
+    message: await response.text().catch(() => response.statusText)
+  }));
+  if (!response.ok) {
+    const message = extractResponseMessage(payload, response.statusText);
+    throw new Error(`iMile respondeu HTTP ${response.status} em ${baseUrl}: ${message}`);
+  }
+  assertImilePayloadOk(payload, baseUrl);
+  return payload;
+}
+async function fetchImileDeliveries(input, overrides = {}) {
+  const config = getImileConfig(overrides);
+  if (!config.configured) {
+    return {
+      configured: false,
+      source: "imile",
+      total: 0,
+      stops: [],
+      missingAddressRows: 0,
+      missingCoordinateRows: 0
+    };
+  }
+  const body = {
+    customerId: config.customerId || void 0,
+    sign: config.sign || void 0,
+    country: config.country,
+    countryCode: config.country,
+    dateFrom: input.dateFrom || void 0,
+    dateTo: input.dateTo || void 0,
+    status: input.status || void 0,
+    pageNum: 1,
+    pageNumber: 1,
+    currentPage: 1,
+    pageSize: 500
+  };
+  const headers = buildImileHeaders(config);
+  const baseUrls = [config.baseUrl, ...config.fallbackBaseUrls];
+  let payload = null;
+  let lastError = null;
+  for (const baseUrl of baseUrls) {
+    try {
+      payload = await requestDeliveriesFromBaseUrl(baseUrl, config.deliveriesPath, headers, body);
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  const stops2 = pickArray(payload).map(normalizeDelivery).filter((stop) => stop.address);
+  return {
+    configured: true,
+    source: "imile",
+    total: stops2.length,
+    stops: stops2,
+    missingAddressRows: pickArray(payload).length - stops2.length,
+    missingCoordinateRows: stops2.filter((stop) => !stop.latitude || !stop.longitude).length
+  };
+}
+
+// server/integrationCredentials.ts
+init_env();
+import crypto2 from "node:crypto";
+var ALGORITHM = "aes-256-gcm";
+function getKey() {
+  if (!ENV.integrationCredentialsSecret || ENV.integrationCredentialsSecret.length < 32) {
+    throw new Error("Configure INTEGRATION_CREDENTIALS_SECRET ou JWT_SECRET com no minimo 32 caracteres.");
+  }
+  return crypto2.createHash("sha256").update(ENV.integrationCredentialsSecret).digest();
+}
+function encryptIntegrationSecret(value) {
+  const iv = crypto2.randomBytes(12);
+  const cipher = crypto2.createCipheriv(ALGORITHM, getKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return [iv, authTag, encrypted].map((item) => item.toString("base64url")).join(".");
+}
+function decryptIntegrationSecret(value) {
+  const [ivValue, authTagValue, encryptedValue] = value.split(".");
+  if (!ivValue || !authTagValue || !encryptedValue) {
+    throw new Error("Credencial de integracao invalida.");
+  }
+  const decipher = crypto2.createDecipheriv(
+    ALGORITHM,
+    getKey(),
+    Buffer.from(ivValue, "base64url")
+  );
+  decipher.setAuthTag(Buffer.from(authTagValue, "base64url"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(encryptedValue, "base64url")),
+    decipher.final()
+  ]).toString("utf8");
+}
+
 // server/routers.ts
+var IMILE_PROVIDER = "imile_rider_delivery";
+var imileCredentialInput = z2.object({
+  label: z2.string().max(255).optional(),
+  baseUrl: z2.string().url().optional().or(z2.literal("")),
+  fallbackBaseUrls: z2.string().optional(),
+  deliveriesPath: z2.string().max(500).optional(),
+  authHeader: z2.string().max(128).optional(),
+  authToken: z2.string().optional().default(""),
+  country: z2.string().max(16).optional(),
+  lang: z2.string().max(32).optional(),
+  resourceCode: z2.string().max(64).optional(),
+  timezone: z2.string().max(64).optional(),
+  hubCode: z2.string().max(128).optional(),
+  appVersion: z2.string().max(32).optional(),
+  sourceName: z2.string().max(128).optional()
+});
+function cleanText(value) {
+  const text2 = value?.trim();
+  return text2 || void 0;
+}
+async function getUserImileOverrides(userId) {
+  const integration = await getUserIntegration(userId, IMILE_PROVIDER);
+  if (!integration) return void 0;
+  return {
+    baseUrl: cleanText(integration.baseUrl),
+    fallbackBaseUrls: cleanText(integration.fallbackBaseUrls),
+    deliveriesPath: cleanText(integration.deliveriesPath),
+    authHeader: cleanText(integration.authHeader),
+    authToken: decryptIntegrationSecret(integration.authTokenEncrypted),
+    country: cleanText(integration.country),
+    lang: cleanText(integration.lang),
+    resourceCode: cleanText(integration.resourceCode),
+    timezone: cleanText(integration.timezone),
+    hubCode: cleanText(integration.hubCode),
+    appVersion: cleanText(integration.appVersion),
+    sourceName: cleanText(integration.sourceName)
+  };
+}
 function toOptionalLocation(address, latitudeValue, longitudeValue) {
   const normalizedAddress = typeof address === "string" ? address.trim() : "";
   const latitude = Number(latitudeValue);
@@ -2460,9 +4264,9 @@ function hasMissingCoordinates(location) {
   return location.latitude === 0 && location.longitude === 0;
 }
 function buildSequentialRoute(locations, options = {}) {
-  const waypoints = locations.map((location, index) => ({
+  const waypoints = locations.map((location, index2) => ({
     ...location,
-    sequence: index
+    sequence: index2
   }));
   if (waypoints.length === 0) {
     return {
@@ -2479,9 +4283,9 @@ function buildSequentialRoute(locations, options = {}) {
     totalDistance += firstSegmentDistance;
     totalTime += estimateTravelTime(firstSegmentDistance);
   }
-  for (let index = 0; index < waypoints.length - 1; index++) {
-    const current = waypoints[index];
-    const next = waypoints[index + 1];
+  for (let index2 = 0; index2 < waypoints.length - 1; index2++) {
+    const current = waypoints[index2];
+    const next = waypoints[index2 + 1];
     const segmentDistance = calculateDistance(current, next);
     totalDistance += segmentDistance;
     totalTime += estimateTravelTime(segmentDistance);
@@ -2495,29 +4299,52 @@ function buildSequentialRoute(locations, options = {}) {
     totalTime += estimateTravelTime(lastSegmentDistance);
   }
   return {
-    sequence: waypoints.map((_, index) => index),
+    sequence: waypoints.map((_, index2) => index2),
     totalDistance: Math.round(totalDistance * 100) / 100,
     totalTime,
     waypoints
   };
+}
+function isImileStopNotes(notes) {
+  return /\b(Status iMile|Distancia app|Entregas agrupadas|Destinatario|Telefone)\s*:/i.test(
+    notes || ""
+  );
+}
+function buildSequentialImilePackageNumber(index2) {
+  return String(index2 + 1).padStart(2, "0");
+}
+function replaceImilePackageInNotes(notes, sequence) {
+  if (!isImileStopNotes(notes)) return notes;
+  const packageNote = `Pacote: ${buildSequentialImilePackageNumber(sequence)}`;
+  const parts = (notes || "").split("|").map((part) => part.trim()).filter(Boolean).filter((part) => !/^(Pacote|STOP)\s*:/i.test(part));
+  return [packageNote, ...parts].join(" | ");
 }
 async function requireUserRoute(routeId, userId) {
   const route = await getRouteById(routeId, userId);
   if (!route) {
     throw new TRPCError3({
       code: "NOT_FOUND",
-      message: "Rota nao encontrada."
+      message: "Rota n\xE3o encontrada."
     });
   }
   return route;
 }
 async function optimizeUserRoute(routeId, userId, requestedMode, options) {
   const route = await requireUserRoute(routeId, userId);
-  const routeStops = await getRouteStops(routeId);
+  const excludedStopIds = new Set(options?.excludeStopIds ?? []);
+  const routeStops = (await getRouteStops(routeId)).filter(
+    (stop) => !excludedStopIds.has(Number(stop.id))
+  );
   if (routeStops.length === 0) {
     throw new TRPCError3({
       code: "BAD_REQUEST",
-      message: "A rota nao tem paradas."
+      message: "A rota n\xE3o tem paradas."
+    });
+  }
+  if (routeStops.length < 2) {
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: "A rota precisa ter pelo menos 2 paradas para otimizar."
     });
   }
   const locations = routeStops.map((stop) => ({
@@ -2540,11 +4367,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       message: `Coordenadas ausentes na parada ${missingCoordinateIndex + 1}.`
     });
   }
-  const startLocation = toOptionalLocation(
-    route.startLocation,
-    route.startLatitude,
-    route.startLongitude
-  );
+  const startLocation = options?.startLocation ?? toOptionalLocation(route.startLocation, route.startLatitude, route.startLongitude);
   const endLocation = toOptionalLocation(
     route.endLocation,
     route.endLatitude,
@@ -2568,10 +4391,13 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     });
   }
   const mode = requestedMode || route.mode;
-  const optimized = options?.respectInputSequence ? buildSequentialRoute(locations, { startLocation, endLocation }) : optimizeRoute(locations, mode, 0, {
+  const roadMetricOptions = {
     startLocation,
-    endLocation
-  });
+    endLocation,
+    localityMode: options?.localityMode
+  };
+  const optimizedWithRoadMetrics = options?.respectInputSequence ? await buildSequentialRouteWithRoadMetrics(locations, roadMetricOptions) : await optimizeRouteWithRoadMetrics(locations, mode, 0, roadMetricOptions);
+  const optimized = optimizedWithRoadMetrics ?? (options?.respectInputSequence ? buildSequentialRoute(locations, roadMetricOptions) : optimizeRoute(locations, mode, 0, roadMetricOptions));
   await updateRoute(routeId, userId, {
     totalDistance: optimized.totalDistance,
     totalTime: optimized.totalTime,
@@ -2583,7 +4409,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     latitude: wp.latitude,
     longitude: wp.longitude,
     sequence: wp.sequence,
-    notes: wp.notes
+    notes: replaceImilePackageInNotes(wp.notes, wp.sequence)
   }));
   await createStops(routeId, updatedStops);
   return optimized;
@@ -2592,7 +4418,46 @@ var credentialsSchema = z2.object({
   email: z2.string().email("Informe um e-mail valido."),
   password: z2.string().min(8, "A senha deve ter pelo menos 8 caracteres.")
 });
+var registrationSchema = credentialsSchema.extend({
+  name: z2.string().min(2, "Informe seu nome."),
+  phone: z2.string().min(8, "Informe um telefone valido.").max(32),
+  companyName: z2.string().max(255).optional(),
+  city: z2.string().min(2, "Informe sua cidade.").max(128),
+  state: z2.string().min(2, "Informe o estado.").max(64),
+  vehicleType: z2.string().min(2, "Informe o tipo de veiculo.").max(64),
+  acceptTerms: z2.boolean().refine((value) => value === true, {
+    message: "Aceite os termos para criar a conta."
+  })
+});
+var profileUpdateSchema = z2.object({
+  name: z2.string().min(2, "Informe seu nome.").max(255),
+  phone: z2.string().min(8, "Informe um telefone valido.").max(32),
+  companyName: z2.string().max(255).optional(),
+  city: z2.string().min(2, "Informe sua cidade.").max(128),
+  state: z2.string().min(2, "Informe o estado.").max(64),
+  vehicleType: z2.string().min(2, "Informe o tipo de veiculo.").max(64),
+  acceptTerms: z2.boolean().optional()
+});
+var passwordResetRequestSchema = z2.object({
+  email: z2.string().email("Informe um e-mail valido.")
+});
 var routeModeSchema = z2.enum(["shortest_distance", "shortest_time", "balanced"]);
+var localityModeSchema = z2.enum(["balanced", "local", "strict"]);
+var eventSeveritySchema = z2.enum(["info", "warning", "error", "fatal"]);
+var operationalEventSchema = z2.object({
+  type: z2.string().min(1).max(96),
+  severity: eventSeveritySchema.default("info"),
+  source: z2.string().min(1).max(128),
+  title: z2.string().min(1).max(255),
+  message: z2.string().max(3e3).optional(),
+  routeId: z2.number().optional(),
+  stopId: z2.number().optional(),
+  runtime: z2.string().max(64).optional(),
+  url: z2.string().max(700).optional(),
+  userAgent: z2.string().max(700).optional(),
+  appVersion: z2.string().max(64).optional(),
+  metadata: z2.record(z2.string(), z2.unknown()).optional()
+});
 var routeCreateSchema = z2.object({
   name: z2.string().min(1),
   description: z2.string().optional(),
@@ -2611,10 +4476,38 @@ var stopCreateSchema = z2.object({
   sequence: z2.number(),
   notes: z2.string().optional()
 });
+var stopUpdateSchema = z2.object({
+  routeId: z2.number(),
+  stopId: z2.number(),
+  address: z2.string().min(1, "Informe o endere\xE7o da parada."),
+  latitude: z2.number().nullable().optional(),
+  longitude: z2.number().nullable().optional(),
+  sequence: z2.number().optional(),
+  notes: z2.string().nullable().optional()
+});
 function sanitizeUser(user) {
   if (!user) return null;
   const { passwordHash: _passwordHash, ...safeUser } = user;
   return safeUser;
+}
+async function recordOperationalEvent(userId, input) {
+  try {
+    return await createOperationalEvent({
+      ...input,
+      userId: userId ?? null,
+      routeId: input.routeId ?? null,
+      stopId: input.stopId ?? null,
+      message: input.message ?? null,
+      runtime: input.runtime ?? null,
+      url: input.url ?? null,
+      userAgent: input.userAgent ?? null,
+      appVersion: input.appVersion ?? null,
+      metadata: input.metadata ?? null
+    });
+  } catch (error) {
+    console.warn("[OperationalEvent] Failed to record event:", error);
+    return null;
+  }
 }
 async function setPasswordSession(ctx, openId, name, email) {
   const sessionToken = await sdk.createSessionToken(openId, {
@@ -2631,9 +4524,19 @@ async function setPasswordSession(ctx, openId, name, email) {
 var appRouter = router({
   system: systemRouter,
   auth: router({
-    me: publicProcedure.query((opts) => sanitizeUser(opts.ctx.user)),
+    me: publicProcedure.query(async (opts) => {
+      if (opts.ctx.user?.openId && typeof opts.ctx.res.cookie === "function") {
+        await setPasswordSession(
+          opts.ctx,
+          opts.ctx.user.openId,
+          opts.ctx.user.name,
+          opts.ctx.user.email
+        );
+      }
+      return sanitizeUser(opts.ctx.user);
+    }),
     login: publicProcedure.input(credentialsSchema).mutation(async ({ ctx, input }) => {
-      const email = normalizeEmail(input.email);
+      const email = normalizeEmail2(input.email);
       const user = await getUserByEmail(email);
       const isValidPassword = await verifyPassword(
         input.password,
@@ -2642,20 +4545,32 @@ var appRouter = router({
       if (!user || !isValidPassword) {
         throw new TRPCError3({
           code: "UNAUTHORIZED",
-          message: "E-mail ou senha invalidos."
+          message: "E-mail ou senha inv\xE1lidos."
         });
       }
       await upsertUser({
         openId: user.openId,
         lastSignedIn: /* @__PURE__ */ new Date()
       });
-      await setPasswordSession(ctx, user.openId, user.name, user.email);
-      return sanitizeUser(await getUserByOpenId(user.openId) ?? user);
+      await recordOperationalEvent(user.id, {
+        type: "user_login",
+        severity: "info",
+        source: "auth.login",
+        title: "Login realizado",
+        message: user.email ?? void 0
+      });
+      await setPasswordSession(
+        ctx,
+        user.openId,
+        user.name,
+        user.email
+      );
+      return {
+        ...sanitizeUser(await getUserByOpenId(user.openId) ?? user)
+      };
     }),
-    register: publicProcedure.input(credentialsSchema.extend({
-      name: z2.string().min(2, "Informe seu nome.")
-    })).mutation(async ({ ctx, input }) => {
-      const email = normalizeEmail(input.email);
+    register: publicProcedure.input(registrationSchema).mutation(async ({ ctx, input }) => {
+      const email = normalizeEmail2(input.email);
       const existingUser = await getUserByEmail(email);
       if (existingUser) {
         throw new TRPCError3({
@@ -2663,9 +4578,7 @@ var appRouter = router({
           message: "Ja existe uma conta com este e-mail."
         });
       }
-      const usersCount = await countUsers();
-      const ownerEmail = ENV.ownerEmail.trim().toLowerCase();
-      const role = usersCount === 0 || ownerEmail && ownerEmail === email ? "admin" : "user";
+      const role = isAdminEmail(email, ENV.adminEmails) ? "admin" : "user";
       const passwordHash = await hashPassword(input.password);
       const openId = buildPasswordOpenId(email);
       const user = await createPasswordUser({
@@ -2673,21 +4586,135 @@ var appRouter = router({
         name: input.name.trim(),
         email,
         passwordHash,
-        role
+        role,
+        phone: input.phone.trim(),
+        companyName: input.companyName?.trim() || null,
+        city: input.city.trim(),
+        state: input.state.trim(),
+        vehicleType: input.vehicleType.trim(),
+        acceptedTermsAt: /* @__PURE__ */ new Date()
       });
       if (!user) {
         throw new TRPCError3({
           code: "INTERNAL_SERVER_ERROR",
-          message: "Nao foi possivel criar a conta."
+          message: "N\xE3o foi poss\xEDvel criar a conta."
         });
       }
-      await setPasswordSession(ctx, user.openId, user.name, user.email);
-      return sanitizeUser(user);
+      await setPasswordSession(
+        ctx,
+        user.openId,
+        user.name,
+        user.email
+      );
+      await recordOperationalEvent(user.id, {
+        type: "user_registered",
+        severity: "info",
+        source: "auth.register",
+        title: "Novo cadastro",
+        message: user.email ?? void 0,
+        metadata: {
+          role,
+          city: input.city.trim(),
+          state: input.state.trim(),
+          vehicleType: input.vehicleType.trim(),
+          companyName: input.companyName?.trim() || null
+        }
+      });
+      return {
+        ...sanitizeUser(user)
+      };
+    }),
+    requestPasswordReset: publicProcedure.input(passwordResetRequestSchema).mutation(async ({ input }) => {
+      const email = normalizeEmail2(input.email);
+      const allowed = isAdminEmail(email, ENV.adminEmails);
+      if (allowed) {
+        const user = await getUserByEmail(email);
+        await recordOperationalEvent(user?.id ?? null, {
+          type: "admin_password_reset_requested",
+          severity: "warning",
+          source: "auth.passwordReset",
+          title: "Reset de senha administrativa solicitado",
+          message: email,
+          metadata: {
+            allowed,
+            instructions: "Somente os e-mails administrativos autorizados podem solicitar reset. Execute redefinicao operacional segura pelo banco/CLI."
+          }
+        });
+      }
+      return {
+        success: true,
+        message: "Se o e-mail for autorizado para administracao, a solicitacao de reset sera registrada para tratamento seguro."
+      };
+    }),
+    updateProfile: protectedProcedure.input(profileUpdateSchema).mutation(async ({ ctx, input }) => {
+      const existingAcceptedTerms = Boolean(ctx.user.acceptedTermsAt);
+      if (!existingAcceptedTerms && input.acceptTerms !== true) {
+        throw new TRPCError3({
+          code: "BAD_REQUEST",
+          message: "Aceite os termos para atualizar o cadastro."
+        });
+      }
+      const updatedUser = await updateUserProfile(ctx.user.id, {
+        name: input.name.trim(),
+        phone: input.phone.trim(),
+        companyName: input.companyName?.trim() || null,
+        city: input.city.trim(),
+        state: input.state.trim(),
+        vehicleType: input.vehicleType.trim(),
+        acceptedTermsAt: existingAcceptedTerms ? ctx.user.acceptedTermsAt : /* @__PURE__ */ new Date()
+      });
+      if (!updatedUser) {
+        throw new TRPCError3({
+          code: "NOT_FOUND",
+          message: "Usuario nao encontrado."
+        });
+      }
+      await recordOperationalEvent(ctx.user.id, {
+        type: "user_profile_updated",
+        severity: "info",
+        source: "auth.updateProfile",
+        title: "Cadastro atualizado",
+        message: updatedUser.email ?? void 0,
+        metadata: {
+          city: input.city.trim(),
+          state: input.state.trim(),
+          vehicleType: input.vehicleType.trim(),
+          companyName: input.companyName?.trim() || null
+        }
+      });
+      return sanitizeUser(updatedUser);
     }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true };
+    })
+  }),
+  events: router({
+    report: publicProcedure.input(operationalEventSchema).mutation(async ({ ctx, input }) => {
+      await recordOperationalEvent(ctx.user?.id ?? null, input);
+      return { success: true };
+    })
+  }),
+  admin: router({
+    dashboard: adminProcedure.query(() => getAdminOperationalDashboard()),
+    events: adminProcedure.input(z2.object({
+      limit: z2.number().min(1).max(200).default(100)
+    })).query(({ input }) => getRecentOperationalEvents(input.limit)),
+    cleanupE2eUsers: adminProcedure.mutation(async ({ ctx }) => {
+      const result = await cleanupE2eTestUsers();
+      await recordOperationalEvent(ctx.user.id, {
+        type: "admin_cleanup_e2e_users",
+        severity: "info",
+        source: "admin.cleanup",
+        title: "Usuarios E2E removidos",
+        message: `${result.deletedCount} usuario(s) de teste removido(s).`,
+        metadata: {
+          deletedCount: result.deletedCount,
+          deletedUsers: result.deletedUsers
+        }
+      });
+      return result;
     })
   }),
   routes: router({
@@ -2697,9 +4724,21 @@ var appRouter = router({
     get: protectedProcedure.input(z2.object({ id: z2.number() })).query(
       ({ ctx, input }) => getRouteById(input.id, ctx.user.id)
     ),
-    create: protectedProcedure.input(routeCreateSchema).mutation(
-      ({ ctx, input }) => createRoute(ctx.user.id, input)
-    ),
+    create: protectedProcedure.input(routeCreateSchema).mutation(async ({ ctx, input }) => {
+      const route = await createRoute(ctx.user.id, input);
+      if (route) {
+        await recordOperationalEvent(ctx.user.id, {
+          type: "route_created",
+          severity: "info",
+          source: "routes.create",
+          title: "Rota criada",
+          routeId: route.id,
+          message: route.name,
+          metadata: { mode: input.mode }
+        });
+      }
+      return route;
+    }),
     createAndOptimize: protectedProcedure.input(routeCreateSchema.extend({
       stops: z2.array(stopCreateSchema).min(2),
       respectInputSequence: z2.boolean().optional()
@@ -2709,7 +4748,7 @@ var appRouter = router({
       if (!route) {
         throw new TRPCError3({
           code: "INTERNAL_SERVER_ERROR",
-          message: "Nao foi possivel criar a rota."
+          message: "N\xE3o foi poss\xEDvel criar a rota."
         });
       }
       try {
@@ -2718,15 +4757,51 @@ var appRouter = router({
           respectInputSequence
         });
         const updatedRoute = await getRouteById(route.id, ctx.user.id);
+        await recordOperationalEvent(ctx.user.id, {
+          type: "route_optimized",
+          severity: "info",
+          source: "routes.createAndOptimize",
+          title: "Rota criada e otimizada",
+          routeId: route.id,
+          message: route.name,
+          metadata: {
+            stops: stops2.length,
+            mode: input.mode,
+            respectInputSequence: Boolean(respectInputSequence),
+            totalDistance: optimized.totalDistance,
+            totalTime: optimized.totalTime
+          }
+        });
         return {
           route: updatedRoute ?? route,
           optimization: optimized
         };
       } catch (error) {
-        await deleteRoute(route.id, ctx.user.id).catch((deleteError) => {
-          console.error("[Routes] Failed to rollback route creation:", deleteError);
+        console.error("[Routes] Optimization failed after route creation:", error);
+        await recordOperationalEvent(ctx.user.id, {
+          type: "route_optimization_failed",
+          severity: "error",
+          source: "routes.createAndOptimize",
+          title: "Falha ao otimizar rota",
+          routeId: route.id,
+          message: error instanceof Error ? error.message : "Erro desconhecido",
+          metadata: {
+            stops: stops2.length,
+            mode: input.mode,
+            respectInputSequence: Boolean(respectInputSequence)
+          }
         });
-        throw error;
+        await updateRoute(route.id, ctx.user.id, {
+          status: "draft",
+          totalDistance: 0,
+          totalTime: 0
+        });
+        const savedRoute = await getRouteById(route.id, ctx.user.id);
+        return {
+          route: savedRoute ?? route,
+          optimization: null,
+          warning: "A rota foi salva como rascunho, mas n\xE3o foi poss\xEDvel otimizar agora. Abra a rota e tente otimizar novamente."
+        };
       }
     }),
     update: protectedProcedure.input(z2.object({
@@ -2752,9 +4827,76 @@ var appRouter = router({
     ),
     optimize: protectedProcedure.input(z2.object({
       id: z2.number(),
-      mode: routeModeSchema.optional()
+      mode: routeModeSchema.optional(),
+      localityMode: localityModeSchema.optional(),
+      startLatitude: z2.number().optional(),
+      startLongitude: z2.number().optional()
     })).mutation(async ({ ctx, input }) => {
-      return optimizeUserRoute(input.id, ctx.user.id, input.mode);
+      const startLocation = Number.isFinite(input.startLatitude) && Number.isFinite(input.startLongitude) ? {
+        latitude: Number(input.startLatitude),
+        longitude: Number(input.startLongitude),
+        address: "Local atual do motorista"
+      } : void 0;
+      const optimized = await optimizeUserRoute(input.id, ctx.user.id, input.mode, {
+        startLocation,
+        localityMode: input.localityMode
+      });
+      await recordOperationalEvent(ctx.user.id, {
+        type: input.localityMode === "strict" ? "route_user_requested_better_sequence" : "route_reoptimized",
+        severity: input.localityMode === "strict" ? "warning" : "info",
+        source: "routes.optimize",
+        title: input.localityMode === "strict" ? "Usu\xE1rio pediu sequ\xEAncia melhor" : "Rota reotimizada",
+        routeId: input.id,
+        metadata: {
+          mode: input.mode,
+          localityMode: input.localityMode,
+          totalDistance: optimized.totalDistance,
+          totalTime: optimized.totalTime,
+          startedFromCurrentLocation: Boolean(startLocation)
+        }
+      });
+      return optimized;
+    }),
+    optimizeRemaining: protectedProcedure.input(z2.object({
+      id: z2.number(),
+      mode: routeModeSchema.optional(),
+      excludeStopIds: z2.array(z2.number()).default([]),
+      localityMode: localityModeSchema.optional(),
+      startLatitude: z2.number().optional(),
+      startLongitude: z2.number().optional()
+    })).mutation(async ({ ctx, input }) => {
+      const hasStartLocation = Number.isFinite(input.startLatitude) && Number.isFinite(input.startLongitude);
+      if (input.excludeStopIds.length === 0 && !hasStartLocation) {
+        throw new TRPCError3({
+          code: "BAD_REQUEST",
+          message: "Nenhuma parada conclu\xEDda foi informada para deixar fora."
+        });
+      }
+      const startLocation = hasStartLocation ? {
+        latitude: Number(input.startLatitude),
+        longitude: Number(input.startLongitude),
+        address: "Local atual do motorista"
+      } : void 0;
+      const optimized = await optimizeUserRoute(input.id, ctx.user.id, input.mode, {
+        excludeStopIds: input.excludeStopIds,
+        startLocation,
+        localityMode: input.localityMode
+      });
+      await recordOperationalEvent(ctx.user.id, {
+        type: "route_remaining_reoptimized",
+        severity: "info",
+        source: "routes.optimizeRemaining",
+        title: "Restantes reotimizadas",
+        routeId: input.id,
+        metadata: {
+          excludedStops: input.excludeStopIds.length,
+          localityMode: input.localityMode,
+          totalDistance: optimized.totalDistance,
+          totalTime: optimized.totalTime,
+          startedFromCurrentLocation: Boolean(startLocation)
+        }
+      });
+      return optimized;
     })
   }),
   stops: router({
@@ -2768,6 +4910,39 @@ var appRouter = router({
     })).mutation(async ({ ctx, input }) => {
       await requireUserRoute(input.routeId, ctx.user.id);
       return createStops(input.routeId, input.stops);
+    }),
+    update: protectedProcedure.input(stopUpdateSchema).mutation(async ({ ctx, input }) => {
+      await requireUserRoute(input.routeId, ctx.user.id);
+      const updatedStop = await updateStop(input.routeId, input.stopId, {
+        address: input.address.trim(),
+        latitude: input.latitude,
+        longitude: input.longitude,
+        sequence: input.sequence,
+        notes: input.notes?.trim() || null
+      });
+      if (!updatedStop) {
+        throw new TRPCError3({
+          code: "NOT_FOUND",
+          message: "Parada n\xE3o encontrada."
+        });
+      }
+      await updateRoute(input.routeId, ctx.user.id, { status: "draft" });
+      return updatedStop;
+    }),
+    delete: protectedProcedure.input(z2.object({
+      routeId: z2.number(),
+      stopId: z2.number()
+    })).mutation(async ({ ctx, input }) => {
+      await requireUserRoute(input.routeId, ctx.user.id);
+      const deleted = await deleteStop(input.routeId, input.stopId);
+      if (!deleted) {
+        throw new TRPCError3({
+          code: "NOT_FOUND",
+          message: "Parada n\xE3o encontrada."
+        });
+      }
+      await updateRoute(input.routeId, ctx.user.id, { status: "draft" });
+      return { success: true };
     })
   }),
   analytics: router({
@@ -2824,6 +4999,74 @@ var appRouter = router({
         content: response
       });
       return response;
+    })
+  }),
+  imile: router({
+    status: protectedProcedure.query(async ({ ctx }) => {
+      const integration = await getUserIntegration(ctx.user.id, IMILE_PROVIDER);
+      const overrides = integration ? await getUserImileOverrides(ctx.user.id) : void 0;
+      return {
+        ...getImileConnectionStatus(overrides),
+        userCredentialConfigured: Boolean(integration)
+      };
+    }),
+    credential: protectedProcedure.query(async ({ ctx }) => {
+      const integration = await getUserIntegration(ctx.user.id, IMILE_PROVIDER);
+      return {
+        configured: Boolean(integration),
+        label: integration?.label ?? "",
+        baseUrl: integration?.baseUrl ?? "",
+        fallbackBaseUrls: integration?.fallbackBaseUrls ?? "",
+        deliveriesPath: integration?.deliveriesPath ?? "",
+        authHeader: integration?.authHeader ?? "Authorization",
+        country: integration?.country ?? "BRA",
+        lang: integration?.lang ?? "pt-BR",
+        resourceCode: integration?.resourceCode ?? "BRA",
+        timezone: integration?.timezone ?? "America/Sao_Paulo",
+        hubCode: integration?.hubCode ?? "",
+        appVersion: integration?.appVersion ?? "2.2.78",
+        sourceName: integration?.sourceName ?? "REDeliveryApp"
+      };
+    }),
+    saveCredential: protectedProcedure.input(imileCredentialInput).mutation(async ({ ctx, input }) => {
+      const existing = await getUserIntegration(ctx.user.id, IMILE_PROVIDER);
+      const authToken = input.authToken.trim();
+      const authTokenEncrypted = authToken ? encryptIntegrationSecret(authToken) : existing?.authTokenEncrypted;
+      if (!authTokenEncrypted) {
+        throw new TRPCError3({
+          code: "BAD_REQUEST",
+          message: "Informe o token/API key do Rider Delivery."
+        });
+      }
+      await upsertUserIntegration(ctx.user.id, IMILE_PROVIDER, {
+        label: cleanText(input.label) ?? "Rider Delivery",
+        baseUrl: cleanText(input.baseUrl),
+        fallbackBaseUrls: cleanText(input.fallbackBaseUrls),
+        deliveriesPath: cleanText(input.deliveriesPath),
+        authHeader: cleanText(input.authHeader) ?? "Authorization",
+        authTokenEncrypted,
+        country: cleanText(input.country) ?? "BRA",
+        lang: cleanText(input.lang) ?? "pt-BR",
+        resourceCode: cleanText(input.resourceCode) ?? "BRA",
+        timezone: cleanText(input.timezone) ?? "America/Sao_Paulo",
+        hubCode: cleanText(input.hubCode),
+        appVersion: cleanText(input.appVersion) ?? "2.2.78",
+        sourceName: cleanText(input.sourceName) ?? "REDeliveryApp",
+        isActive: true
+      });
+      return { configured: true };
+    }),
+    deleteCredential: protectedProcedure.mutation(async ({ ctx }) => {
+      await deleteUserIntegration(ctx.user.id, IMILE_PROVIDER);
+      return { configured: false };
+    }),
+    deliveries: protectedProcedure.input(z2.object({
+      dateFrom: z2.string().optional(),
+      dateTo: z2.string().optional(),
+      status: z2.string().optional()
+    })).query(async ({ ctx, input }) => {
+      const overrides = await getUserImileOverrides(ctx.user.id);
+      return fetchImileDeliveries(input, overrides);
     })
   }),
   schedules: router({
@@ -2929,8 +5172,155 @@ function serveStatic(app2) {
   });
 }
 
+// server/_core/monitoring.ts
+init_db();
+var MONITOR_DEDUP_WINDOW_MS = 10 * 60 * 1e3;
+var lastIssueKey = "";
+var lastIssueAt = 0;
+var pendingOutage = null;
+function getDatabaseState(database) {
+  if (!database?.configured) return "unconfigured";
+  if (database.connected) return "connected";
+  if (database.reachable) return "schema_failed";
+  return "unreachable";
+}
+function buildIssueKey(input) {
+  const databaseState = getDatabaseState(input.database);
+  const dbError = input.database?.error || input.database?.schema?.error || "";
+  const fallbackError = input.fallbackStore?.error || "";
+  return [
+    input.storageAvailable ? "ok" : "down",
+    databaseState,
+    dbError,
+    fallbackError
+  ].join("|");
+}
+function buildMetadata(input) {
+  return {
+    source: input.source,
+    storageAvailable: input.storageAvailable,
+    database: {
+      configured: Boolean(input.database?.configured),
+      reachable: Boolean(input.database?.reachable),
+      connected: Boolean(input.database?.connected),
+      ssl: Boolean(input.database?.ssl),
+      error: input.database?.error ?? null,
+      schema: input.database?.schema ?? null,
+      pool: input.database?.pool ?? null
+    },
+    fallbackStore: {
+      configured: Boolean(input.fallbackStore?.configured),
+      loaded: Boolean(input.fallbackStore?.loaded),
+      error: input.fallbackStore?.error ?? null
+    }
+  };
+}
+async function persistMonitorEvent(input) {
+  try {
+    await createOperationalEvent({
+      userId: null,
+      type: input.type,
+      severity: input.severity,
+      source: "system.monitor",
+      title: input.title,
+      message: input.message,
+      runtime: "server",
+      metadata: input.metadata
+    });
+    return true;
+  } catch (error) {
+    console.warn("[Monitor] Failed to persist monitor event:", error);
+    return false;
+  }
+}
+async function recordHealthObservation(input) {
+  const now = Date.now();
+  const observedAt = new Date(now).toISOString();
+  const issueKey = buildIssueKey(input);
+  const metadata = {
+    ...buildMetadata(input),
+    mode: input.mode,
+    observedAt
+  };
+  if (input.storageAvailable) {
+    if (!pendingOutage) {
+      lastIssueKey = "";
+      return;
+    }
+    const outage = pendingOutage;
+    pendingOutage = null;
+    lastIssueKey = "";
+    await persistMonitorEvent({
+      type: "system_health_recovered",
+      severity: "info",
+      title: "Armazenamento recuperado",
+      message: `O armazenamento voltou a responder. Falha anterior: ${outage.message}`,
+      metadata: {
+        ...metadata,
+        previousOutage: outage,
+        recoveredAt: observedAt
+      }
+    });
+    return;
+  }
+  const message = input.database?.error || input.database?.schema?.error || input.fallbackStore?.error || "Armazenamento indisponivel.";
+  pendingOutage = pendingOutage ? {
+    ...pendingOutage,
+    lastSeenAt: observedAt,
+    message,
+    metadata
+  } : {
+    key: issueKey,
+    firstSeenAt: observedAt,
+    lastSeenAt: observedAt,
+    message,
+    metadata
+  };
+  console.warn("[Monitor] Storage unavailable:", {
+    mode: input.mode,
+    source: input.source,
+    message
+  });
+  if (issueKey === lastIssueKey && now - lastIssueAt < MONITOR_DEDUP_WINDOW_MS) {
+    return;
+  }
+  lastIssueKey = issueKey;
+  lastIssueAt = now;
+  await persistMonitorEvent({
+    type: "system_health_failed",
+    severity: input.database?.reachable ? "error" : "fatal",
+    title: "Armazenamento indisponivel",
+    message,
+    metadata
+  });
+}
+
 // server/_core/index.ts
 init_db();
+var execFileAsync = promisify2(execFile);
+var imileCaptureRunPromise = null;
+function getLocalImileCapturePath() {
+  return path3.resolve(
+    process.cwd(),
+    ".tmp",
+    "imile-capture",
+    "imile-capture-merged.xml"
+  );
+}
+async function runLocalImileCapture() {
+  const scriptPath = path3.resolve(process.cwd(), "scripts", "capture-imile-screen.mjs");
+  await execFileAsync(process.execPath, [scriptPath, "--pages=130", "--delay=700"], {
+    cwd: process.cwd(),
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: 12 * 60 * 1e3,
+    windowsHide: true
+  });
+  const capturePath = getLocalImileCapturePath();
+  if (!fs3.existsSync(capturePath)) {
+    throw new Error("Captura finalizada, mas o XML consolidado nao foi encontrado.");
+  }
+  return fs3.readFileSync(capturePath, "utf8");
+}
 function normalizeOrigin(origin) {
   try {
     return new URL(origin).origin;
@@ -2951,6 +5341,24 @@ function parseAllowedOrigins() {
     "http://localhost"
   ]);
 }
+function normalizeCaptureOwner(value) {
+  return value?.trim().toLowerCase().replace(/[^a-z0-9@._+-]+/g, "-") || "";
+}
+function getCaptureKeys(owner) {
+  const normalizedOwner = normalizeCaptureOwner(owner);
+  return {
+    userKey: normalizedOwner ? `imile-capture:user:${normalizedOwner}` : "",
+    globalKey: "imile-capture:global"
+  };
+}
+async function getAuthenticatedCaptureOwner(req) {
+  try {
+    const user = await sdk.authenticateRequest(req);
+    return normalizeCaptureOwner(user.email || user.openId || String(user.id));
+  } catch {
+    return "";
+  }
+}
 function isLocalDevelopmentOrigin(origin) {
   return /^https?:\/\/(localhost|127\.0\.0\.1|10\.0\.2\.2)(:\d+)?$/.test(
     origin
@@ -2959,7 +5367,13 @@ function isLocalDevelopmentOrigin(origin) {
 function validateProductionEnvironment() {
   if (!ENV.isProduction) return;
   const missing = [];
-  if (!ENV.databaseUrl && !ENV.allowEphemeralDb) missing.push("DATABASE_URL");
+  if (ENV.requireManagedDatabase) {
+    if (!ENV.databaseUrl || ENV.hasInvalidProductionDatabaseUrl) {
+      missing.push("DATABASE_URL MySQL gerenciado");
+    }
+  } else if (!ENV.databaseUrl && !hasPersistentFallbackDbConfigured()) {
+    missing.push("DATABASE_URL or Upstash Redis");
+  }
   if (!ENV.cookieSecret) missing.push("JWT_SECRET");
   if (missing.length > 0) {
     throw new Error(
@@ -2972,6 +5386,37 @@ function validateProductionEnvironment() {
   if (process.env.VITE_ENABLE_DEV_LOGIN === "true") {
     throw new Error("VITE_ENABLE_DEV_LOGIN cannot be true in production");
   }
+  if (ENV.allowEphemeralDb && !hasPersistentFallbackDbConfigured() && !ENV.databaseUrl) {
+    throw new Error(
+      "ALLOW_EPHEMERAL_DB cannot be the only production storage. Configure a managed database or Upstash Redis."
+    );
+  }
+}
+async function getStorageHealthSnapshot(source) {
+  const database = await getDatabaseHealth();
+  if (!database.connected) {
+    try {
+      await ensurePersistentFallbackDbLoaded();
+    } catch {
+    }
+  }
+  const fallbackStore = getPersistentFallbackDbHealth();
+  const canUseLocalFallback = !ENV.isProduction || ENV.allowEphemeralDb && !ENV.hasInvalidProductionDatabaseUrl;
+  const storageAvailable = ENV.requireManagedDatabase ? database.connected : database.connected || fallbackStore.loaded || canUseLocalFallback;
+  const mode = database.connected ? "persistent" : fallbackStore.configured ? "redis-fallback" : "local-fallback";
+  await recordHealthObservation({
+    database,
+    fallbackStore,
+    storageAvailable,
+    mode,
+    source
+  });
+  return {
+    database,
+    fallbackStore,
+    storageAvailable,
+    mode
+  };
 }
 function createApp(options = {}) {
   validateProductionEnvironment();
@@ -2997,14 +5442,30 @@ function createApp(options = {}) {
     next();
   });
   app2.get("/api/health", async (_req, res) => {
-    const database = await getDatabaseHealth();
-    const databaseAvailable = ENV.databaseUrl ? database.connected : ENV.allowEphemeralDb || !ENV.isProduction;
-    res.status(databaseAvailable ? 200 : 500).json({
-      ok: databaseAvailable,
+    const { database, fallbackStore, storageAvailable, mode } = await getStorageHealthSnapshot("api.health");
+    res.status(storageAvailable ? 200 : 500).json({
+      ok: storageAvailable,
       app: "EconoRotas",
       environment: ENV.isProduction ? "production" : "development",
-      mode: ENV.databaseUrl ? "persistent" : "local-fallback",
+      mode,
       database,
+      fallbackStore,
+      requiredManagedDatabase: ENV.requireManagedDatabase,
+      warning: ENV.hasInvalidProductionDatabaseUrl ? "DATABASE_URL aponta para host local/Docker e n\xE3o funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis." : void 0,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  });
+  app2.get("/api/monitor/ping", async (_req, res) => {
+    const { database, fallbackStore, storageAvailable, mode } = await getStorageHealthSnapshot("api.monitor.ping");
+    res.status(storageAvailable ? 200 : 500).json({
+      ok: storageAvailable,
+      monitor: true,
+      app: "EconoRotas",
+      environment: ENV.isProduction ? "production" : "development",
+      mode,
+      database,
+      fallbackStore,
+      requiredManagedDatabase: ENV.requireManagedDatabase,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
   });
@@ -3025,6 +5486,76 @@ function createApp(options = {}) {
       publishedAt: ENV.androidUpdatePublishedAt.trim() || void 0
     });
   });
+  app2.get("/api/imile/capture/latest", async (req, res) => {
+    const owner = await getAuthenticatedCaptureOwner(req);
+    if (!owner) {
+      res.status(401).json({
+        message: "Entre no EconoRotas para importar a captura iMile."
+      });
+      return;
+    }
+    const { userKey, globalKey } = getCaptureKeys(owner);
+    const storedCapture = (userKey ? await getPersistentValue(userKey) : null) ?? await getPersistentValue(globalKey);
+    if (storedCapture) {
+      res.type("application/xml").send(storedCapture);
+      return;
+    }
+    const capturePath = getLocalImileCapturePath();
+    if (!fs3.existsSync(capturePath)) {
+      res.status(404).json({
+        message: "Nenhuma captura iMile encontrada. Rode a captura no Android antes de importar."
+      });
+      return;
+    }
+    res.type("application/xml").send(fs3.readFileSync(capturePath, "utf8"));
+  });
+  app2.post("/api/imile/capture/run", async (_req, res) => {
+    if (process.env.VERCEL) {
+      res.status(501).json({
+        message: "Captura automatica exige Android conectado via ADB no computador local. No Vercel/iPhone, use envio ou importacao da captura."
+      });
+      return;
+    }
+    try {
+      if (!imileCaptureRunPromise) {
+        imileCaptureRunPromise = runLocalImileCapture().finally(() => {
+          imileCaptureRunPromise = null;
+        });
+      }
+      const capture = await imileCaptureRunPromise;
+      res.type("application/xml").send(capture);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Falha ao capturar a tela do Rider Delivery.";
+      res.status(500).json({ message });
+    }
+  });
+  app2.post(
+    "/api/imile/capture/latest",
+    express2.text({ limit: "15mb", type: ["application/xml", "text/xml", "text/plain", "*/*"] }),
+    async (req, res) => {
+      const uploadToken = req.headers["x-imile-capture-token"];
+      const hasValidUploadToken = ENV.imileCaptureUploadToken && typeof uploadToken === "string" && uploadToken === ENV.imileCaptureUploadToken;
+      const authenticatedOwner = await getAuthenticatedCaptureOwner(req);
+      if (!hasValidUploadToken && !authenticatedOwner) {
+        res.status(401).json({ message: "Captura iMile nao autorizada." });
+        return;
+      }
+      const capture = typeof req.body === "string" ? req.body.trim() : "";
+      if (!capture || !capture.includes("<")) {
+        res.status(400).json({ message: "Arquivo de captura iMile invalido." });
+        return;
+      }
+      const owner = authenticatedOwner;
+      const { userKey, globalKey } = getCaptureKeys(owner);
+      const key = userKey || globalKey;
+      await setPersistentValue(key, capture);
+      res.json({
+        ok: true,
+        owner: owner || "global",
+        bytes: Buffer.byteLength(capture, "utf8")
+      });
+    }
+  );
   app2.use(express2.json({ limit: "50mb" }));
   app2.use(express2.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app2);
@@ -3049,11 +5580,11 @@ function normalizeVercelRewriteUrl(req) {
   const currentUrl = new URL(req.url || "/", "http://vercel.local");
   const route = currentUrl.searchParams.get("__route");
   if (!route) return;
-  const path3 = currentUrl.searchParams.get("path")?.replace(/^\/+/, "") ?? "";
+  const path4 = currentUrl.searchParams.get("path")?.replace(/^\/+/, "") ?? "";
   const prefix = route === "manus-storage" ? "/manus-storage" : "/api";
   currentUrl.searchParams.delete("__route");
   currentUrl.searchParams.delete("path");
-  const normalizedPath = path3 ? `${prefix}/${path3}` : prefix;
+  const normalizedPath = path4 ? `${prefix}/${path4}` : prefix;
   const query = currentUrl.searchParams.toString();
   req.url = query ? `${normalizedPath}?${query}` : normalizedPath;
 }

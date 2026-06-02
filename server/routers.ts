@@ -1,8 +1,9 @@
 import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { ENV } from "./_core/env";
+import { isAdminEmail } from "./_core/adminAccess";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, router, protectedProcedure } from "./_core/trpc";
+import { adminProcedure, publicProcedure, router, protectedProcedure } from "./_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import type { User } from "../drizzle/schema";
@@ -22,7 +23,63 @@ import {
   type Location,
   type OptimizedRoute,
 } from "./optimization";
+import {
+  buildSequentialRouteWithRoadMetrics,
+  optimizeRouteWithRoadMetrics,
+} from "./osrm";
 import { chatWithLLM, formatChatHistory } from "./chat";
+import {
+  fetchImileDeliveries,
+  getImileConnectionStatus,
+  type ImileCredentialOverrides,
+} from "./imile";
+import {
+  decryptIntegrationSecret,
+  encryptIntegrationSecret,
+} from "./integrationCredentials";
+
+const IMILE_PROVIDER = "imile_rider_delivery";
+
+const imileCredentialInput = z.object({
+  label: z.string().max(255).optional(),
+  baseUrl: z.string().url().optional().or(z.literal("")),
+  fallbackBaseUrls: z.string().optional(),
+  deliveriesPath: z.string().max(500).optional(),
+  authHeader: z.string().max(128).optional(),
+  authToken: z.string().optional().default(""),
+  country: z.string().max(16).optional(),
+  lang: z.string().max(32).optional(),
+  resourceCode: z.string().max(64).optional(),
+  timezone: z.string().max(64).optional(),
+  hubCode: z.string().max(128).optional(),
+  appVersion: z.string().max(32).optional(),
+  sourceName: z.string().max(128).optional(),
+});
+
+function cleanText(value: string | null | undefined) {
+  const text = value?.trim();
+  return text || undefined;
+}
+
+async function getUserImileOverrides(userId: number): Promise<ImileCredentialOverrides | undefined> {
+  const integration = await db.getUserIntegration(userId, IMILE_PROVIDER);
+  if (!integration) return undefined;
+
+  return {
+    baseUrl: cleanText(integration.baseUrl),
+    fallbackBaseUrls: cleanText(integration.fallbackBaseUrls),
+    deliveriesPath: cleanText(integration.deliveriesPath),
+    authHeader: cleanText(integration.authHeader),
+    authToken: decryptIntegrationSecret(integration.authTokenEncrypted),
+    country: cleanText(integration.country),
+    lang: cleanText(integration.lang),
+    resourceCode: cleanText(integration.resourceCode),
+    timezone: cleanText(integration.timezone),
+    hubCode: cleanText(integration.hubCode),
+    appVersion: cleanText(integration.appVersion),
+    sourceName: cleanText(integration.sourceName),
+  };
+}
 
 function toOptionalLocation(
   address: unknown,
@@ -105,13 +162,36 @@ function buildSequentialRoute(
   };
 }
 
+function isImileStopNotes(notes?: string | null) {
+  return /\b(Status iMile|Distancia app|Entregas agrupadas|Destinatario|Telefone)\s*:/i.test(
+    notes || ""
+  );
+}
+
+function buildSequentialImilePackageNumber(index: number) {
+  return String(index + 1).padStart(2, "0");
+}
+
+function replaceImilePackageInNotes(notes: string | undefined, sequence: number) {
+  if (!isImileStopNotes(notes)) return notes;
+
+  const packageNote = `Pacote: ${buildSequentialImilePackageNumber(sequence)}`;
+  const parts = (notes || "")
+    .split("|")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !/^(Pacote|STOP)\s*:/i.test(part));
+
+  return [packageNote, ...parts].join(" | ");
+}
+
 async function requireUserRoute(routeId: number, userId: number) {
   const route = await db.getRouteById(routeId, userId);
 
   if (!route) {
     throw new TRPCError({
       code: "NOT_FOUND",
-      message: "Rota nao encontrada.",
+      message: "Rota não encontrada.",
     });
   }
 
@@ -122,15 +202,30 @@ async function optimizeUserRoute(
   routeId: number,
   userId: number,
   requestedMode?: "shortest_distance" | "shortest_time" | "balanced",
-  options?: { respectInputSequence?: boolean }
+  options?: {
+    respectInputSequence?: boolean;
+    excludeStopIds?: number[];
+    startLocation?: Location;
+    localityMode?: "balanced" | "local" | "strict";
+  }
 ) {
   const route = await requireUserRoute(routeId, userId);
-  const routeStops = await db.getRouteStops(routeId);
+  const excludedStopIds = new Set(options?.excludeStopIds ?? []);
+  const routeStops = (await db.getRouteStops(routeId)).filter(
+    (stop: any) => !excludedStopIds.has(Number(stop.id))
+  );
 
   if (routeStops.length === 0) {
     throw new TRPCError({
       code: "BAD_REQUEST",
-      message: "A rota nao tem paradas.",
+      message: "A rota não tem paradas.",
+    });
+  }
+
+  if (routeStops.length < 2) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "A rota precisa ter pelo menos 2 paradas para otimizar.",
     });
   }
 
@@ -156,11 +251,9 @@ async function optimizeUserRoute(
     });
   }
 
-  const startLocation = toOptionalLocation(
-    route.startLocation,
-    route.startLatitude,
-    route.startLongitude
-  );
+  const startLocation =
+    options?.startLocation ??
+    toOptionalLocation(route.startLocation, route.startLatitude, route.startLongitude);
   const endLocation = toOptionalLocation(
     route.endLocation,
     route.endLatitude,
@@ -185,12 +278,19 @@ async function optimizeUserRoute(
   }
 
   const mode = requestedMode || route.mode;
-  const optimized = options?.respectInputSequence
-    ? buildSequentialRoute(locations, { startLocation, endLocation })
-    : optimizeRoute(locations, mode, 0, {
-        startLocation,
-        endLocation,
-      });
+  const roadMetricOptions = {
+    startLocation,
+    endLocation,
+    localityMode: options?.localityMode,
+  };
+  const optimizedWithRoadMetrics = options?.respectInputSequence
+    ? await buildSequentialRouteWithRoadMetrics(locations, roadMetricOptions)
+    : await optimizeRouteWithRoadMetrics(locations, mode, 0, roadMetricOptions);
+  const optimized =
+    optimizedWithRoadMetrics ??
+    (options?.respectInputSequence
+      ? buildSequentialRoute(locations, roadMetricOptions)
+      : optimizeRoute(locations, mode, 0, roadMetricOptions));
 
   await db.updateRoute(routeId, userId, {
     totalDistance: optimized.totalDistance,
@@ -204,7 +304,7 @@ async function optimizeUserRoute(
     latitude: wp.latitude,
     longitude: wp.longitude,
     sequence: wp.sequence,
-    notes: wp.notes,
+    notes: replaceImilePackageInNotes(wp.notes, wp.sequence),
   }));
   await db.createStops(routeId, updatedStops);
 
@@ -215,7 +315,46 @@ const credentialsSchema = z.object({
   email: z.string().email("Informe um e-mail valido."),
   password: z.string().min(8, "A senha deve ter pelo menos 8 caracteres."),
 });
+const registrationSchema = credentialsSchema.extend({
+  name: z.string().min(2, "Informe seu nome."),
+  phone: z.string().min(8, "Informe um telefone valido.").max(32),
+  companyName: z.string().max(255).optional(),
+  city: z.string().min(2, "Informe sua cidade.").max(128),
+  state: z.string().min(2, "Informe o estado.").max(64),
+  vehicleType: z.string().min(2, "Informe o tipo de veiculo.").max(64),
+  acceptTerms: z.boolean().refine(value => value === true, {
+    message: "Aceite os termos para criar a conta.",
+  }),
+});
+const profileUpdateSchema = z.object({
+  name: z.string().min(2, "Informe seu nome.").max(255),
+  phone: z.string().min(8, "Informe um telefone valido.").max(32),
+  companyName: z.string().max(255).optional(),
+  city: z.string().min(2, "Informe sua cidade.").max(128),
+  state: z.string().min(2, "Informe o estado.").max(64),
+  vehicleType: z.string().min(2, "Informe o tipo de veiculo.").max(64),
+  acceptTerms: z.boolean().optional(),
+});
+const passwordResetRequestSchema = z.object({
+  email: z.string().email("Informe um e-mail valido."),
+});
 const routeModeSchema = z.enum(["shortest_distance", "shortest_time", "balanced"]);
+const localityModeSchema = z.enum(["balanced", "local", "strict"]);
+const eventSeveritySchema = z.enum(["info", "warning", "error", "fatal"]);
+const operationalEventSchema = z.object({
+  type: z.string().min(1).max(96),
+  severity: eventSeveritySchema.default("info"),
+  source: z.string().min(1).max(128),
+  title: z.string().min(1).max(255),
+  message: z.string().max(3000).optional(),
+  routeId: z.number().optional(),
+  stopId: z.number().optional(),
+  runtime: z.string().max(64).optional(),
+  url: z.string().max(700).optional(),
+  userAgent: z.string().max(700).optional(),
+  appVersion: z.string().max(64).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
 const routeCreateSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
@@ -234,12 +373,44 @@ const stopCreateSchema = z.object({
   sequence: z.number(),
   notes: z.string().optional(),
 });
+const stopUpdateSchema = z.object({
+  routeId: z.number(),
+  stopId: z.number(),
+  address: z.string().min(1, "Informe o endereço da parada."),
+  latitude: z.number().nullable().optional(),
+  longitude: z.number().nullable().optional(),
+  sequence: z.number().optional(),
+  notes: z.string().nullable().optional(),
+});
 
 function sanitizeUser<T extends User | null | undefined>(user: T) {
   if (!user) return null;
 
   const { passwordHash: _passwordHash, ...safeUser } = user;
   return safeUser;
+}
+
+async function recordOperationalEvent(
+  userId: number | null | undefined,
+  input: z.infer<typeof operationalEventSchema>
+) {
+  try {
+    return await db.createOperationalEvent({
+      ...input,
+      userId: userId ?? null,
+      routeId: input.routeId ?? null,
+      stopId: input.stopId ?? null,
+      message: input.message ?? null,
+      runtime: input.runtime ?? null,
+      url: input.url ?? null,
+      userAgent: input.userAgent ?? null,
+      appVersion: input.appVersion ?? null,
+      metadata: input.metadata ?? null,
+    });
+  } catch (error) {
+    console.warn("[OperationalEvent] Failed to record event:", error);
+    return null;
+  }
 }
 
 async function setPasswordSession(
@@ -263,7 +434,21 @@ async function setPasswordSession(
 export const appRouter = router({
   system: systemRouter,
   auth: router({
-    me: publicProcedure.query(opts => sanitizeUser(opts.ctx.user)),
+    me: publicProcedure.query(async (opts) => {
+      if (
+        opts.ctx.user?.openId &&
+        typeof opts.ctx.res.cookie === "function"
+      ) {
+        await setPasswordSession(
+          opts.ctx,
+          opts.ctx.user.openId,
+          opts.ctx.user.name,
+          opts.ctx.user.email
+        );
+      }
+
+      return sanitizeUser(opts.ctx.user);
+    }),
     login: publicProcedure.input(credentialsSchema)
       .mutation(async ({ ctx, input }) => {
         const email = normalizeEmail(input.email);
@@ -276,7 +461,7 @@ export const appRouter = router({
         if (!user || !isValidPassword) {
           throw new TRPCError({
             code: "UNAUTHORIZED",
-            message: "E-mail ou senha invalidos.",
+            message: "E-mail ou senha inválidos.",
           });
         }
 
@@ -284,13 +469,25 @@ export const appRouter = router({
           openId: user.openId,
           lastSignedIn: new Date(),
         });
-        await setPasswordSession(ctx, user.openId, user.name, user.email);
+        await recordOperationalEvent(user.id, {
+          type: "user_login",
+          severity: "info",
+          source: "auth.login",
+          title: "Login realizado",
+          message: user.email ?? undefined,
+        });
+        await setPasswordSession(
+          ctx,
+          user.openId,
+          user.name,
+          user.email
+        );
 
-        return sanitizeUser((await db.getUserByOpenId(user.openId)) ?? user);
+        return {
+          ...sanitizeUser((await db.getUserByOpenId(user.openId)) ?? user),
+        };
       }),
-    register: publicProcedure.input(credentialsSchema.extend({
-      name: z.string().min(2, "Informe seu nome."),
-    }))
+    register: publicProcedure.input(registrationSchema)
       .mutation(async ({ ctx, input }) => {
         const email = normalizeEmail(input.email);
         const existingUser = await db.getUserByEmail(email);
@@ -302,11 +499,7 @@ export const appRouter = router({
           });
         }
 
-        const usersCount = await db.countUsers();
-        const ownerEmail = ENV.ownerEmail.trim().toLowerCase();
-        const role = usersCount === 0 || (ownerEmail && ownerEmail === email)
-          ? "admin"
-          : "user";
+        const role = isAdminEmail(email, ENV.adminEmails) ? "admin" : "user";
         const passwordHash = await hashPassword(input.password);
         const openId = buildPasswordOpenId(email);
         const user = await db.createPasswordUser({
@@ -315,22 +508,152 @@ export const appRouter = router({
           email,
           passwordHash,
           role,
+          phone: input.phone.trim(),
+          companyName: input.companyName?.trim() || null,
+          city: input.city.trim(),
+          state: input.state.trim(),
+          vehicleType: input.vehicleType.trim(),
+          acceptedTermsAt: new Date(),
         });
 
         if (!user) {
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
-            message: "Nao foi possivel criar a conta.",
+            message: "Não foi possível criar a conta.",
           });
         }
 
-        await setPasswordSession(ctx, user.openId, user.name, user.email);
-        return sanitizeUser(user);
+        await setPasswordSession(
+          ctx,
+          user.openId,
+          user.name,
+          user.email
+        );
+        await recordOperationalEvent(user.id, {
+          type: "user_registered",
+          severity: "info",
+          source: "auth.register",
+          title: "Novo cadastro",
+          message: user.email ?? undefined,
+          metadata: {
+            role,
+            city: input.city.trim(),
+            state: input.state.trim(),
+            vehicleType: input.vehicleType.trim(),
+            companyName: input.companyName?.trim() || null,
+          },
+        });
+        return {
+          ...sanitizeUser(user),
+        };
+      }),
+    requestPasswordReset: publicProcedure.input(passwordResetRequestSchema)
+      .mutation(async ({ input }) => {
+        const email = normalizeEmail(input.email);
+        const allowed = isAdminEmail(email, ENV.adminEmails);
+
+        if (allowed) {
+          const user = await db.getUserByEmail(email);
+          await recordOperationalEvent(user?.id ?? null, {
+            type: "admin_password_reset_requested",
+            severity: "warning",
+            source: "auth.passwordReset",
+            title: "Reset de senha administrativa solicitado",
+            message: email,
+            metadata: {
+              allowed,
+              instructions:
+                "Somente os e-mails administrativos autorizados podem solicitar reset. Execute redefinicao operacional segura pelo banco/CLI.",
+            },
+          });
+        }
+
+        return {
+          success: true,
+          message:
+            "Se o e-mail for autorizado para administracao, a solicitacao de reset sera registrada para tratamento seguro.",
+        };
+      }),
+    updateProfile: protectedProcedure.input(profileUpdateSchema)
+      .mutation(async ({ ctx, input }) => {
+        const existingAcceptedTerms = Boolean(ctx.user.acceptedTermsAt);
+        if (!existingAcceptedTerms && input.acceptTerms !== true) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Aceite os termos para atualizar o cadastro.",
+          });
+        }
+
+        const updatedUser = await db.updateUserProfile(ctx.user.id, {
+          name: input.name.trim(),
+          phone: input.phone.trim(),
+          companyName: input.companyName?.trim() || null,
+          city: input.city.trim(),
+          state: input.state.trim(),
+          vehicleType: input.vehicleType.trim(),
+          acceptedTermsAt: existingAcceptedTerms
+            ? ctx.user.acceptedTermsAt
+            : new Date(),
+        });
+
+        if (!updatedUser) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Usuario nao encontrado.",
+          });
+        }
+
+        await recordOperationalEvent(ctx.user.id, {
+          type: "user_profile_updated",
+          severity: "info",
+          source: "auth.updateProfile",
+          title: "Cadastro atualizado",
+          message: updatedUser.email ?? undefined,
+          metadata: {
+            city: input.city.trim(),
+            state: input.state.trim(),
+            vehicleType: input.vehicleType.trim(),
+            companyName: input.companyName?.trim() || null,
+          },
+        });
+
+        return sanitizeUser(updatedUser);
       }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
+    }),
+  }),
+
+  events: router({
+    report: publicProcedure.input(operationalEventSchema)
+      .mutation(async ({ ctx, input }) => {
+        await recordOperationalEvent(ctx.user?.id ?? null, input);
+        return { success: true };
+      }),
+  }),
+
+  admin: router({
+    dashboard: adminProcedure.query(() => db.getAdminOperationalDashboard()),
+    events: adminProcedure.input(z.object({
+      limit: z.number().min(1).max(200).default(100),
+    }))
+      .query(({ input }) => db.getRecentOperationalEvents(input.limit)),
+    cleanupE2eUsers: adminProcedure.mutation(async ({ ctx }) => {
+      const result = await db.cleanupE2eTestUsers();
+      await recordOperationalEvent(ctx.user.id, {
+        type: "admin_cleanup_e2e_users",
+        severity: "info",
+        source: "admin.cleanup",
+        title: "Usuarios E2E removidos",
+        message: `${result.deletedCount} usuario(s) de teste removido(s).`,
+        metadata: {
+          deletedCount: result.deletedCount,
+          deletedUsers: result.deletedUsers,
+        },
+      });
+      return result;
     }),
   }),
 
@@ -343,9 +666,21 @@ export const appRouter = router({
         db.getRouteById(input.id, ctx.user.id)
       ),
     create: protectedProcedure.input(routeCreateSchema)
-      .mutation(({ ctx, input }) =>
-        db.createRoute(ctx.user.id, input)
-      ),
+      .mutation(async ({ ctx, input }) => {
+        const route = await db.createRoute(ctx.user.id, input);
+        if (route) {
+          await recordOperationalEvent(ctx.user.id, {
+            type: "route_created",
+            severity: "info",
+            source: "routes.create",
+            title: "Rota criada",
+            routeId: route.id,
+            message: route.name,
+            metadata: { mode: input.mode },
+          });
+        }
+        return route;
+      }),
     createAndOptimize: protectedProcedure.input(routeCreateSchema.extend({
       stops: z.array(stopCreateSchema).min(2),
       respectInputSequence: z.boolean().optional(),
@@ -357,7 +692,7 @@ export const appRouter = router({
         if (!route) {
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
-            message: "Nao foi possivel criar a rota.",
+            message: "Não foi possível criar a rota.",
           });
         }
 
@@ -367,16 +702,54 @@ export const appRouter = router({
             respectInputSequence,
           });
           const updatedRoute = await db.getRouteById(route.id, ctx.user.id);
+          await recordOperationalEvent(ctx.user.id, {
+            type: "route_optimized",
+            severity: "info",
+            source: "routes.createAndOptimize",
+            title: "Rota criada e otimizada",
+            routeId: route.id,
+            message: route.name,
+            metadata: {
+              stops: stops.length,
+              mode: input.mode,
+              respectInputSequence: Boolean(respectInputSequence),
+              totalDistance: optimized.totalDistance,
+              totalTime: optimized.totalTime,
+            },
+          });
 
           return {
             route: updatedRoute ?? route,
             optimization: optimized,
           };
         } catch (error) {
-          await db.deleteRoute(route.id, ctx.user.id).catch((deleteError) => {
-            console.error("[Routes] Failed to rollback route creation:", deleteError);
+          console.error("[Routes] Optimization failed after route creation:", error);
+          await recordOperationalEvent(ctx.user.id, {
+            type: "route_optimization_failed",
+            severity: "error",
+            source: "routes.createAndOptimize",
+            title: "Falha ao otimizar rota",
+            routeId: route.id,
+            message: error instanceof Error ? error.message : "Erro desconhecido",
+            metadata: {
+              stops: stops.length,
+              mode: input.mode,
+              respectInputSequence: Boolean(respectInputSequence),
+            },
           });
-          throw error;
+          await db.updateRoute(route.id, ctx.user.id, {
+            status: "draft",
+            totalDistance: 0,
+            totalTime: 0,
+          });
+          const savedRoute = await db.getRouteById(route.id, ctx.user.id);
+
+          return {
+            route: savedRoute ?? route,
+            optimization: null,
+            warning:
+              "A rota foi salva como rascunho, mas não foi possível otimizar agora. Abra a rota e tente otimizar novamente.",
+          };
         }
       }),
     update: protectedProcedure.input(z.object({
@@ -405,9 +778,88 @@ export const appRouter = router({
     optimize: protectedProcedure.input(z.object({
       id: z.number(),
       mode: routeModeSchema.optional(),
+      localityMode: localityModeSchema.optional(),
+      startLatitude: z.number().optional(),
+      startLongitude: z.number().optional(),
     }))
       .mutation(async ({ ctx, input }) => {
-        return optimizeUserRoute(input.id, ctx.user.id, input.mode);
+        const startLocation =
+          Number.isFinite(input.startLatitude) && Number.isFinite(input.startLongitude)
+            ? {
+                latitude: Number(input.startLatitude),
+                longitude: Number(input.startLongitude),
+                address: "Local atual do motorista",
+              }
+            : undefined;
+
+        const optimized = await optimizeUserRoute(input.id, ctx.user.id, input.mode, {
+          startLocation,
+          localityMode: input.localityMode,
+        });
+        await recordOperationalEvent(ctx.user.id, {
+          type: input.localityMode === "strict" ? "route_user_requested_better_sequence" : "route_reoptimized",
+          severity: input.localityMode === "strict" ? "warning" : "info",
+          source: "routes.optimize",
+          title: input.localityMode === "strict" ? "Usuário pediu sequência melhor" : "Rota reotimizada",
+          routeId: input.id,
+          metadata: {
+            mode: input.mode,
+            localityMode: input.localityMode,
+            totalDistance: optimized.totalDistance,
+            totalTime: optimized.totalTime,
+            startedFromCurrentLocation: Boolean(startLocation),
+          },
+        });
+        return optimized;
+      }),
+    optimizeRemaining: protectedProcedure.input(z.object({
+      id: z.number(),
+      mode: routeModeSchema.optional(),
+      excludeStopIds: z.array(z.number()).default([]),
+      localityMode: localityModeSchema.optional(),
+      startLatitude: z.number().optional(),
+      startLongitude: z.number().optional(),
+    }))
+      .mutation(async ({ ctx, input }) => {
+        const hasStartLocation =
+          Number.isFinite(input.startLatitude) && Number.isFinite(input.startLongitude);
+
+        if (input.excludeStopIds.length === 0 && !hasStartLocation) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Nenhuma parada concluída foi informada para deixar fora.",
+          });
+        }
+
+        const startLocation =
+          hasStartLocation
+            ? {
+                latitude: Number(input.startLatitude),
+                longitude: Number(input.startLongitude),
+                address: "Local atual do motorista",
+              }
+            : undefined;
+
+        const optimized = await optimizeUserRoute(input.id, ctx.user.id, input.mode, {
+          excludeStopIds: input.excludeStopIds,
+          startLocation,
+          localityMode: input.localityMode,
+        });
+        await recordOperationalEvent(ctx.user.id, {
+          type: "route_remaining_reoptimized",
+          severity: "info",
+          source: "routes.optimizeRemaining",
+          title: "Restantes reotimizadas",
+          routeId: input.id,
+          metadata: {
+            excludedStops: input.excludeStopIds.length,
+            localityMode: input.localityMode,
+            totalDistance: optimized.totalDistance,
+            totalTime: optimized.totalTime,
+            startedFromCurrentLocation: Boolean(startLocation),
+          },
+        });
+        return optimized;
       }),
   }),
 
@@ -424,6 +876,45 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         await requireUserRoute(input.routeId, ctx.user.id);
         return db.createStops(input.routeId, input.stops);
+      }),
+    update: protectedProcedure.input(stopUpdateSchema)
+      .mutation(async ({ ctx, input }) => {
+        await requireUserRoute(input.routeId, ctx.user.id);
+        const updatedStop = await db.updateStop(input.routeId, input.stopId, {
+          address: input.address.trim(),
+          latitude: input.latitude,
+          longitude: input.longitude,
+          sequence: input.sequence,
+          notes: input.notes?.trim() || null,
+        });
+
+        if (!updatedStop) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Parada não encontrada.",
+          });
+        }
+
+        await db.updateRoute(input.routeId, ctx.user.id, { status: "draft" });
+        return updatedStop;
+      }),
+    delete: protectedProcedure.input(z.object({
+      routeId: z.number(),
+      stopId: z.number(),
+    }))
+      .mutation(async ({ ctx, input }) => {
+        await requireUserRoute(input.routeId, ctx.user.id);
+        const deleted = await db.deleteStop(input.routeId, input.stopId);
+
+        if (!deleted) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Parada não encontrada.",
+          });
+        }
+
+        await db.updateRoute(input.routeId, ctx.user.id, { status: "draft" });
+        return { success: true };
       }),
   }),
 
@@ -494,6 +985,83 @@ export const appRouter = router({
         });
 
         return response;
+      }),
+  }),
+
+  imile: router({
+    status: protectedProcedure.query(async ({ ctx }) => {
+      const integration = await db.getUserIntegration(ctx.user.id, IMILE_PROVIDER);
+      const overrides = integration ? await getUserImileOverrides(ctx.user.id) : undefined;
+      return {
+        ...getImileConnectionStatus(overrides),
+        userCredentialConfigured: Boolean(integration),
+      };
+    }),
+    credential: protectedProcedure.query(async ({ ctx }) => {
+      const integration = await db.getUserIntegration(ctx.user.id, IMILE_PROVIDER);
+
+      return {
+        configured: Boolean(integration),
+        label: integration?.label ?? "",
+        baseUrl: integration?.baseUrl ?? "",
+        fallbackBaseUrls: integration?.fallbackBaseUrls ?? "",
+        deliveriesPath: integration?.deliveriesPath ?? "",
+        authHeader: integration?.authHeader ?? "Authorization",
+        country: integration?.country ?? "BRA",
+        lang: integration?.lang ?? "pt-BR",
+        resourceCode: integration?.resourceCode ?? "BRA",
+        timezone: integration?.timezone ?? "America/Sao_Paulo",
+        hubCode: integration?.hubCode ?? "",
+        appVersion: integration?.appVersion ?? "2.2.78",
+        sourceName: integration?.sourceName ?? "REDeliveryApp",
+      };
+    }),
+    saveCredential: protectedProcedure.input(imileCredentialInput)
+      .mutation(async ({ ctx, input }) => {
+        const existing = await db.getUserIntegration(ctx.user.id, IMILE_PROVIDER);
+        const authToken = input.authToken.trim();
+        const authTokenEncrypted = authToken
+          ? encryptIntegrationSecret(authToken)
+          : existing?.authTokenEncrypted;
+
+        if (!authTokenEncrypted) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Informe o token/API key do Rider Delivery.",
+          });
+        }
+
+        await db.upsertUserIntegration(ctx.user.id, IMILE_PROVIDER, {
+          label: cleanText(input.label) ?? "Rider Delivery",
+          baseUrl: cleanText(input.baseUrl),
+          fallbackBaseUrls: cleanText(input.fallbackBaseUrls),
+          deliveriesPath: cleanText(input.deliveriesPath),
+          authHeader: cleanText(input.authHeader) ?? "Authorization",
+          authTokenEncrypted,
+          country: cleanText(input.country) ?? "BRA",
+          lang: cleanText(input.lang) ?? "pt-BR",
+          resourceCode: cleanText(input.resourceCode) ?? "BRA",
+          timezone: cleanText(input.timezone) ?? "America/Sao_Paulo",
+          hubCode: cleanText(input.hubCode),
+          appVersion: cleanText(input.appVersion) ?? "2.2.78",
+          sourceName: cleanText(input.sourceName) ?? "REDeliveryApp",
+          isActive: true,
+        });
+
+        return { configured: true };
+      }),
+    deleteCredential: protectedProcedure.mutation(async ({ ctx }) => {
+      await db.deleteUserIntegration(ctx.user.id, IMILE_PROVIDER);
+      return { configured: false };
+    }),
+    deliveries: protectedProcedure.input(z.object({
+      dateFrom: z.string().optional(),
+      dateTo: z.string().optional(),
+      status: z.string().optional(),
+    }))
+      .query(async ({ ctx, input }) => {
+        const overrides = await getUserImileOverrides(ctx.user.id);
+        return fetchImileDeliveries(input, overrides);
       }),
   }),
 

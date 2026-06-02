@@ -4,4 +4,5 @@
     <string name="title_activity_main">EconoRotas</string>
     <string name="package_name">com.econorotas.app</string>
     <string name="custom_url_scheme">com.econorotas.app</string>
+    <string name="imile_accessibility_description">Permite ao EconoRotas ler os endereços visíveis no Rider Delivery para montar rotas, somente quando você iniciar a captura.</string>
 </resources>

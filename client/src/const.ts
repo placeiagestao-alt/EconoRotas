@@ -8,13 +8,14 @@ const DEFAULT_TERMLY_GENERATOR_URL =
 export const getLoginUrl = () => {
   const oauthPortalUrl = import.meta.env.VITE_OAUTH_PORTAL_URL?.trim();
   const appId = import.meta.env.VITE_APP_ID?.trim();
+  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim();
   const enableDevLogin = import.meta.env.VITE_ENABLE_DEV_LOGIN === "true";
 
   if (enableDevLogin) {
     return "/";
   }
 
-  if (!oauthPortalUrl || !appId) {
+  if ((!oauthPortalUrl || !appId) && !googleClientId) {
     return import.meta.env.DEV ? buildApiUrl("/api/dev/login") : "/";
   }
 

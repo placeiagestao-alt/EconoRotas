@@ -10,6 +10,46 @@ import {
   type Location,
 } from "./optimization";
 
+function bruteForceBestDistance(locations: Location[], options: {
+  startLocation?: Location;
+  endLocation?: Location;
+} = {}) {
+  const permutations = (items: number[]): number[][] => {
+    if (items.length <= 1) return [items];
+
+    return items.flatMap((item, index) =>
+      permutations([...items.slice(0, index), ...items.slice(index + 1)]).map(
+        (rest) => [item, ...rest]
+      )
+    );
+  };
+
+  const routeDistance = (sequence: number[]) => {
+    let total = 0;
+
+    if (options.startLocation) {
+      total += calculateDistance(options.startLocation, locations[sequence[0]]);
+    }
+
+    for (let i = 0; i < sequence.length - 1; i++) {
+      total += calculateDistance(locations[sequence[i]], locations[sequence[i + 1]]);
+    }
+
+    if (options.endLocation) {
+      total += calculateDistance(
+        locations[sequence[sequence.length - 1]],
+        options.endLocation
+      );
+    }
+
+    return Math.round(total * 100) / 100;
+  };
+
+  return Math.min(
+    ...permutations(locations.map((_, index) => index)).map(routeDistance)
+  );
+}
+
 describe("Route Optimization", () => {
   describe("calculateDistance", () => {
     it("calculates distance between two points", () => {
@@ -183,6 +223,104 @@ describe("Route Optimization", () => {
         calculateTotalDistance(locations, result.sequence)
       );
     });
+
+    it("chooses the shortest open delivery sequence for small routes", () => {
+      const locations: Location[] = [
+        { latitude: 0, longitude: 0, address: "A" },
+        { latitude: 0, longitude: 3, address: "B" },
+        { latitude: 1, longitude: 0, address: "C" },
+        { latitude: 1, longitude: 3, address: "D" },
+      ];
+
+      const result = optimizeRoute(locations, "shortest_distance");
+      const bestDistance = bruteForceBestDistance(locations);
+
+      expect(result.totalDistance).toBe(bestDistance);
+    });
+
+  it("chooses the shortest sequence between fixed start and end", () => {
+      const locations: Location[] = [
+        { latitude: 0, longitude: 2, address: "B" },
+        { latitude: 1, longitude: 0, address: "C" },
+        { latitude: 0, longitude: 1, address: "A" },
+        { latitude: 1, longitude: 2, address: "D" },
+      ];
+      const options = {
+        startLocation: { latitude: 0, longitude: 0, address: "Start" },
+        endLocation: { latitude: 1, longitude: 3, address: "End" },
+      };
+
+      const result = optimizeRoute(locations, "shortest_distance", 0, options);
+      const bestDistance = bruteForceBestDistance(locations, options);
+
+      expect(result.totalDistance).toBe(bestDistance);
+      expect(result.waypoints.map((waypoint) => waypoint.address)).toEqual([
+        "C",
+        "A",
+        "B",
+        "D",
+      ]);
+    });
+  });
+
+  it("keeps the nearest first stop when optimizing from the current driver position", () => {
+    const startLocation = { latitude: 0, longitude: 0 };
+    const locations = [
+      { latitude: 0, longitude: 0.001, address: "nearest" },
+      { latitude: 0, longitude: 0.02, address: "farther" },
+      { latitude: 0, longitude: 0.021, address: "farther cluster" },
+    ];
+
+    const result = optimizeRoute(locations, "shortest_distance", 0, {
+      startLocation,
+    });
+
+    expect(result.sequence[0]).toBe(0);
+    expect(result.waypoints[0].address).toBe("nearest");
+  });
+
+  it("does not leave a nearby pending stop to jump to a farther cluster", () => {
+    const result = optimizeRoute(
+      [
+        { latitude: 0, longitude: 0.001, address: "near 1" },
+        { latitude: 0, longitude: 0.002, address: "near 2" },
+        { latitude: 0, longitude: 0.03, address: "far 1" },
+        { latitude: 0, longitude: 0.031, address: "far 2" },
+      ],
+      "shortest_distance",
+      0,
+      { startLocation: { latitude: 0, longitude: 0 } }
+    );
+
+    expect(result.waypoints.slice(0, 2).map((waypoint) => waypoint.address)).toEqual([
+      "near 1",
+      "near 2",
+    ]);
+  });
+
+  it("keeps dense neighborhood deliveries together before leaving the area", () => {
+    const result = optimizeRoute(
+      [
+        { latitude: -22.113, longitude: -51.403, address: "current block 1" },
+        { latitude: -22.1134, longitude: -51.4032, address: "current block 2" },
+        { latitude: -22.114, longitude: -51.4027, address: "current block 3" },
+        { latitude: -22.128, longitude: -51.392, address: "far neighborhood 1" },
+        { latitude: -22.1285, longitude: -51.3916, address: "far neighborhood 2" },
+        { latitude: -22.1137, longitude: -51.404, address: "current block 4" },
+      ],
+      "shortest_distance",
+      0,
+      {
+        startLocation: { latitude: -22.1129, longitude: -51.4031 },
+      }
+    );
+
+    expect(result.waypoints.slice(0, 4).map((waypoint) => waypoint.address)).toEqual([
+      "current block 1",
+      "current block 2",
+      "current block 4",
+      "current block 3",
+    ]);
   });
 
   describe("calculateTotalDistance", () => {

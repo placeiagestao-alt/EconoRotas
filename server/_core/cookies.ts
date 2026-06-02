@@ -21,6 +21,33 @@ function isSecureRequest(req: Request) {
   return protoList.some(proto => proto.trim().toLowerCase() === "https");
 }
 
+function getRequestOrigin(req: Request) {
+  const forwardedHost = req.headers["x-forwarded-host"];
+  const host = Array.isArray(forwardedHost)
+    ? forwardedHost[0]
+    : forwardedHost || req.headers.host;
+
+  if (!host) return null;
+
+  const protocol = isSecureRequest(req) ? "https" : req.protocol || "http";
+  return `${protocol}://${host}`;
+}
+
+function requiresCrossSiteCookie(req: Request) {
+  const origin = req.headers.origin;
+  if (!origin) return false;
+
+  if (
+    origin === "https://localhost" ||
+    origin === "capacitor://localhost" ||
+    origin === "ionic://localhost"
+  ) {
+    return true;
+  }
+
+  return origin !== getRequestOrigin(req);
+}
+
 export function getSessionCookieOptions(
   req: Request
 ): Pick<CookieOptions, "domain" | "httpOnly" | "path" | "sameSite" | "secure"> {
@@ -40,11 +67,12 @@ export function getSessionCookieOptions(
   //       : undefined;
 
   const secure = isSecureRequest(req);
+  const crossSiteCookie = secure && requiresCrossSiteCookie(req);
 
   return {
     httpOnly: true,
     path: "/",
-    sameSite: secure ? "none" : "lax",
+    sameSite: crossSiteCookie ? "none" : "lax",
     secure,
   };
 }

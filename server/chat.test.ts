@@ -55,15 +55,16 @@ describe("Chat Module", () => {
   });
 
   describe("chatWithLLM", () => {
-    it("returns error message on LLM failure", async () => {
+    it("returns an operational fallback on LLM failure", async () => {
       const { invokeLLM } = await import("./_core/llm");
       vi.mocked(invokeLLM).mockRejectedValue(new Error("LLM Error"));
       vi.mocked(db.getUserRoutes).mockResolvedValue([]);
       vi.mocked(db.getUserStats).mockResolvedValue(null);
 
-      const result = await chatWithLLM(1, "Test message").catch((e) => e.message);
+      const result = await chatWithLLM(1, "Test message");
 
-      expect(result).toBe("Erro ao processar mensagem com IA");
+      expect(result).toContain("assistente de IA não conseguiu acessar");
+      expect(result).toContain("Recomendações práticas");
     });
 
     it("builds context from user routes", async () => {

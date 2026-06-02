@@ -1,6 +1,7 @@
 # Dependencies
 **/node_modules
 .pnpm-store/
+.pnpm-home/
 
 # Build outputs
 dist/
@@ -105,6 +106,8 @@ jspm_packages/
 # Temporary folders
 tmp/
 temp/
+.tmp/
+outputs/
 
 # Database
 .data/
@@ -127,3 +130,4 @@ temp/
 client/public/__manus__/version.json
 
 .vercel
+.env*

@@ -1,5 +1,6 @@
 ﻿import { useState, type ChangeEvent } from "react";
 import { useLocation } from "wouter";
+import { Capacitor, registerPlugin } from "@capacitor/core";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,17 +15,65 @@ import RouteShare from "@/components/RouteShare";
 import RouteMap from "@/components/RouteMap";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
-import { FileSpreadsheet, Flag, Plus, Trash2, Upload, Zap, MapPin } from "lucide-react";
+import { FileText, FileSpreadsheet, Flag, Mic, MicOff, Plus, Trash2, Upload, Zap, MapPin, Truck } from "lucide-react";
 import {
+  parseImileScreenFile,
+  parseImileScreenText,
   parseRouteWorkbook,
   type ImportedRoute,
   type ImportedStop,
 } from "@/services/routeImportService";
-import { searchAddress } from "@/services/maps/geocodingService";
+import { searchAddress, type AddressSuggestion } from "@/services/maps/geocodingService";
+import { getCurrentPosition } from "@/services/maps/locationService";
 import { cn } from "@/lib/utils";
+import { buildApiUrl } from "@/lib/apiBase";
+import { saveLastRouteProgress } from "@/lib/routeProgress";
+
+type ImileCapturePlugin = {
+  openAccessibilitySettings: () => Promise<void>;
+  startCapture: () => Promise<void>;
+  stopCapture: () => Promise<{ xml: string }>;
+  getCapture: () => Promise<{ active: boolean; xml: string }>;
+};
+
+const ImileCapture = registerPlugin<ImileCapturePlugin>("ImileCapture");
+
+type SpeechRecognitionEventLike = Event & {
+  resultIndex: number;
+  results: {
+    length: number;
+    [index: number]: {
+      isFinal: boolean;
+      [index: number]: {
+        transcript: string;
+      };
+    };
+  };
+};
+
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  start: () => void;
+  stop: () => void;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: Event & { error?: string }) => void) | null;
+  onend: (() => void) | null;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+declare global {
+  interface Window {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  }
+}
 
 type RouteStop = Pick<ImportedStop, "address" | "latitude" | "longitude"> & {
   packageNumber?: string;
+  deliveryCount?: number;
   routingStop?: number;
   notes?: string;
   sourceRow?: number;
@@ -39,6 +88,166 @@ type StopIssue = {
 };
 
 const EMPTY_ROUTE_POINT: RoutePoint = { address: "", latitude: 0, longitude: 0 };
+const IS_LOCAL_ANDROID_API =
+  import.meta.env.VITE_API_BASE_URL?.includes("127.0.0.1") ||
+  import.meta.env.VITE_API_BASE_URL?.includes("localhost");
+const SHOW_IMILE_API_CONNECTOR = false;
+const GEOCODING_MIN_INTERVAL_MS = 1150;
+const GEOCODING_QUERY_TIMEOUT_MS = 8000;
+const MAX_BATCH_GEOCODE_CANDIDATES = 2;
+const MAX_FALLBACK_GEOCODE_CANDIDATES = 5;
+let lastGeocodingRequestAt = 0;
+
+function isLocalBrowserHost() {
+  if (typeof window === "undefined") return false;
+  return ["localhost", "127.0.0.1"].includes(window.location.hostname);
+}
+
+function isPackagedAndroidApp() {
+  return Capacitor.getPlatform() === "android" && Capacitor.isNativePlatform();
+}
+
+function toDateInputValue(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getSpeechRecognitionConstructor() {
+  if (typeof window === "undefined") return undefined;
+  return window.SpeechRecognition || window.webkitSpeechRecognition;
+}
+
+function parseVoiceStop(rawTranscript: string) {
+  let text = rawTranscript
+    .normalize("NFC")
+    .replace(/[.!?;]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const packageMatch = text.match(/\b(?:pacote|entrega)\s+([a-z0-9._-]+)\b/i);
+  const packageNumber = packageMatch?.[1];
+
+  text = text
+    .replace(/\b(?:nova\s+parada|novo\s+endereco|novo\s+endereço|adicionar\s+parada)\b/gi, "")
+    .replace(/\b(?:entrega|parada|endereco|endereço)\s+(?:na|no|em)\b/gi, "")
+    .replace(/\bpacote\s+[a-z0-9._-]+\b/gi, "")
+    .replace(/\bnumero\b/gi, "número")
+    .replace(/\s+número\s+/gi, ", ")
+    .replace(/\s+bairro\s+/gi, ", bairro ")
+    .replace(/\s+cidade\s+/gi, ", ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+,/g, ",")
+    .replace(/,\s*,/g, ",")
+    .trim();
+
+  return {
+    address: text,
+    packageNumber,
+  };
+}
+
+function isNetworkFetchError(error: unknown) {
+  const message =
+    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+
+  return (
+    message.includes("fetch failed") ||
+    message.includes("failed to fetch") ||
+    message.includes("network") ||
+    message.includes("load failed")
+  );
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function waitForGeocodingSlot() {
+  const elapsed = Date.now() - lastGeocodingRequestAt;
+  if (elapsed < GEOCODING_MIN_INTERVAL_MS) {
+    await wait(GEOCODING_MIN_INTERVAL_MS - elapsed);
+  }
+  lastGeocodingRequestAt = Date.now();
+}
+
+function isAddressServiceBusyError(error: unknown) {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return (
+    message.includes("limite") ||
+    message.includes("ocupado") ||
+    message.includes("too many") ||
+    message.includes("429")
+  );
+}
+
+async function assertApiReachable() {
+  try {
+    const response = await fetch(buildApiUrl("/api/health"), {
+      headers: { Accept: "application/json" },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Servidor respondeu ${response.status}`);
+    }
+  } catch {
+    if (IS_LOCAL_ANDROID_API) {
+      throw new Error(
+        "Sem conexão com o servidor local. Verifique se o ambiente de teste está ativo e tente novamente."
+      );
+    }
+
+    throw new Error(
+      "Sem conexão com o servidor. Confira a internet do aparelho e tente novamente em alguns segundos."
+    );
+  }
+}
+
+async function searchAddressWithNetworkRetry(
+  query: string,
+  options: Parameters<typeof searchAddress>[1]
+) {
+  try {
+    return await searchAddress(query, options);
+  } catch (error) {
+    if (!isNetworkFetchError(error)) {
+      throw error;
+    }
+
+    await assertApiReachable();
+    await wait(750);
+
+    try {
+      return await searchAddress(query, options);
+    } catch (retryError) {
+      if (isNetworkFetchError(retryError)) {
+        throw new Error(
+          "A conexão com o servidor caiu durante a busca de coordenadas. Confira a internet do aparelho e tente novamente."
+        );
+      }
+
+      throw retryError;
+    }
+  }
+}
+
+async function searchAddressWithTimeout(
+  query: string,
+  options: Parameters<typeof searchAddress>[1] = {}
+) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    GEOCODING_QUERY_TIMEOUT_MS
+  );
+
+  try {
+    return await searchAddressWithNetworkRetry(query, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 function parseStopNotes(notes?: string) {
   const raw = notes?.trim();
@@ -75,6 +284,10 @@ function buildStopNotes(packageNumber?: string, notes?: string) {
   return parts.length ? parts.join(" | ") : undefined;
 }
 
+function buildSequentialImilePackageNumber(index: number) {
+  return String(index + 1).padStart(2, "0");
+}
+
 export default function CreateRoute() {
   const [, navigate] = useLocation();
   const [isCalculating, setIsCalculating] = useState(false);
@@ -87,7 +300,25 @@ export default function CreateRoute() {
   const [importSummary, setImportSummary] = useState<ImportedRoute | null>(null);
   const [respectImportedStopSequence, setRespectImportedStopSequence] = useState(false);
   const [isImportingFile, setIsImportingFile] = useState(false);
+  const [isImportingImileCapture, setIsImportingImileCapture] = useState(false);
+  const [isImportingLatestImileCapture, setIsImportingLatestImileCapture] = useState(false);
+  const [isRunningImileCapture, setIsRunningImileCapture] = useState(false);
+  const [isImportingImile, setIsImportingImile] = useState(false);
+  const [imileDateFrom, setImileDateFrom] = useState(() => toDateInputValue(new Date()));
+  const [imileDateTo, setImileDateTo] = useState(() => toDateInputValue(new Date()));
+  const [imileStatus, setImileStatus] = useState("");
+  const [voiceRecognition, setVoiceRecognition] = useState<SpeechRecognitionLike | null>(null);
+  const [isListeningVoiceStops, setIsListeningVoiceStops] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState("");
+  const [pendingVoiceStopIndex, setPendingVoiceStopIndex] = useState<number | null>(null);
+  const [voiceAddressSuggestions, setVoiceAddressSuggestions] = useState<AddressSuggestion[]>([]);
+  const [isLoadingVoiceSuggestions, setIsLoadingVoiceSuggestions] = useState(false);
+  const [voiceSuggestionError, setVoiceSuggestionError] = useState<string | null>(null);
   const [isResolvingCoordinates, setIsResolvingCoordinates] = useState(false);
+  const [coordinateResolveProgress, setCoordinateResolveProgress] = useState<{
+    resolved: number;
+    total: number;
+  } | null>(null);
   const [startPoint, setStartPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
   const [endPoint, setEndPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
   const [invalidStopIndexes, setInvalidStopIndexes] = useState<number[]>([]);
@@ -97,14 +328,59 @@ export default function CreateRoute() {
   ]);
 
   const createAndOptimizeMutation = trpc.routes.createAndOptimize.useMutation();
+  const imileDeliveriesQuery = trpc.imile.deliveries.useQuery(
+    {
+      dateFrom: imileDateFrom,
+      dateTo: imileDateTo,
+      status: imileStatus.trim() || undefined,
+    },
+    { enabled: false }
+  );
   const isSavingRoute =
     createAndOptimizeMutation.isPending ||
     isResolvingCoordinates;
+  const routeActionLabel = respectImportedStopSequence
+    ? "Criar rota com STOP"
+    : "Criar e Otimizar Rota";
+  const canRunImileScreenCapture =
+    (IS_LOCAL_ANDROID_API || isLocalBrowserHost()) && !isPackagedAndroidApp();
+  const canUseAndroidImileCapture = isPackagedAndroidApp();
   const submitLabel = isResolvingCoordinates
-    ? "Localizando endere\u00e7os..."
+    ? coordinateResolveProgress
+      ? `Localizando ${coordinateResolveProgress.resolved}/${coordinateResolveProgress.total}...`
+      : "Localizando endere\u00e7os..."
     : isSavingRoute
-      ? "Criando e otimizando..."
-      : "Criar e Otimizar Rota";
+      ? respectImportedStopSequence
+        ? "Criando rota..."
+        : "Criando e otimizando..."
+      : routeActionLabel;
+
+  const createAndOptimizeWithNetworkRetry = async (
+    payload: Parameters<typeof createAndOptimizeMutation.mutateAsync>[0]
+  ) => {
+    try {
+      return await createAndOptimizeMutation.mutateAsync(payload);
+    } catch (error) {
+      if (!isNetworkFetchError(error)) {
+        throw error;
+      }
+
+      await assertApiReachable();
+      await wait(750);
+
+      try {
+        return await createAndOptimizeMutation.mutateAsync(payload);
+      } catch (retryError) {
+        if (isNetworkFetchError(retryError)) {
+          throw new Error(
+            "A conexão com o servidor caiu durante a criação da rota. Confira a internet do aparelho e tente novamente."
+          );
+        }
+
+        throw retryError;
+      }
+    }
+  };
 
   const hasValidCoordinates = (stop: RoutePoint) =>
     Number.isFinite(stop.latitude) &&
@@ -135,6 +411,52 @@ export default function CreateRoute() {
       .map(formatStopIssue)
       .join(", ") + (issues.length > 5 ? ` e mais ${issues.length - 5}` : "");
 
+  const getAuthHeaders = (): Record<string, string> => {
+    return {};
+  };
+
+  const applyImileCaptureRoute = (
+    importedRoute: ImportedRoute,
+    descriptionSource: string,
+    successLabel: string
+  ) => {
+    setInvalidStopIndexes([]);
+    setStops(
+      importedRoute.stops.map((stop) => ({
+        address: stop.address,
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        packageNumber: stop.packageNumber,
+        deliveryCount: stop.deliveryCount,
+        routingStop: stop.routingStop,
+        notes: stop.notes,
+        sourceRow: stop.sourceRow,
+      }))
+    );
+    setImportSummary(importedRoute);
+    setRespectImportedStopSequence(false);
+
+    if (!name.trim()) {
+      setName(importedRoute.routeName);
+    }
+
+    if (!description.trim()) {
+      const totalDeliveries = importedRoute.totalDeliveries ?? importedRoute.stops.length;
+      setDescription(
+        `Importada ${descriptionSource} com ${importedRoute.stops.length} paradas e ${totalDeliveries} entregas.`
+      );
+    }
+
+    const totalDeliveries = importedRoute.totalDeliveries ?? importedRoute.stops.length;
+    toast.success(
+      `${importedRoute.stops.length} paradas e ${totalDeliveries} entregas iMile ${successLabel}.`
+    );
+    if ((importedRoute.groupedDeliveries ?? 0) > 0) {
+      toast.message(`${importedRoute.groupedDeliveries} entregas agrupadas em enderecos ja importados.`);
+    }
+    toast.warning("As coordenadas serao buscadas ao criar a rota.");
+  };
+
   const getAddressParts = (address: string) =>
     address
       .split(",")
@@ -143,7 +465,24 @@ export default function CreateRoute() {
 
   const hasPostalCode = (value: string) => /\b\d{5}-?\d{3}\b/.test(value);
 
-  const inferState = (city?: string) => {
+  const normalizeAddressToken = (value: string) =>
+    value
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim();
+
+  const normalizeStateForSearch = (state?: string) => {
+    const normalized = normalizeAddressToken(state || "");
+    if (!normalized) return "";
+    if (normalized === "sp" || normalized === "sao paulo") return "SP";
+    if (normalized.length === 2) return normalized.toUpperCase();
+    return state?.trim() || "";
+  };
+
+  const inferState = (city?: string, explicitState?: string) => {
+    const state = normalizeStateForSearch(explicitState);
+    if (state) return state;
     if (!city) return "";
 
     return city.toLowerCase().includes("presidente prudente") ? "SP" : "";
@@ -155,25 +494,54 @@ export default function CreateRoute() {
       .filter(Boolean)
       .join(", ");
 
+  const stripStreetComplementForSearch = (street: string) =>
+    street
+      .replace(
+        /\s+\b(?:torre|bloco|apto?|apartamento|casa|fundos|sala|loja|quadra|lote)\b.*$/i,
+        ""
+      )
+      .trim() || street;
+
+  const normalizeStreetForSearch = (street: string) =>
+    stripStreetComplementForSearch(street)
+      .replace(/^av\.?\s+/i, "Avenida ")
+      .replace(/^r\.?\s+/i, "Rua ")
+      .trim();
+
+  const getStateIndex = (parts: string[]) =>
+    parts.findIndex((part) => {
+      const normalized = normalizeAddressToken(part);
+      return normalized === "sp" || normalized === "sao paulo";
+    });
+
   const getCleanedAddressCandidates = (address: string) => {
-    const parts = getAddressParts(address);
+    const rawParts = getAddressParts(address);
+    const parts =
+      rawParts.length >= 2 && /^\d+[a-zA-Z]?$/.test(rawParts[0]) && /[A-Za-z]/.test(rawParts[1])
+        ? [rawParts[1], rawParts[0], ...rawParts.slice(2)]
+        : rawParts;
 
     if (parts.length < 4) {
       return [];
     }
 
     const [street, number, ...rest] = parts;
-    const postalCode = rest.find(hasPostalCode);
+    const streetForSearch = normalizeStreetForSearch(street);
     const restWithoutPostalCode = rest.filter((part) => !hasPostalCode(part));
-    const city = restWithoutPostalCode[restWithoutPostalCode.length - 1];
-    const allDistrictParts = restWithoutPostalCode.slice(0, -1);
-    const likelyDistrictParts =
-      allDistrictParts.length >= 2 ? allDistrictParts.slice(1) : allDistrictParts;
-    const state = inferState(city);
-    const district = likelyDistrictParts.join(", ");
-    const districtWithComplement = allDistrictParts.join(", ");
+    const stateIndex = getStateIndex(restWithoutPostalCode);
+    const explicitState = stateIndex >= 0 ? restWithoutPostalCode[stateIndex] : "";
+    const city =
+      stateIndex > 0
+        ? restWithoutPostalCode[stateIndex - 1]
+        : restWithoutPostalCode[restWithoutPostalCode.length - 1];
+    const districtParts =
+      stateIndex > 1
+        ? restWithoutPostalCode.slice(0, stateIndex - 1)
+        : restWithoutPostalCode.slice(0, -1);
+    const state = inferState(city, explicitState);
+    const district = districtParts.join(", ");
     const baseWithDistrict = buildCandidate([
-      street,
+      streetForSearch,
       number,
       district,
       city,
@@ -181,42 +549,108 @@ export default function CreateRoute() {
       "Brasil",
     ]);
     const baseWithoutDistrict = buildCandidate([
-      street,
+      streetForSearch,
       number,
       city,
       state,
       "Brasil",
     ]);
-    const streetWithDistrict = buildCandidate([street, district, city, state, "Brasil"]);
-    const streetWithCity = buildCandidate([street, city, state, "Brasil"]);
-    const postalWithCity = postalCode
-      ? buildCandidate([postalCode, city, state, "Brasil"])
-      : "";
+    const streetWithDistrict = buildCandidate([streetForSearch, district, city, state, "Brasil"]);
+    const streetWithCity = buildCandidate([streetForSearch, city, state, "Brasil"]);
+    const streetNumberCity = buildCandidate([streetForSearch, number, city, state, "Brasil"]);
 
     return [
       baseWithDistrict,
-      buildCandidate([street, number, districtWithComplement, city, state, "Brasil"]),
       baseWithoutDistrict,
+      streetNumberCity,
       streetWithDistrict,
       streetWithCity,
-      postalWithCity,
     ].filter(Boolean);
   };
 
   const getSearchCandidates = (address: string) => {
     const normalized = address.replace(/\s+/g, " ").trim();
     const candidates = [
-      normalized,
       ...getCleanedAddressCandidates(normalized),
+      normalized,
       normalized.includes("Brasil") ? "" : `${normalized}, Brasil`,
     ].filter(Boolean);
 
     return Array.from(new Set(candidates));
   };
 
-  const searchFirstAddressMatch = async (address: string) => {
-    for (const candidate of getSearchCandidates(address)) {
-      const suggestions = await searchAddress(candidate, { limit: 1 });
+  const getAddressDistrict = (address: string) => {
+    const parts = getAddressParts(address);
+    return parts.length >= 5 ? normalizeAddressToken(parts[2]) : "";
+  };
+
+  const getAddressCity = (address: string) => {
+    const parts = getAddressParts(address);
+    return parts.length >= 5 ? normalizeAddressToken(parts[3]) : "";
+  };
+
+  const getStableCoordinateOffset = (address: string) => {
+    const hash = Array.from(address).reduce(
+      (value, char) => (value * 31 + char.charCodeAt(0)) % 9973,
+      7
+    );
+    const angle = ((hash % 360) * Math.PI) / 180;
+    const radius = 0.00025 + (hash % 9) * 0.00003;
+
+    return {
+      latitude: Math.sin(angle) * radius,
+      longitude: Math.cos(angle) * radius,
+    };
+  };
+
+  const getApproximateCoordinateFromRoute = (
+    stop: RouteStop,
+    routeStops: RouteStop[]
+  ) => {
+    const district = getAddressDistrict(stop.address);
+    const city = getAddressCity(stop.address);
+    const candidates = routeStops.filter((candidate) => {
+      if (!hasValidCoordinates(candidate)) return false;
+      if (district && getAddressDistrict(candidate.address) === district) return true;
+      return Boolean(city && getAddressCity(candidate.address) === city);
+    });
+
+    if (candidates.length === 0) return undefined;
+
+    const base = candidates.reduce(
+      (acc, candidate) => ({
+        latitude: acc.latitude + candidate.latitude,
+        longitude: acc.longitude + candidate.longitude,
+      }),
+      { latitude: 0, longitude: 0 }
+    );
+    const offset = getStableCoordinateOffset(stop.address);
+
+    return {
+      latitude: base.latitude / candidates.length + offset.latitude,
+      longitude: base.longitude / candidates.length + offset.longitude,
+    };
+  };
+
+  const searchFirstAddressMatch = async (
+    address: string,
+    maxCandidates = MAX_BATCH_GEOCODE_CANDIDATES
+  ) => {
+    for (const candidate of getSearchCandidates(address).slice(0, maxCandidates)) {
+      await waitForGeocodingSlot();
+      let suggestions;
+
+      try {
+        suggestions = await searchAddressWithTimeout(candidate, { limit: 1 });
+      } catch (error) {
+        if (isAddressServiceBusyError(error)) {
+          await wait(1800);
+          continue;
+        }
+
+        continue;
+      }
+
       const suggestion = suggestions[0];
 
       if (suggestion) {
@@ -230,6 +664,9 @@ export default function CreateRoute() {
   const resolveMissingCoordinates = async (routeStops: RouteStop[]) => {
     const resolvedStops: RouteStop[] = [];
     let resolvedCount = 0;
+    let approximateCount = 0;
+    const totalToResolve = routeStops.filter((stop) => !hasValidCoordinates(stop)).length;
+    let attemptedCount = 0;
 
     for (const stop of routeStops) {
       if (hasValidCoordinates(stop)) {
@@ -249,9 +686,70 @@ export default function CreateRoute() {
       } else {
         resolvedStops.push(stop);
       }
+
+      attemptedCount += 1;
+      setCoordinateResolveProgress({
+        resolved: attemptedCount,
+        total: totalToResolve,
+      });
     }
 
-    return { resolvedStops, resolvedCount };
+    const unresolvedIndexes = resolvedStops
+      .map((stop, index) => (hasValidCoordinates(stop) ? -1 : index))
+      .filter((index) => index >= 0);
+
+    const canRunFallbackPass =
+      unresolvedIndexes.length > 0 &&
+      unresolvedIndexes.length <= Math.max(20, Math.ceil(totalToResolve * 0.25));
+
+    if (canRunFallbackPass) {
+      for (const index of unresolvedIndexes) {
+        const stop = resolvedStops[index];
+        const suggestion = await searchFirstAddressMatch(
+          stop.address,
+          MAX_FALLBACK_GEOCODE_CANDIDATES
+        );
+
+        if (suggestion) {
+          resolvedStops[index] = {
+            ...stop,
+            latitude: suggestion.latitude,
+            longitude: suggestion.longitude,
+          };
+          resolvedCount += 1;
+        }
+
+        attemptedCount += 1;
+        setCoordinateResolveProgress({
+          resolved: attemptedCount,
+          total: totalToResolve + unresolvedIndexes.length,
+        });
+      }
+    }
+
+    const stillUnresolvedIndexes = resolvedStops
+      .map((stop, index) => (hasValidCoordinates(stop) ? -1 : index))
+      .filter((index) => index >= 0);
+
+    for (const index of stillUnresolvedIndexes) {
+      const stop = resolvedStops[index];
+      const approximateCoordinate = getApproximateCoordinateFromRoute(stop, resolvedStops);
+
+      if (!approximateCoordinate) continue;
+
+      resolvedStops[index] = {
+        ...stop,
+        latitude: approximateCoordinate.latitude,
+        longitude: approximateCoordinate.longitude,
+        notes: [stop.notes, "Coordenada aproximada pelo bairro para ordenar a rota."]
+          .filter(Boolean)
+          .join(" | "),
+      };
+      resolvedCount += 1;
+      approximateCount += 1;
+    }
+
+    return { resolvedStops, resolvedCount, approximateCount };
   };
 
   const resolveOptionalPoint = async (point: RoutePoint) => {
@@ -281,9 +779,213 @@ export default function CreateRoute() {
     setStops((currentStops) => [...currentStops, { address: "", latitude: 0, longitude: 0 }]);
   };
 
+  const loadVoiceAddressSuggestions = async (address: string) => {
+    setIsLoadingVoiceSuggestions(true);
+    setVoiceSuggestionError(null);
+    setVoiceAddressSuggestions([]);
+
+    try {
+      const suggestions = await searchAddressWithTimeout(address);
+      setVoiceAddressSuggestions(suggestions);
+      if (suggestions.length === 0) {
+        setVoiceSuggestionError("Nenhuma sugestão encontrada. Ajuste o endereço falado ou digite no campo abaixo.");
+      }
+    } catch (error) {
+      setVoiceSuggestionError(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível buscar sugestões para esse endereço."
+      );
+    } finally {
+      setIsLoadingVoiceSuggestions(false);
+    }
+  };
+
+  const appendVoiceStop = (rawTranscript: string) => {
+    const parsed = parseVoiceStop(rawTranscript);
+
+    if (parsed.address.length < 6) {
+      return;
+    }
+
+    voiceRecognition?.stop();
+    setVoiceRecognition(null);
+    setIsListeningVoiceStops(false);
+    setVoiceAddressSuggestions([]);
+    setVoiceSuggestionError(null);
+    setInvalidStopIndexes([]);
+    setRespectImportedStopSequence(false);
+    setStops((currentStops) => {
+      const replacementIndex = pendingVoiceStopIndex;
+      const nextStop: RouteStop = {
+        address: parsed.address,
+        latitude: 0,
+        longitude: 0,
+        packageNumber: parsed.packageNumber,
+        notes: `Inserido por voz: ${rawTranscript.trim()}`,
+      };
+
+      if (
+        replacementIndex !== null &&
+        replacementIndex >= 0 &&
+        replacementIndex < currentStops.length
+      ) {
+        setPendingVoiceStopIndex(replacementIndex);
+        return currentStops.map((stop, index) =>
+          index === replacementIndex ? { ...stop, ...nextStop } : stop
+        );
+      }
+
+      const emptyIndex = currentStops.findIndex((stop) => !stop.address.trim());
+
+      if (emptyIndex >= 0) {
+        setPendingVoiceStopIndex(emptyIndex);
+        return currentStops.map((stop, index) => (index === emptyIndex ? nextStop : stop));
+      }
+
+      setPendingVoiceStopIndex(currentStops.length);
+      return [...currentStops, nextStop];
+    });
+    setVoiceTranscript(parsed.address);
+    void loadVoiceAddressSuggestions(parsed.address);
+    toast.message("Escolha o endereço correto nas sugestões para salvar e continuar falando.");
+  };
+
+  const handleVoiceTranscriptChange = (address: string) => {
+    setVoiceTranscript(address);
+    setVoiceAddressSuggestions([]);
+    setVoiceSuggestionError(null);
+
+    if (pendingVoiceStopIndex === null) return;
+
+    setInvalidStopIndexes((current) =>
+      current.filter((item) => item !== pendingVoiceStopIndex)
+    );
+    setStops((currentStops) =>
+      currentStops.map((stop, index) =>
+        index === pendingVoiceStopIndex
+          ? {
+              ...stop,
+              address,
+              latitude: 0,
+              longitude: 0,
+              notes: stop.notes || "Inserido por voz com edição manual",
+            }
+          : stop
+      )
+    );
+  };
+
+  const handleSearchEditedVoiceAddress = () => {
+    const address = voiceTranscript.trim();
+    if (address.length < 6) {
+      toast.error("Digite um endereço mais completo para buscar sugestões.");
+      return;
+    }
+
+    void loadVoiceAddressSuggestions(address);
+  };
+
+  const handleStartVoiceStops = (showInstruction = true) => {
+    const SpeechRecognition = getSpeechRecognitionConstructor();
+
+    if (!SpeechRecognition) {
+      toast.error("Comando de voz não está disponível neste navegador/aparelho.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "pt-BR";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.onresult = (event) => {
+      let interimTranscript = "";
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result?.[0]?.transcript?.trim() ?? "";
+
+        if (!transcript) continue;
+
+        if (result.isFinal) {
+          appendVoiceStop(transcript);
+        } else {
+          interimTranscript = transcript;
+        }
+      }
+
+      if (interimTranscript) {
+        setVoiceTranscript(interimTranscript);
+      }
+    };
+    recognition.onerror = (event) => {
+      const error = event.error || "erro desconhecido";
+      setIsListeningVoiceStops(false);
+      setVoiceRecognition(null);
+      toast.error(`Falha no comando de voz: ${error}`);
+    };
+    recognition.onend = () => {
+      setIsListeningVoiceStops(false);
+      setVoiceRecognition(null);
+    };
+
+    try {
+      recognition.start();
+      setVoiceRecognition(recognition);
+      setIsListeningVoiceStops(true);
+      setVoiceTranscript("");
+      if (showInstruction) {
+        toast.message("Fale uma parada. Depois escolha o endereço correto nas sugestões.");
+      }
+    } catch (error: any) {
+      toast.error(error.message || "Não foi possível iniciar o comando de voz.");
+    }
+  };
+
+  const handleStopVoiceStops = () => {
+    voiceRecognition?.stop();
+    setVoiceRecognition(null);
+    setIsListeningVoiceStops(false);
+    setPendingVoiceStopIndex(null);
+    setVoiceAddressSuggestions([]);
+    setVoiceSuggestionError(null);
+  };
+
+  const handleSelectVoiceAddressSuggestion = (
+    suggestion: AddressSuggestion,
+    index: number
+  ) => {
+    setInvalidStopIndexes((current) => current.filter((item) => item !== index));
+    setStops((currentStops) =>
+      currentStops.map((stop, stopIndex) =>
+        stopIndex === index
+          ? {
+              ...stop,
+              address: suggestion.label,
+              latitude: suggestion.latitude,
+              longitude: suggestion.longitude,
+            }
+          : stop
+      )
+    );
+    setPendingVoiceStopIndex(null);
+    setVoiceTranscript("");
+    setVoiceAddressSuggestions([]);
+    setVoiceSuggestionError(null);
+    toast.success(`Parada ${index + 1} salva. Pode falar a próxima.`);
+    window.setTimeout(() => handleStartVoiceStops(false), 650);
+  };
+
   const handleRemoveStop = (index: number) => {
     setInvalidStopIndexes([]);
     setRespectImportedStopSequence(false);
+    setPendingVoiceStopIndex((current) => {
+      if (current === null) return null;
+      if (current === index) return null;
+      return current > index ? current - 1 : current;
+    });
+    setVoiceAddressSuggestions([]);
+    setVoiceSuggestionError(null);
     setStops((currentStops) => currentStops.filter((_, i) => i !== index));
   };
 
@@ -303,6 +1005,21 @@ export default function CreateRoute() {
         stopIndex === index ? { ...stop, latitude, longitude } : stop
       )
     );
+
+    if (
+      pendingVoiceStopIndex === index &&
+      Number.isFinite(latitude) &&
+      Number.isFinite(longitude) &&
+      latitude !== 0 &&
+      longitude !== 0
+    ) {
+      setPendingVoiceStopIndex(null);
+      setVoiceTranscript("");
+      setVoiceAddressSuggestions([]);
+      setVoiceSuggestionError(null);
+      toast.success(`Parada ${index + 1} salva. Pode falar a próxima.`);
+      window.setTimeout(() => handleStartVoiceStops(false), 650);
+    }
   };
 
   const handlePackageNumberChange = (index: number, packageNumber: string) => {
@@ -332,22 +1049,22 @@ export default function CreateRoute() {
 
     try {
       const importedRoute = await parseRouteWorkbook(file);
+      const importedStops = importedRoute.stops.map((stop) => ({
+        ...parseStopNotes(stop.notes),
+        address: stop.address,
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        packageNumber: stop.packageNumber,
+        deliveryCount: stop.deliveryCount,
+        routingStop: stop.routingStop,
+        notes: stop.notes,
+        sourceRow: stop.sourceRow,
+      }));
 
       setInvalidStopIndexes([]);
-      setStops(
-        importedRoute.stops.map((stop) => ({
-          ...parseStopNotes(stop.notes),
-          address: stop.address,
-          latitude: stop.latitude,
-          longitude: stop.longitude,
-          packageNumber: stop.packageNumber,
-          routingStop: stop.routingStop,
-          notes: stop.notes,
-          sourceRow: stop.sourceRow,
-        }))
-      );
+      setStops(importedStops);
       setImportSummary(importedRoute);
-      setRespectImportedStopSequence(importedRoute.hasStopSequence);
+      setRespectImportedStopSequence(false);
 
       if (!name.trim()) {
         setName(importedRoute.routeName);
@@ -362,13 +1079,13 @@ export default function CreateRoute() {
       toast.success(`${importedRoute.stops.length} paradas importadas.`);
       if (importedRoute.hasStopSequence) {
         toast.message(
-          "Coluna STOP detectada: a sequencia inicial seguira a ordem da planilha."
+          "Coluna STOP detectada: escolha se deseja seguir essa sequencia ou otimizar automaticamente."
         );
       }
 
       if (importedRoute.missingCoordinateRows > 0) {
-        toast.warning(
-          `${importedRoute.missingCoordinateRows} paradas foram importadas sem coordenadas.`
+        toast.message(
+          `${importedRoute.missingCoordinateRows} endereço(s) reconhecido(s). Clique em "${routeActionLabel}" para localizar e criar a rota.`
         );
       }
     } catch (error: any) {
@@ -376,6 +1093,197 @@ export default function CreateRoute() {
     } finally {
       setIsImportingFile(false);
       input.value = "";
+    }
+  };
+
+  const handleImileCaptureImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+
+    if (!file) return;
+
+    setIsImportingImileCapture(true);
+
+    try {
+      const importedRoute = await parseImileScreenFile(file);
+      applyImileCaptureRoute(importedRoute, "de captura iMile", "importadas");
+    } catch (error: any) {
+      toast.error(error.message || "Nao foi possivel importar a captura iMile.");
+    } finally {
+      setIsImportingImileCapture(false);
+      input.value = "";
+    }
+  };
+
+  const handleLatestImileCaptureImport = async () => {
+    setIsImportingLatestImileCapture(true);
+
+    try {
+      const response = await fetch(buildApiUrl("/api/imile/capture/latest"), {
+        credentials: "include",
+        headers: {
+          Accept: "application/xml,text/plain",
+          ...getAuthHeaders(),
+        },
+      });
+
+      if (!response.ok) {
+        const message = response.headers
+          .get("content-type")
+          ?.includes("application/json")
+          ? ((await response.json()) as { message?: string }).message
+          : undefined;
+
+        throw new Error(message || "Nenhuma captura iMile pronta para importar.");
+      }
+
+      const importedRoute = parseImileScreenText(
+        await response.text(),
+        "ultima-captura-imile.xml"
+      );
+      applyImileCaptureRoute(importedRoute, "da ultima captura iMile", "carregadas");
+    } catch (error: any) {
+      toast.error(error.message || "Nao foi possivel usar a ultima captura iMile.");
+    } finally {
+      setIsImportingLatestImileCapture(false);
+    }
+  };
+
+  const handleRunImileCaptureImport = async () => {
+    setIsRunningImileCapture(true);
+    toast.message("Captura iniciada. Mantenha o Rider Delivery aberto na lista de entregas.");
+
+    try {
+      const response = await fetch(buildApiUrl("/api/imile/capture/run"), {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          Accept: "application/xml,text/plain",
+          ...getAuthHeaders(),
+        },
+      });
+
+      if (!response.ok) {
+        const message = response.headers
+          .get("content-type")
+          ?.includes("application/json")
+          ? ((await response.json()) as { message?: string }).message
+          : undefined;
+
+        throw new Error(message || "Nao foi possivel capturar a tela do Rider Delivery.");
+      }
+
+      const importedRoute = parseImileScreenText(
+        await response.text(),
+        "captura-automatica-imile.xml"
+      );
+      applyImileCaptureRoute(importedRoute, "da captura automatica iMile", "capturadas");
+    } catch (error: any) {
+      toast.error(error.message || "Nao foi possivel capturar e importar o Rider Delivery.");
+    } finally {
+      setIsRunningImileCapture(false);
+    }
+  };
+
+  const handleOpenImileAccessibilitySettings = async () => {
+    try {
+      await ImileCapture.openAccessibilitySettings();
+      toast.message("Ative EconoRotas na acessibilidade e volte para iniciar a captura.");
+    } catch (error: any) {
+      toast.error(error.message || "Nao foi possivel abrir a permissao de acessibilidade.");
+    }
+  };
+
+  const handleStartAndroidImileCapture = async () => {
+    setIsRunningImileCapture(true);
+
+    try {
+      await ImileCapture.startCapture();
+      toast.message("Rider Delivery aberto. Aguarde a rolagem terminar e volte ao EconoRotas.");
+    } catch (error: any) {
+      setIsRunningImileCapture(false);
+      toast.error(error.message || "Nao foi possivel iniciar a captura do Rider Delivery.");
+    }
+  };
+
+  const handleImportAndroidImileCapture = async () => {
+    setIsImportingLatestImileCapture(true);
+
+    try {
+      const { xml } = await ImileCapture.stopCapture();
+      const importedRoute = parseImileScreenText(xml, "captura-android-imile.xml");
+      applyImileCaptureRoute(importedRoute, "da captura Android iMile", "capturadas");
+      setIsRunningImileCapture(false);
+    } catch (error: any) {
+      toast.error(error.message || "Nao foi possivel importar a captura Android iMile.");
+    } finally {
+      setIsImportingLatestImileCapture(false);
+    }
+  };
+
+  const handleImileImport = async () => {
+    setIsImportingImile(true);
+
+    try {
+      const result = await imileDeliveriesQuery.refetch();
+      const importedRoute = result.data;
+
+      if (!importedRoute?.configured) {
+        toast.error("Cadastre a credencial Rider Delivery no perfil antes de importar.");
+        return;
+      }
+
+      if (!importedRoute.stops.length) {
+        toast.warning("Nenhuma entrega Rider Delivery encontrada para o filtro informado.");
+        return;
+      }
+
+      setInvalidStopIndexes([]);
+      setStops(
+        importedRoute.stops.map((stop, index) => ({
+          address: stop.address,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          packageNumber: buildSequentialImilePackageNumber(index),
+          notes: stop.notes,
+          sourceRow: index + 1,
+        }))
+      );
+      setImportSummary({
+        routeName: `Rider Delivery ${imileDateFrom}${imileDateTo !== imileDateFrom ? ` a ${imileDateTo}` : ""}`,
+        stops: importedRoute.stops.map((stop, index) => ({
+          address: stop.address,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          packageNumber: buildSequentialImilePackageNumber(index),
+          notes: stop.notes,
+          sourceRow: index + 1,
+        })),
+        hasStopSequence: false,
+        totalRows: importedRoute.total,
+        skippedRows: importedRoute.missingAddressRows,
+        missingCoordinateRows: importedRoute.missingCoordinateRows,
+      });
+      setRespectImportedStopSequence(false);
+
+      if (!name.trim()) {
+        setName(`Rider Delivery ${imileDateFrom}`);
+      }
+
+      if (!description.trim()) {
+        setDescription(`Importada do Rider Delivery/iMile com ${importedRoute.stops.length} entregas.`);
+      }
+
+      toast.success(`${importedRoute.stops.length} entregas Rider Delivery carregadas.`);
+      if (importedRoute.missingCoordinateRows > 0) {
+        toast.warning(
+          `${importedRoute.missingCoordinateRows} entregas vieram sem coordenadas e serao geocodificadas ao criar a rota.`
+        );
+      }
+    } catch (error: any) {
+      toast.error(error.message || "Falha ao carregar entregas Rider Delivery.");
+    } finally {
+      setIsImportingImile(false);
     }
   };
 
@@ -420,6 +1328,11 @@ export default function CreateRoute() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (isResolvingCoordinates) {
+      toast.message("Aguarde a localização de endereços terminar.");
+      return;
+    }
 
     if (!name.trim()) {
       toast.error("Nome da rota é obrigatório");
@@ -468,6 +1381,7 @@ export default function CreateRoute() {
         return;
       } finally {
         setIsResolvingCoordinates(false);
+        setCoordinateResolveProgress(null);
       }
     }
 
@@ -499,12 +1413,19 @@ export default function CreateRoute() {
         if (result.resolvedCount > 0) {
           toast.success(`${result.resolvedCount} parada(s) localizada(s).`);
         }
+
+        if (result.approximateCount > 0) {
+          toast.warning(
+            `${result.approximateCount} parada(s) sem coordenada exata foram posicionadas pelo bairro. O Maps/Waze continuará recebendo o endereço completo.`
+          );
+        }
       } catch (error: any) {
         toast.error(error.message || "Não foi possível buscar as coordenadas.");
         setIsResolvingCoordinates(false);
         return;
       } finally {
         setIsResolvingCoordinates(false);
+        setCoordinateResolveProgress(null);
       }
     }
 
@@ -518,8 +1439,24 @@ export default function CreateRoute() {
     }
 
     try {
-      const startPayload = getRoutePointPayload(validStartPoint);
+      let startPayload = getRoutePointPayload(validStartPoint);
       const endPayload = getRoutePointPayload(validEndPoint);
+
+      if (!startPayload && !validStartPoint.address.trim()) {
+        try {
+          const currentPosition = await getCurrentPosition();
+          startPayload = {
+            location: "Local atual do motorista",
+            latitude: currentPosition.latitude,
+            longitude: currentPosition.longitude,
+          };
+          toast.success("Rota será otimizada a partir da sua posição atual.");
+        } catch {
+          toast.warning(
+            "Não foi possível obter sua posição atual. A rota será otimizada sem ponto de partida real."
+          );
+        }
+      }
 
       setInvalidStopIndexes([]);
       const stopsWithSequence = validStops.map((stop, index) => ({
@@ -529,7 +1466,7 @@ export default function CreateRoute() {
         notes: buildStopNotes(stop.packageNumber, stop.notes),
         sequence: index,
       }));
-      const result = await createAndOptimizeMutation.mutateAsync({
+      const result = await createAndOptimizeWithNetworkRetry({
         name,
         description,
         mode,
@@ -545,11 +1482,19 @@ export default function CreateRoute() {
 
       const { route, optimization } = result;
 
+      saveLastRouteProgress(route.id, route.name);
       setCreatedRouteId(route.id);
-      setTotalDistance(optimization.totalDistance);
-      setTotalDuration(optimization.totalTime);
+      setTotalDistance(optimization?.totalDistance ?? 0);
+      setTotalDuration(optimization?.totalTime ?? 0);
       
-      toast.success("Rota criada e otimizada com sucesso!");
+      if (optimization) {
+        toast.success("Rota criada e otimizada com sucesso!");
+      } else {
+        toast.warning(
+          result.warning ||
+            "Rota salva como rascunho. Abra a rota e tente otimizar novamente."
+        );
+      }
       navigate(`/routes/${route.id}`);
     } catch (error: any) {
       toast.error(error.message || "Erro ao criar rota");
@@ -686,7 +1631,183 @@ export default function CreateRoute() {
               </Button>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="rounded-lg border bg-white p-4">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="flex gap-3">
+                    {isListeningVoiceStops ? (
+                      <MicOff className="mt-1 h-5 w-5 text-destructive" />
+                    ) : (
+                      <Mic className="mt-1 h-5 w-5 text-primary" />
+                    )}
+                    <div>
+                      <p className="font-medium">Inserir paradas por voz</p>
+                      <p className="text-sm text-muted-foreground">
+                        Fale uma entrega por vez. O app mostra sugestões, você escolhe o endereço correto e o microfone abre novamente.
+                      </p>
+                      {voiceTranscript && (
+                        <div className="mt-2 space-y-2">
+                          <Label htmlFor="voice-transcript-address" className="sr-only">
+                            Endereço falado
+                          </Label>
+                          <Textarea
+                            id="voice-transcript-address"
+                            value={voiceTranscript}
+                            onChange={(event) =>
+                              handleVoiceTranscriptChange(event.target.value)
+                            }
+                            rows={2}
+                            className="resize-none bg-muted text-sm"
+                            placeholder="Edite o endereço falado antes de escolher a sugestão"
+                          />
+                          {pendingVoiceStopIndex !== null && (
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={handleSearchEditedVoiceAddress}
+                                disabled={isLoadingVoiceSuggestions}
+                              >
+                                Buscar sugestões
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => handleStartVoiceStops(false)}
+                              >
+                                Gravar novamente
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {pendingVoiceStopIndex !== null && (
+                        <div className="mt-2 space-y-2">
+                          {isLoadingVoiceSuggestions && (
+                            <p className="rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-sm text-primary">
+                              Buscando sugestões para a Parada {pendingVoiceStopIndex + 1}...
+                            </p>
+                          )}
+
+                          {!isLoadingVoiceSuggestions &&
+                            voiceAddressSuggestions.length > 0 && (
+                              <div className="overflow-hidden rounded-xl border border-primary/30 bg-white shadow-[0_14px_28px_rgb(15_23_42_/_10%)]">
+                                {voiceAddressSuggestions.map((suggestion) => (
+                                  <button
+                                    key={suggestion.id}
+                                    type="button"
+                                    onClick={() =>
+                                      handleSelectVoiceAddressSuggestion(
+                                        suggestion,
+                                        pendingVoiceStopIndex
+                                      )
+                                    }
+                                    className="block w-full border-b border-border/60 px-3 py-3 text-left text-sm last:border-b-0 hover:bg-primary/10 focus:bg-primary/10 focus:outline-none"
+                                  >
+                                    <span className="block font-semibold text-foreground">
+                                      {suggestion.label}
+                                    </span>
+                                    <span className="mt-0.5 block text-xs text-muted-foreground">
+                                      {suggestion.shortLabel}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+
+                          {!isLoadingVoiceSuggestions &&
+                            voiceAddressSuggestions.length === 0 && (
+                              <p className="rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-sm text-primary">
+                                {voiceSuggestionError ||
+                                  `Escolha uma sugestão na Parada ${pendingVoiceStopIndex + 1} para salvar e continuar.`}
+                              </p>
+                            )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    {isListeningVoiceStops ? (
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        onClick={handleStopVoiceStops}
+                        className="gap-2"
+                      >
+                        <MicOff className="h-4 w-4" />
+                        Parar voz
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        onClick={() => handleStartVoiceStops()}
+                        className="gap-2"
+                      >
+                        <Mic className="h-4 w-4" />
+                        Falar paradas
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
               <div className="rounded-lg border border-dashed bg-muted/30 p-4">
+                {SHOW_IMILE_API_CONNECTOR && (
+                <div className="mb-4 rounded-lg border bg-white p-4">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                    <div className="flex gap-3">
+                      <Truck className="mt-1 h-5 w-5 text-primary" />
+                      <div>
+                        <p className="font-medium">Importar entregas Rider Delivery</p>
+                        <p className="text-sm text-muted-foreground">
+                          Busca entregas do app da iMile no conector do servidor e traz
+                          endereço, rastreio, status e telefone para roteirização.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-4 lg:w-[560px]">
+                      <div className="space-y-1">
+                        <Label htmlFor="imile-date-from">De</Label>
+                        <Input
+                          id="imile-date-from"
+                          type="date"
+                          value={imileDateFrom}
+                          onChange={(event) => setImileDateFrom(event.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="imile-date-to">Até</Label>
+                        <Input
+                          id="imile-date-to"
+                          type="date"
+                          value={imileDateTo}
+                          onChange={(event) => setImileDateTo(event.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="imile-status">Status</Label>
+                        <Input
+                          id="imile-status"
+                          value={imileStatus}
+                          onChange={(event) => setImileStatus(event.target.value)}
+                          placeholder="ex: pending"
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        onClick={handleImileImport}
+                        disabled={isImportingImile}
+                        className="gap-2 self-end"
+                      >
+                        <Truck className="h-4 w-4" />
+                        {isImportingImile ? "Carregando..." : "Buscar"}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+                )}
+
                 <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                   <div className="flex gap-3">
                     <FileSpreadsheet className="mt-1 h-5 w-5 text-primary" />
@@ -712,19 +1833,171 @@ export default function CreateRoute() {
                   </div>
                 </div>
 
-                {importSummary && (
-                  <div className="mt-3 flex flex-wrap gap-2 text-sm text-muted-foreground">
-                    <span className="inline-flex items-center gap-1">
-                      <Upload className="h-4 w-4" />
-                      {importSummary.stops.length} paradas importadas
-                    </span>
-                    {importSummary.skippedRows > 0 && (
-                      <span>{importSummary.skippedRows} linhas ignoradas</span>
+                <div className="mt-4 flex flex-col gap-4 border-t pt-4 md:flex-row md:items-center md:justify-between">
+                  <div className="flex gap-3">
+                    <FileText className="mt-1 h-5 w-5 text-primary" />
+                    <div>
+                      <p className="font-medium">Importar captura iMile</p>
+                      <p className="text-sm text-muted-foreground">
+                        {canUseAndroidImileCapture
+                          ? "Abre o Rider Delivery no Android e captura os enderecos visiveis, sem computador."
+                          : canRunImileScreenCapture
+                            ? "Ferramenta tecnica para validar captura local do Rider Delivery."
+                            : "Captura automatica sem computador disponivel no aplicativo Android."}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid min-w-0 gap-2 md:w-72">
+                    {canUseAndroidImileCapture && (
+                      <>
+                        <Button
+                          type="button"
+                          onClick={handleOpenImileAccessibilitySettings}
+                          variant="outline"
+                          className="gap-2"
+                        >
+                          <Truck className="h-4 w-4" />
+                          Ativar captura Android
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={handleStartAndroidImileCapture}
+                          disabled={isRunningImileCapture}
+                          className="gap-2"
+                        >
+                          <Truck className="h-4 w-4" />
+                          {isRunningImileCapture ? "Capturando..." : "Abrir Rider e capturar"}
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={handleImportAndroidImileCapture}
+                          disabled={isImportingLatestImileCapture}
+                          variant="outline"
+                          className="gap-2"
+                        >
+                          <Upload className="h-4 w-4" />
+                          Importar captura do Android
+                        </Button>
+                      </>
                     )}
-                    {importSummary.missingCoordinateRows > 0 && (
-                      <span>
-                        {importSummary.missingCoordinateRows} sem coordenadas
+                    {canRunImileScreenCapture && (
+                      <>
+                        <Button
+                          type="button"
+                          onClick={handleRunImileCaptureImport}
+                          disabled={isRunningImileCapture}
+                          className="gap-2"
+                        >
+                          <Truck className="h-4 w-4" />
+                          {isRunningImileCapture ? "Capturando..." : "Capturar Rider agora"}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={handleLatestImileCaptureImport}
+                          disabled={isImportingLatestImileCapture || isRunningImileCapture}
+                          className="gap-2"
+                        >
+                          <Upload className="h-4 w-4" />
+                          {isImportingLatestImileCapture ? "Carregando..." : "Usar ultima captura iMile"}
+                        </Button>
+                        <Label htmlFor="imile-capture-import" className="sr-only">
+                          Importar captura iMile
+                        </Label>
+                        <Input
+                          id="imile-capture-import"
+                          type="file"
+                          accept=".xml,.txt,.html"
+                          disabled={isImportingImileCapture || isRunningImileCapture}
+                          onChange={handleImileCaptureImport}
+                        />
+                      </>
+                    )}
+                    {!canUseAndroidImileCapture && !canRunImileScreenCapture && (
+                      <Button type="button" disabled variant="outline" className="gap-2">
+                        <Truck className="h-4 w-4" />
+                        Use o aplicativo Android
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                {importSummary && (
+                  <div className="mt-3 space-y-3">
+                    <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
+                      <span className="inline-flex items-center gap-1">
+                        <Upload className="h-4 w-4" />
+                        {importSummary.stops.length} paradas importadas
                       </span>
+                      {importSummary.totalDeliveries !== undefined &&
+                        importSummary.totalDeliveries !== importSummary.stops.length && (
+                          <span>
+                            {importSummary.totalDeliveries} entregas no total
+                          </span>
+                        )}
+                      {(importSummary.groupedDeliveries ?? 0) > 0 && (
+                        <span>
+                          {importSummary.groupedDeliveries} entregas agrupadas
+                        </span>
+                      )}
+                      {importSummary.skippedRows > 0 && (
+                        <span>{importSummary.skippedRows} linhas ignoradas</span>
+                      )}
+                      {importSummary.missingCoordinateRows > 0 && (
+                        <span>
+                          {importSummary.missingCoordinateRows} sem coordenadas
+                        </span>
+                      )}
+                    </div>
+
+                    {importSummary.hasStopSequence && (
+                      <div className="rounded-xl border border-border/70 bg-white p-3 text-sm">
+                        <p className="font-medium text-foreground">
+                          Como ordenar esta rota?
+                        </p>
+                        <p className="mt-1 text-muted-foreground">
+                          A coluna STOP e usada como sequencia original. Valores vazios
+                          ou invalidos entram como 0 e sao encaixados no menor desvio.
+                        </p>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                          <button
+                            type="button"
+                            aria-pressed={respectImportedStopSequence}
+                            onClick={() => setRespectImportedStopSequence(true)}
+                            className={cn(
+                              "rounded-lg border p-3 text-left transition",
+                              respectImportedStopSequence
+                                ? "border-primary bg-primary/10 text-foreground"
+                                : "border-border bg-white text-muted-foreground hover:border-primary/50"
+                            )}
+                          >
+                            <span className="block font-medium text-foreground">
+                              Usar sequencia STOP
+                            </span>
+                            <span className="mt-1 block text-xs">
+                              Mantem a ordem original da tabela pela coluna STOP.
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={!respectImportedStopSequence}
+                            onClick={() => setRespectImportedStopSequence(false)}
+                            className={cn(
+                              "rounded-lg border p-3 text-left transition",
+                              !respectImportedStopSequence
+                                ? "border-primary bg-primary/10 text-foreground"
+                                : "border-border bg-white text-muted-foreground hover:border-primary/50"
+                            )}
+                          >
+                            <span className="block font-medium text-foreground">
+                              Otimizar rota
+                            </span>
+                            <span className="mt-1 block text-xs">
+                              Recalcula a sequencia mais curta para economizar trajeto.
+                            </span>
+                          </button>
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}
@@ -780,6 +2053,8 @@ export default function CreateRoute() {
                   id={`route-stop-${index}`}
                   className={cn(
                     "space-y-3 rounded-2xl border border-border/70 bg-white p-4",
+                    pendingVoiceStopIndex === index &&
+                      "border-primary bg-primary/5 ring-1 ring-primary/20",
                     invalidStopIndexes.includes(index) &&
                       "border-destructive bg-destructive/5"
                   )}
@@ -790,6 +2065,11 @@ export default function CreateRoute() {
                       {stop.sourceRow && (
                         <p className="text-xs text-muted-foreground">
                           Linha {stop.sourceRow} da planilha
+                        </p>
+                      )}
+                      {pendingVoiceStopIndex === index && (
+                        <p className="text-xs font-medium text-primary">
+                          Selecione uma sugestão para confirmar esta parada
                         </p>
                       )}
                     </div>
@@ -832,6 +2112,11 @@ export default function CreateRoute() {
                   </div>
                   {stop.notes && (
                     <p className="text-sm text-muted-foreground">{stop.notes}</p>
+                  )}
+                  {(stop.deliveryCount ?? 1) > 1 && (
+                    <p className="text-sm font-medium text-primary">
+                      {stop.deliveryCount} entregas neste endereço
+                    </p>
                   )}
                   {invalidStopIndexes.includes(index) && (
                     <p className="rounded-md border border-destructive/30 bg-background p-2 text-sm text-destructive">

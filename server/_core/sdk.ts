@@ -6,6 +6,7 @@ import type { Request } from "express";
 import { SignJWT, jwtVerify } from "jose";
 import type { User } from "../../drizzle/schema";
 import * as db from "../db";
+import { isAdminEmail } from "./adminAccess";
 import { ENV } from "./env";
 import type {
   ExchangeTokenRequest,
@@ -38,7 +39,9 @@ type OAuthStatePayload = {
 class OAuthService {
   constructor(private client: ReturnType<typeof axios.create>) {
     if (!ENV.oAuthServerUrl) {
-      console.info("[OAuth] Disabled: OAUTH_SERVER_URL is not configured.");
+      if (!ENV.googleClientId || !ENV.googleClientSecret) {
+        console.info("[OAuth] Disabled: no OAuth provider is configured.");
+      }
       return;
     }
 
@@ -210,6 +213,15 @@ class SDKServer {
     return new Map(Object.entries(parsed));
   }
 
+  private getBearerSessionToken(req: Request) {
+    const authorization = req.headers.authorization;
+    const value = Array.isArray(authorization) ? authorization[0] : authorization;
+    if (!value) return null;
+
+    const match = value.match(/^Bearer\s+(.+)$/i);
+    return match?.[1]?.trim() || null;
+  }
+
   private getSessionSecret() {
     const secret =
       ENV.cookieSecret || (!ENV.isProduction ? "local-development-secret" : "");
@@ -263,7 +275,6 @@ class SDKServer {
     cookieValue: string | undefined | null
   ): Promise<{ openId: string; appId: string; name: string; email: string | null } | null> {
     if (!cookieValue) {
-      console.warn("[Auth] Missing session cookie");
       return null;
     }
 
@@ -335,8 +346,8 @@ class SDKServer {
 
     // Regular authentication flow
     const cookies = this.parseCookies(req.headers.cookie);
-    const sessionCookie = cookies.get(COOKIE_NAME);
-    const session = await this.verifySession(sessionCookie);
+    const sessionToken = cookies.get(COOKIE_NAME) ?? this.getBearerSessionToken(req);
+    const session = await this.verifySession(sessionToken);
 
     if (!session) {
       throw ForbiddenError("Invalid session cookie");
@@ -356,7 +367,7 @@ class SDKServer {
     }
 
     if (session.openId.startsWith(CRON_OPEN_ID_PREFIX)) {
-      const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
+      const userInfo = await this.getUserInfoWithJwt(sessionToken ?? "");
       const taskUid = userInfo.taskUid ?? null;
       if (!taskUid) {
         throw ForbiddenError("Cron session missing task_uid");
@@ -369,29 +380,41 @@ class SDKServer {
     let user = await db.getUserByOpenId(sessionUserId);
 
     if (!user && session.openId.startsWith("pwd_") && ENV.allowEphemeralDb) {
-      const ownerEmail = ENV.ownerEmail.trim().toLowerCase();
       const email = session.email?.trim().toLowerCase() || null;
-      const usersCount = await db.countUsers();
       await db.upsertUser({
         openId: session.openId,
         name: session.name || null,
         email,
         loginMethod: "password",
-        role: usersCount === 0 || (email && ownerEmail === email) ? "admin" : "user",
+        role: email && isAdminEmail(email, ENV.adminEmails) ? "admin" : "user",
+        lastSignedIn: signedInAt,
+      });
+      user = await db.getUserByOpenId(session.openId);
+    }
+
+    if (!user && session.openId.startsWith("google_")) {
+      const email = session.email?.trim().toLowerCase() || null;
+      await db.upsertUser({
+        openId: session.openId,
+        name: session.name || null,
+        email,
+        loginMethod: "google",
+        role: email && isAdminEmail(email, ENV.adminEmails) ? "admin" : "user",
         lastSignedIn: signedInAt,
       });
       user = await db.getUserByOpenId(session.openId);
     }
 
     // If user not in DB, sync from OAuth server automatically
-    if (!user) {
+    if (!user && ENV.oAuthServerUrl) {
       try {
-        const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
+        const userInfo = await this.getUserInfoWithJwt(sessionToken ?? "");
         await db.upsertUser({
           openId: userInfo.openId,
           name: userInfo.name || null,
           email: userInfo.email ?? null,
           loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
+          role: isAdminEmail(userInfo.email ?? null, ENV.adminEmails) ? "admin" : "user",
           lastSignedIn: signedInAt,
         });
         user = await db.getUserByOpenId(userInfo.openId);

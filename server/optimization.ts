@@ -1,6 +1,6 @@
 /**
- * Route optimization algorithms for TSP (Traveling Salesman Problem)
- * Implements Nearest Neighbor heuristic for efficient route optimization
+ * Route optimization algorithms for open delivery routes.
+ * Builds nearest-neighbor candidates and improves them with 2-opt.
  */
 
 export interface Location {
@@ -20,6 +20,71 @@ export interface OptimizedRoute {
 export interface RouteOptimizationOptions {
   startLocation?: Location;
   endLocation?: Location;
+  localityMode?: "balanced" | "local" | "strict";
+}
+
+type RouteLeg = {
+  from: Location;
+  to: Location;
+};
+
+type LocalitySettings = {
+  localRadiusKm: number;
+  ratioThreshold: number;
+  extraKmThreshold: number;
+  longJumpThresholdKm: number;
+  penaltyMultiplier: number;
+};
+
+function getLocalitySettings(
+  localityMode: RouteOptimizationOptions["localityMode"] = "local"
+): LocalitySettings {
+  if (localityMode === "strict") {
+    return {
+      localRadiusKm: 2.5,
+      ratioThreshold: 1.12,
+      extraKmThreshold: 0.08,
+      longJumpThresholdKm: 0.35,
+      penaltyMultiplier: 4,
+    };
+  }
+
+  if (localityMode === "balanced") {
+    return {
+      localRadiusKm: 1.5,
+      ratioThreshold: 1.55,
+      extraKmThreshold: 0.35,
+      longJumpThresholdKm: 1.25,
+      penaltyMultiplier: 2,
+    };
+  }
+
+  return {
+    localRadiusKm: 2,
+    ratioThreshold: 1.28,
+    extraKmThreshold: 0.18,
+    longJumpThresholdKm: 0.7,
+    penaltyMultiplier: 3,
+  };
+}
+
+function isAvoidableLocalJump(
+  nearestDistance: number,
+  plannedDistance: number,
+  settings: LocalitySettings
+) {
+  const significantlyCloser =
+    plannedDistance >
+    Math.max(
+      nearestDistance * settings.ratioThreshold,
+      nearestDistance + settings.extraKmThreshold
+    );
+  const nearbyContext =
+    nearestDistance <= settings.localRadiusKm ||
+    plannedDistance <= settings.localRadiusKm * 2.5;
+  const longJump = plannedDistance - nearestDistance >= settings.longJumpThresholdKm;
+
+  return significantlyCloser && (nearbyContext || longJump);
 }
 
 /**
@@ -59,6 +124,302 @@ export function estimateTravelTime(distance: number): number {
   return Math.round((distance / avgSpeed) * 60);
 }
 
+function buildRouteLegs(
+  locations: Location[],
+  sequence: number[],
+  options: RouteOptimizationOptions = {}
+): RouteLeg[] {
+  const legs: RouteLeg[] = [];
+
+  if (sequence.length === 0) {
+    if (options.startLocation && options.endLocation) {
+      legs.push({ from: options.startLocation, to: options.endLocation });
+    }
+    return legs;
+  }
+
+  if (options.startLocation) {
+    legs.push({ from: options.startLocation, to: locations[sequence[0]] });
+  }
+
+  for (let i = 0; i < sequence.length - 1; i++) {
+    legs.push({
+      from: locations[sequence[i]],
+      to: locations[sequence[i + 1]],
+    });
+  }
+
+  if (options.endLocation) {
+    legs.push({
+      from: locations[sequence[sequence.length - 1]],
+      to: options.endLocation,
+    });
+  }
+
+  return legs;
+}
+
+function calculateSequenceDistance(
+  locations: Location[],
+  sequence: number[],
+  options: RouteOptimizationOptions = {}
+) {
+  return buildRouteLegs(locations, sequence, options).reduce(
+    (total, leg) => total + calculateDistance(leg.from, leg.to),
+    0
+  );
+}
+
+function calculateSequenceTime(
+  locations: Location[],
+  sequence: number[],
+  options: RouteOptimizationOptions = {}
+) {
+  return buildRouteLegs(locations, sequence, options).reduce(
+    (total, leg) => total + estimateTravelTime(calculateDistance(leg.from, leg.to)),
+    0
+  );
+}
+
+function buildOptimizedRoute(
+  locations: Location[],
+  sequence: number[],
+  options: RouteOptimizationOptions = {}
+): OptimizedRoute {
+  const totalDistance = calculateSequenceDistance(locations, sequence, options);
+
+  return {
+    sequence,
+    totalDistance: Math.round(totalDistance * 100) / 100,
+    totalTime: calculateSequenceTime(locations, sequence, options),
+    waypoints: sequence.map((idx, seq) => ({
+      ...locations[idx],
+      sequence: seq,
+    })),
+  };
+}
+
+function buildNearestNeighborSequence(
+  locations: Location[],
+  startIndex: number,
+  options: RouteOptimizationOptions = {}
+) {
+  const n = locations.length;
+  const visited = new Array(n).fill(false);
+  const sequence: number[] = [];
+  let currentLocation = options.startLocation ?? locations[startIndex];
+
+  if (!options.startLocation) {
+    visited[startIndex] = true;
+    sequence.push(startIndex);
+  }
+
+  while (sequence.length < n) {
+    let nearestIndex = -1;
+    let nearestDistance = Infinity;
+
+    for (let i = 0; i < n; i++) {
+      if (visited[i]) continue;
+
+      const distance = calculateDistance(currentLocation, locations[i]);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = i;
+      }
+    }
+
+    if (nearestIndex === -1) break;
+
+    visited[nearestIndex] = true;
+    sequence.push(nearestIndex);
+    currentLocation = locations[nearestIndex];
+  }
+
+  return sequence;
+}
+
+function improveSequenceWithTwoOpt(
+  locations: Location[],
+  initialSequence: number[],
+  options: RouteOptimizationOptions = {}
+) {
+  let sequence = [...initialSequence];
+  let bestDistance = calculateSequenceDistance(locations, sequence, options);
+  let improved = true;
+  let passes = 0;
+  const firstMutableIndex = options.startLocation ? 1 : 0;
+
+  while (improved && passes < 8) {
+    improved = false;
+    passes += 1;
+
+    for (let i = firstMutableIndex; i < sequence.length - 1; i++) {
+      for (let k = i + 1; k < sequence.length; k++) {
+        const candidate = [
+          ...sequence.slice(0, i),
+          ...sequence.slice(i, k + 1).reverse(),
+          ...sequence.slice(k + 1),
+        ];
+        const candidateDistance = calculateSequenceDistance(
+          locations,
+          candidate,
+          options
+        );
+
+        if (candidateDistance + 0.000001 < bestDistance) {
+          sequence = candidate;
+          bestDistance = candidateDistance;
+          improved = true;
+        }
+      }
+    }
+  }
+
+  return sequence;
+}
+
+function enforceLocalNearestSequence(
+  locations: Location[],
+  initialSequence: number[],
+  options: RouteOptimizationOptions = {}
+) {
+  const remaining = new Set(initialSequence);
+  const sequence: number[] = [];
+  let currentLocation = options.startLocation ?? locations[initialSequence[0]];
+  const localitySettings = getLocalitySettings(options.localityMode);
+
+  while (remaining.size > 0) {
+    const plannedNext = initialSequence.find((index) => remaining.has(index));
+    if (plannedNext === undefined) break;
+
+    let nearestIndex = plannedNext;
+    let nearestDistance = calculateDistance(currentLocation, locations[plannedNext]);
+
+    for (const candidateIndex of Array.from(remaining)) {
+      const distance = calculateDistance(currentLocation, locations[candidateIndex]);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = candidateIndex;
+      }
+    }
+
+    const plannedDistance = calculateDistance(currentLocation, locations[plannedNext]);
+    const jumpIsOperationallyBad =
+      nearestIndex !== plannedNext &&
+      isAvoidableLocalJump(nearestDistance, plannedDistance, localitySettings);
+    const nextIndex = jumpIsOperationallyBad ? nearestIndex : plannedNext;
+
+    remaining.delete(nextIndex);
+    sequence.push(nextIndex);
+    currentLocation = locations[nextIndex];
+  }
+
+  return sequence;
+}
+
+function calculateAvoidableJumpPenalty(
+  locations: Location[],
+  sequence: number[],
+  options: RouteOptimizationOptions = {}
+) {
+  const settings = getLocalitySettings(options.localityMode);
+  const remaining = new Set(sequence);
+  let currentLocation = options.startLocation ?? locations[sequence[0]];
+  let penalty = 0;
+
+  for (const plannedNext of sequence) {
+    remaining.delete(plannedNext);
+    const plannedDistance = calculateDistance(currentLocation, locations[plannedNext]);
+    let nearestDistance = plannedDistance;
+
+    for (const candidateIndex of [plannedNext, ...Array.from(remaining)]) {
+      const distance = calculateDistance(currentLocation, locations[candidateIndex]);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+      }
+    }
+
+    if (isAvoidableLocalJump(nearestDistance, plannedDistance, settings)) {
+      penalty += (plannedDistance - nearestDistance) * settings.penaltyMultiplier;
+    }
+
+    currentLocation = locations[plannedNext];
+  }
+
+  return penalty;
+}
+
+function calculateDriverFriendlyScore(
+  locations: Location[],
+  sequence: number[],
+  options: RouteOptimizationOptions = {}
+) {
+  return (
+    calculateSequenceDistance(locations, sequence, options) +
+    calculateAvoidableJumpPenalty(locations, sequence, options)
+  );
+}
+
+function optimizeOpenRoute(
+  locations: Location[],
+  startIndex: number = 0,
+  options: RouteOptimizationOptions = {}
+) {
+  if (locations.length === 0) {
+    return buildOptimizedRoute(locations, [], options);
+  }
+
+  const startIndexes = options.startLocation
+    ? [0]
+    : locations.length > 40
+      ? [startIndex]
+      : locations.map((_, index) => index);
+  const uniqueStartIndexes = Array.from(new Set([startIndex, ...startIndexes]))
+    .filter((index) => index >= 0 && index < locations.length);
+
+  let bestSequence: number[] | null = null;
+  let bestScore = Infinity;
+
+  for (const candidateStartIndex of uniqueStartIndexes) {
+    const nearestSequence = buildNearestNeighborSequence(
+      locations,
+      candidateStartIndex,
+      options
+    );
+    const improvedSequence = improveSequenceWithTwoOpt(
+      locations,
+      nearestSequence,
+      options
+    );
+    const candidateSequences = [
+      nearestSequence,
+      improvedSequence,
+      enforceLocalNearestSequence(locations, improvedSequence, options),
+    ];
+
+    for (const candidateSequence of candidateSequences) {
+      const score = calculateDriverFriendlyScore(
+        locations,
+        candidateSequence,
+        options
+      );
+
+      if (score < bestScore) {
+        bestScore = score;
+        bestSequence = candidateSequence;
+      }
+    }
+  }
+
+  const driverFriendlySequence = enforceLocalNearestSequence(
+    locations,
+    bestSequence ?? [],
+    options
+  );
+
+  return buildOptimizedRoute(locations, driverFriendlySequence, options);
+}
+
 /**
  * Nearest Neighbor algorithm for TSP optimization
  * Starts from the first location and greedily selects the nearest unvisited location
@@ -90,60 +451,8 @@ export function optimizeRouteNearestNeighbor(
   }
 
   if (options.startLocation || options.endLocation) {
-    const n = locations.length;
-    const visited = new Array(n).fill(false);
-    const sequence: number[] = [];
-    let totalDistance = 0;
-    let totalTime = 0;
-    let currentLocation = options.startLocation ?? locations[startIndex];
-
-    if (!options.startLocation) {
-      visited[startIndex] = true;
-      sequence.push(startIndex);
-    }
-
-    while (sequence.length < n) {
-      let nearestIndex = -1;
-      let nearestDistance = Infinity;
-
-      for (let i = 0; i < n; i++) {
-        if (visited[i]) continue;
-
-        const distance = calculateDistance(currentLocation, locations[i]);
-        if (distance < nearestDistance) {
-          nearestDistance = distance;
-          nearestIndex = i;
-        }
-      }
-
-      if (nearestIndex === -1) {
-        break;
-      }
-
-      visited[nearestIndex] = true;
-      sequence.push(nearestIndex);
-      totalDistance += nearestDistance;
-      totalTime += estimateTravelTime(nearestDistance);
-      currentLocation = locations[nearestIndex];
-    }
-
-    if (options.endLocation) {
-      const distanceToEnd = calculateDistance(currentLocation, options.endLocation);
-      totalDistance += distanceToEnd;
-      totalTime += estimateTravelTime(distanceToEnd);
-    }
-
-    const waypoints = sequence.map((idx, seq) => ({
-      ...locations[idx],
-      sequence: seq,
-    }));
-
-    return {
-      sequence,
-      totalDistance: Math.round(totalDistance * 100) / 100,
-      totalTime,
-      waypoints,
-    };
+    const sequence = buildNearestNeighborSequence(locations, startIndex, options);
+    return buildOptimizedRoute(locations, sequence, options);
   }
 
   if (locations.length === 1) {
@@ -215,9 +524,7 @@ export function optimizeRoute(
   startIndex: number = 0,
   options: RouteOptimizationOptions = {}
 ): OptimizedRoute {
-  // All modes currently use Nearest Neighbor
-  // In production, could implement different algorithms for different modes
-  return optimizeRouteNearestNeighbor(locations, startIndex, options);
+  return optimizeOpenRoute(locations, startIndex, options);
 }
 
 /**

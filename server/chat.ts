@@ -52,6 +52,21 @@ async function buildRouteContext(userId: number, routeId?: number): Promise<stri
   return context;
 }
 
+function buildFallbackAssistantResponse(routeContext: string) {
+  return [
+    "No momento o assistente de IA não conseguiu acessar o provedor externo, mas o EconoRotas continua operacional.",
+    "",
+    "Resumo disponível:",
+    routeContext,
+    "",
+    "Recomendações práticas:",
+    "- confira se todos os endereços têm número, bairro, cidade e UF;",
+    "- use a otimização por distância para reduzir deslocamento;",
+    "- revise paradas sem coordenadas antes de iniciar a rota;",
+    "- escolha Google Maps ou Waze no menu lateral antes de abrir a navegação.",
+  ].join("\n");
+}
+
 /**
  * Send a message to the LLM with route context
  */
@@ -61,9 +76,11 @@ export async function chatWithLLM(
   routeId?: number,
   previousMessages: Message[] = []
 ): Promise<string> {
+  let routeContext = "";
+
   try {
     // Build context from user's routes
-    const routeContext = await buildRouteContext(userId, routeId);
+    routeContext = await buildRouteContext(userId, routeId);
 
     // Prepare messages for LLM
     const messages: Message[] = [
@@ -99,7 +116,9 @@ forneça recomendações práticas baseadas em seus dados. Use markdown para for
     return assistantMessage;
   } catch (error) {
     console.error("[Chat] LLM Error:", error);
-    throw new Error("Erro ao processar mensagem com IA");
+    return buildFallbackAssistantResponse(
+      routeContext || "Não foi possível carregar o contexto das rotas agora."
+    );
   }
 }
 

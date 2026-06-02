@@ -1,6 +1,7 @@
+import { openWhatsAppReport, reportUnknownError } from "@/lib/errorReporter";
 import { cn } from "@/lib/utils";
 import { AlertTriangle, RotateCcw } from "lucide-react";
-import { Component, ReactNode } from "react";
+import { Component, ReactNode, type ErrorInfo } from "react";
 
 interface Props {
   children: ReactNode;
@@ -21,6 +22,12 @@ class ErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    reportUnknownError("Falha ao renderizar tela", error, "react.error-boundary", {
+      componentStack: errorInfo.componentStack,
+    });
+  }
+
   render() {
     if (this.state.hasError) {
       return (
@@ -31,13 +38,12 @@ class ErrorBoundary extends Component<Props, State> {
               className="text-destructive mb-6 flex-shrink-0"
             />
 
-            <h2 className="text-xl mb-4">An unexpected error occurred.</h2>
+            <h2 className="text-xl mb-4">Não foi possível carregar esta tela.</h2>
 
-            <div className="p-4 w-full rounded bg-muted overflow-auto mb-6">
-              <pre className="text-sm text-muted-foreground whitespace-break-spaces">
-                {this.state.error?.stack}
-              </pre>
-            </div>
+            <p className="mb-6 max-w-md text-center text-sm text-muted-foreground">
+              Atualize a página. Se estiver usando como app no iPhone, confirme a
+              conexão com a internet e abra novamente pelo ícone EconoRotas.
+            </p>
 
             <button
               onClick={() => window.location.reload()}
@@ -48,7 +54,27 @@ class ErrorBoundary extends Component<Props, State> {
               )}
             >
               <RotateCcw size={16} />
-              Reload Page
+              Atualizar página
+            </button>
+
+            <button
+              onClick={() =>
+                this.state.error &&
+                openWhatsAppReport({
+                  title: "Falha ao renderizar tela",
+                  message: this.state.error.message,
+                  stack: this.state.error.stack,
+                  source: "react.error-boundary",
+                  severity: "fatal",
+                })
+              }
+              className={cn(
+                "mt-3 flex items-center gap-2 px-4 py-2 rounded-lg border",
+                "border-border bg-white text-foreground",
+                "hover:bg-secondary cursor-pointer"
+              )}
+            >
+              Enviar erro pelo WhatsApp
             </button>
           </div>
         </div>

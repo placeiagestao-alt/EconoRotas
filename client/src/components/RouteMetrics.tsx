@@ -182,8 +182,9 @@ export default function RouteMetrics({
       <div className="rounded-xl border border-accent/35 bg-accent/10 p-3 text-sm text-foreground">
         <p className="font-medium mb-1">Dica:</p>
         <p>
-          As métricas atuais usam distância geográfica estimada. A arquitetura já está preparada
-          para receber motor de rotas OpenStreetMap/OSRM sem depender de provedor proprietário.
+          A prévia abaixo ainda é estimada no aparelho. Ao criar ou otimizar a rota, o servidor
+          tenta calcular distância e tempo por ruas com OpenStreetMap/OSRM e usa a estimativa
+          geográfica apenas se o motor de rotas estiver indisponível.
         </p>
       </div>
     </div>

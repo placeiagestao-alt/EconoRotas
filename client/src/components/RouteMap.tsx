@@ -34,7 +34,10 @@ export default function RouteMap({
   endPoint,
 }: RouteMapProps) {
   const validStops = useMemo(
-    () => stops.filter((stop) => stop.address.trim() && isValidCoordinate(stop)),
+    () =>
+      stops
+        .filter((stop) => stop.address.trim() && isValidCoordinate(stop))
+        .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)),
     [stops]
   );
   const routePoints = useMemo(
@@ -64,7 +67,7 @@ export default function RouteMap({
         createMapMarker(
           `route-stop-${index}`,
           stop,
-          `Pacote ${(stop.packageNumber ?? "").trim() || String(index + 1)}`,
+          `Sequência ${index + 1} · Pacote ${(stop.packageNumber ?? "").trim() || String(index + 1)}`,
           stop.address,
           "stop"
         )
@@ -130,7 +133,7 @@ export default function RouteMap({
           </div>
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 rounded-full bg-blue-500" />
-            <span className="text-muted-foreground">Intermedi\u00e1ria</span>
+            <span className="text-muted-foreground">Intermediária</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 rounded-full bg-red-500" />

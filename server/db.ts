@@ -3,18 +3,37 @@ import { drizzle } from "drizzle-orm/mysql2";
 import fs from "node:fs";
 import path from "node:path";
 import mysql from "mysql2/promise";
-import type { PoolOptions } from "mysql2/promise";
-import { InsertUser, users, routes, stops, routeSchedules, routeHistory, chatHistory } from "../drizzle/schema";
+import type { PoolOptions, RowDataPacket } from "mysql2/promise";
+import {
+  InsertUser,
+  type InsertUserIntegration,
+  users,
+  routes,
+  stops,
+  routeSchedules,
+  routeHistory,
+  chatHistory,
+  userIntegrations,
+  operationalEvents,
+} from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: any = null;
+let _pool: mysql.Pool | null = null;
 let _lastDbConnectAttempt = 0;
 let _lastDbConnectionError: string | null = null;
 
 const DB_CONNECT_RETRY_MS = 30_000;
 const LOCAL_DB_DIR = path.join(process.cwd(), ".data");
 const LOCAL_DB_FILE = path.join(LOCAL_DB_DIR, "routing-pwa-db.json");
+const FALLBACK_DB_KEY =
+  process.env.FALLBACK_DB_KEY || "econorotas:fallback-db:v1";
+const FALLBACK_KV_PREFIX =
+  process.env.FALLBACK_KV_PREFIX || "econorotas:kv:v1:";
 let localDbLoaded = false;
+let remoteDbLoaded = false;
+let remoteDbLoadPromise: Promise<void> | null = null;
+let lastRemoteFallbackError: string | null = null;
 
 const memory = {
   users: [] as any[],
@@ -23,6 +42,8 @@ const memory = {
   routeSchedules: [] as any[],
   routeHistory: [] as any[],
   chatHistory: [] as any[],
+  userIntegrations: [] as any[],
+  operationalEvents: [] as any[],
   ids: {
     users: 1,
     routes: 1,
@@ -30,6 +51,8 @@ const memory = {
     routeSchedules: 1,
     routeHistory: 1,
     chatHistory: 1,
+    userIntegrations: 1,
+    operationalEvents: 1,
   },
 };
 
@@ -39,6 +62,64 @@ function shouldPersistLocalDb() {
     process.env.NODE_ENV !== "test" &&
     process.env.VITEST !== "true"
   );
+}
+
+function getRedisRestConfig() {
+  const url =
+    process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "";
+  const token =
+    process.env.KV_REST_API_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    "";
+
+  if (!url || !token) return null;
+
+  return {
+    url: url.replace(/\/+$/, ""),
+    token,
+  };
+}
+
+export function hasPersistentFallbackDbConfigured() {
+  if (ENV.isProduction && ENV.requireManagedDatabase) return false;
+  return Boolean(getRedisRestConfig());
+}
+
+export function getPersistentFallbackDbHealth() {
+  return {
+    configured: hasPersistentFallbackDbConfigured(),
+    loaded: remoteDbLoaded,
+    error: lastRemoteFallbackError,
+  };
+}
+
+export async function ensurePersistentFallbackDbLoaded() {
+  if (ENV.isProduction && ENV.requireManagedDatabase) return;
+  if (!hasPersistentFallbackDbConfigured()) return;
+  await loadRemoteDb();
+}
+
+function hydrateMemory(data: any) {
+  memory.users = Array.isArray(data.users) ? data.users : [];
+  memory.routes = Array.isArray(data.routes) ? data.routes : [];
+  memory.stops = Array.isArray(data.stops) ? data.stops : [];
+  memory.routeSchedules = Array.isArray(data.routeSchedules)
+    ? data.routeSchedules
+    : [];
+  memory.routeHistory = Array.isArray(data.routeHistory) ? data.routeHistory : [];
+  memory.chatHistory = Array.isArray(data.chatHistory) ? data.chatHistory : [];
+  memory.userIntegrations = Array.isArray(data.userIntegrations) ? data.userIntegrations : [];
+  memory.operationalEvents = Array.isArray(data.operationalEvents) ? data.operationalEvents : [];
+  memory.ids = {
+    users: Number(data.ids?.users) || 1,
+    routes: Number(data.ids?.routes) || 1,
+    stops: Number(data.ids?.stops) || 1,
+    routeSchedules: Number(data.ids?.routeSchedules) || 1,
+    routeHistory: Number(data.ids?.routeHistory) || 1,
+    chatHistory: Number(data.ids?.chatHistory) || 1,
+    userIntegrations: Number(data.ids?.userIntegrations) || 1,
+    operationalEvents: Number(data.ids?.operationalEvents) || 1,
+  };
 }
 
 function loadLocalDb() {
@@ -51,28 +132,118 @@ function loadLocalDb() {
 
   try {
     const data = JSON.parse(fs.readFileSync(LOCAL_DB_FILE, "utf-8"));
-    memory.users = Array.isArray(data.users) ? data.users : [];
-    memory.routes = Array.isArray(data.routes) ? data.routes : [];
-    memory.stops = Array.isArray(data.stops) ? data.stops : [];
-    memory.routeSchedules = Array.isArray(data.routeSchedules)
-      ? data.routeSchedules
-      : [];
-    memory.routeHistory = Array.isArray(data.routeHistory) ? data.routeHistory : [];
-    memory.chatHistory = Array.isArray(data.chatHistory) ? data.chatHistory : [];
-    memory.ids = {
-      users: Number(data.ids?.users) || 1,
-      routes: Number(data.ids?.routes) || 1,
-      stops: Number(data.ids?.stops) || 1,
-      routeSchedules: Number(data.ids?.routeSchedules) || 1,
-      routeHistory: Number(data.ids?.routeHistory) || 1,
-      chatHistory: Number(data.ids?.chatHistory) || 1,
-    };
+    hydrateMemory(data);
   } catch (error) {
     console.warn("[Database] Failed to load local fallback database:", error);
   }
 }
 
-function persistLocalDb() {
+async function callRedisCommand(command: unknown[]) {
+  const config = getRedisRestConfig();
+  if (!config) return null;
+
+  const response = await fetch(config.url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(command),
+  });
+
+  const payload = await response.json().catch(() => undefined);
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || `Redis fallback respondeu HTTP ${response.status}`
+    );
+  }
+
+  return payload?.result;
+}
+
+function getLocalKvPath(key: string) {
+  const safeName = Buffer.from(key).toString("base64url");
+  return path.join(LOCAL_DB_DIR, "kv", `${safeName}.txt`);
+}
+
+export async function getPersistentValue(key: string) {
+  const redisKey = `${FALLBACK_KV_PREFIX}${key}`;
+
+  if (hasPersistentFallbackDbConfigured()) {
+    const result = await callRedisCommand(["GET", redisKey]);
+    return typeof result === "string" ? result : null;
+  }
+
+  if (!shouldPersistLocalDb()) return null;
+
+  const filePath = getLocalKvPath(redisKey);
+  if (!fs.existsSync(filePath)) return null;
+
+  return fs.readFileSync(filePath, "utf8");
+}
+
+export async function setPersistentValue(key: string, value: string) {
+  const redisKey = `${FALLBACK_KV_PREFIX}${key}`;
+
+  if (hasPersistentFallbackDbConfigured()) {
+    await callRedisCommand(["SET", redisKey, value]);
+    return;
+  }
+
+  if (!shouldPersistLocalDb()) return;
+
+  const filePath = getLocalKvPath(redisKey);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, value, "utf8");
+}
+
+async function loadRemoteDb() {
+  if (remoteDbLoaded) return;
+  if (!hasPersistentFallbackDbConfigured()) return;
+
+  if (!remoteDbLoadPromise) {
+    remoteDbLoadPromise = (async () => {
+      try {
+        const result = await callRedisCommand(["GET", FALLBACK_DB_KEY]);
+
+        if (typeof result === "string" && result.trim()) {
+          hydrateMemory(JSON.parse(result));
+        } else if (result && typeof result === "object") {
+          hydrateMemory(result);
+        }
+
+        remoteDbLoaded = true;
+        lastRemoteFallbackError = null;
+      } catch (error) {
+        lastRemoteFallbackError =
+          error instanceof Error
+            ? error.message
+            : "Erro desconhecido ao carregar fallback persistente.";
+        remoteDbLoadPromise = null;
+        throw error;
+      }
+    })();
+  }
+
+  await remoteDbLoadPromise;
+}
+
+async function persistFallbackDb() {
+  if (hasPersistentFallbackDbConfigured()) {
+    try {
+      await callRedisCommand(["SET", FALLBACK_DB_KEY, JSON.stringify(memory)]);
+      lastRemoteFallbackError = null;
+    } catch (error) {
+      lastRemoteFallbackError =
+        error instanceof Error
+          ? error.message
+          : "Erro desconhecido ao persistir fallback.";
+      console.warn("[Database] Failed to persist remote fallback database:", error);
+      throw error;
+    }
+  }
+
   if (!shouldPersistLocalDb()) return;
 
   try {
@@ -83,8 +254,28 @@ function persistLocalDb() {
   }
 }
 
-function shouldUseMemoryDb() {
-  if (ENV.isProduction && !ENV.allowEphemeralDb) return false;
+async function shouldUseMemoryDb() {
+  if (ENV.isProduction && ENV.requireManagedDatabase) {
+    return false;
+  }
+
+  if (
+    ENV.isProduction &&
+    !ENV.allowEphemeralDb &&
+    !hasPersistentFallbackDbConfigured()
+  ) {
+    return false;
+  }
+
+  if (ENV.hasInvalidProductionDatabaseUrl && !hasPersistentFallbackDbConfigured()) {
+    return false;
+  }
+
+  if (hasPersistentFallbackDbConfigured()) {
+    await loadRemoteDb();
+    return true;
+  }
+
   loadLocalDb();
   return true;
 }
@@ -107,20 +298,113 @@ function shouldUseDatabaseSsl(databaseUrl: string) {
   );
 }
 
-function createDatabasePool(databaseUrl: string) {
-  if (!shouldUseDatabaseSsl(databaseUrl)) {
-    return mysql.createPool(databaseUrl);
+function getDatabaseSslCa() {
+  if (process.env.DATABASE_SSL_CA) {
+    return process.env.DATABASE_SSL_CA.replace(/\\n/g, "\n");
   }
 
+  const caPath = process.env.DATABASE_SSL_CA_PATH;
+  if (caPath && fs.existsSync(caPath)) {
+    return fs.readFileSync(caPath, "utf8");
+  }
+
+  return undefined;
+}
+
+function readPositiveIntegerEnv(name: string, fallback: number) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function readNonNegativeIntegerEnv(name: string, fallback: number) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+function getDatabasePoolOptions(databaseUrl: string): PoolOptions {
   const poolOptions: PoolOptions = {
     uri: databaseUrl,
-    ssl: {
-      minVersion: "TLSv1.2",
-      rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
-    },
+    waitForConnections: true,
+    connectionLimit: readPositiveIntegerEnv("DB_CONNECTION_LIMIT", 5),
+    queueLimit: readNonNegativeIntegerEnv("DB_QUEUE_LIMIT", 0),
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
   };
 
-  return mysql.createPool(poolOptions);
+  if (shouldUseDatabaseSsl(databaseUrl)) {
+    poolOptions.ssl = {
+      minVersion: "TLSv1.2",
+      rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
+      ca: getDatabaseSslCa(),
+    };
+  }
+
+  return poolOptions;
+}
+
+function createDatabasePool(databaseUrl: string) {
+  return mysql.createPool(getDatabasePoolOptions(databaseUrl));
+}
+
+const REQUIRED_SCHEMA_COLUMNS = [
+  ["users", "id"],
+  ["users", "openId"],
+  ["users", "email"],
+  ["users", "role"],
+  ["users", "phone"],
+  ["routes", "id"],
+  ["routes", "userId"],
+  ["stops", "routeId"],
+  ["stops", "sequence"],
+  ["userIntegrations", "authTokenEncrypted"],
+  ["operationalEvents", "type"],
+  ["operationalEvents", "severity"],
+] as const;
+
+async function getDatabaseSchemaHealth() {
+  if (!_pool) {
+    return {
+      ok: false,
+      checkedColumns: REQUIRED_SCHEMA_COLUMNS.length,
+      missing: REQUIRED_SCHEMA_COLUMNS.map(([table, column]) => `${table}.${column}`),
+      error: "Pool MySQL indisponivel.",
+    };
+  }
+
+  try {
+    const [rows] = await _pool.query<RowDataPacket[]>(
+      `
+        SELECT TABLE_NAME as tableName, COLUMN_NAME as columnName
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME IN (?)
+      `,
+      [Array.from(new Set(REQUIRED_SCHEMA_COLUMNS.map(([table]) => table)))]
+    );
+    const existing = new Set(
+      rows.map((row) => `${String(row.tableName)}.${String(row.columnName)}`)
+    );
+    const missing = REQUIRED_SCHEMA_COLUMNS
+      .map(([table, column]) => `${table}.${column}`)
+      .filter((key) => !existing.has(key));
+
+    return {
+      ok: missing.length === 0,
+      checkedColumns: REQUIRED_SCHEMA_COLUMNS.length,
+      missing,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      checkedColumns: REQUIRED_SCHEMA_COLUMNS.length,
+      missing: REQUIRED_SCHEMA_COLUMNS.map(([table, column]) => `${table}.${column}`),
+      error:
+        error instanceof Error
+          ? error.message
+          : "Erro desconhecido ao validar schema.",
+    };
+  }
 }
 
 function sortByDateDesc<T extends Record<string, any>>(items: T[], field: string) {
@@ -143,6 +427,11 @@ function toDateKey(value: Date | string) {
 export async function getDb() {
   if (_db) return _db;
   if (!process.env.DATABASE_URL) return null;
+  if (ENV.hasInvalidProductionDatabaseUrl) {
+    _lastDbConnectionError =
+      "DATABASE_URL usa host local/Docker; configure um MySQL gerenciado acessivel pela Vercel.";
+    return null;
+  }
 
   const now = Date.now();
   if (!ENV.isProduction && now - _lastDbConnectAttempt < DB_CONNECT_RETRY_MS) {
@@ -152,15 +441,16 @@ export async function getDb() {
   _lastDbConnectAttempt = now;
 
   try {
-    const pool = createDatabasePool(process.env.DATABASE_URL);
-    await pool.query("SELECT 1");
-    _db = drizzle(pool);
+    _pool = _pool ?? createDatabasePool(process.env.DATABASE_URL);
+    await _pool.query("SELECT 1");
+    _db = drizzle(_pool);
     _lastDbConnectionError = null;
   } catch (error) {
     console.warn("[Database] Failed to connect:", error);
     _lastDbConnectionError =
       error instanceof Error ? error.message : "Erro desconhecido ao conectar.";
     _db = null;
+    _pool = null;
   }
 
   return _db;
@@ -174,16 +464,25 @@ export async function getDatabaseHealth() {
       configured,
       connected: false,
       ssl: shouldUseDatabaseSsl(""),
+      pool: null,
       error: null,
     };
   }
 
   const db = await getDb();
+  const schema = db ? await getDatabaseSchemaHealth() : null;
 
   return {
     configured,
-    connected: Boolean(db),
+    reachable: Boolean(db),
+    connected: Boolean(db) && Boolean(schema?.ok),
     ssl: shouldUseDatabaseSsl(process.env.DATABASE_URL || ""),
+    pool: {
+      connectionLimit: readPositiveIntegerEnv("DB_CONNECTION_LIMIT", 5),
+      queueLimit: readNonNegativeIntegerEnv("DB_QUEUE_LIMIT", 0),
+      lifecycle: "mysql2-native",
+    },
+    schema,
     error: _lastDbConnectionError,
   };
 }
@@ -195,7 +494,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
 
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const existing = memory.users.find((item) => item.openId === user.openId);
       const now = new Date();
       const nextUser = {
@@ -203,9 +502,15 @@ export async function upsertUser(user: InsertUser): Promise<void> {
         openId: user.openId,
         name: user.name ?? existing?.name ?? null,
         email: user.email ?? existing?.email ?? null,
+        phone: user.phone ?? existing?.phone ?? null,
+        companyName: user.companyName ?? existing?.companyName ?? null,
+        city: user.city ?? existing?.city ?? null,
+        state: user.state ?? existing?.state ?? null,
+        vehicleType: user.vehicleType ?? existing?.vehicleType ?? null,
+        acceptedTermsAt: user.acceptedTermsAt ?? existing?.acceptedTermsAt ?? null,
         passwordHash: user.passwordHash ?? existing?.passwordHash ?? null,
         loginMethod: user.loginMethod ?? existing?.loginMethod ?? null,
-        role: user.role ?? existing?.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user"),
+        role: user.role ?? existing?.role ?? "user",
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
         lastSignedIn: user.lastSignedIn ?? now,
@@ -216,7 +521,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       } else {
         memory.users.push(nextUser);
       }
-      persistLocalDb();
+      await persistFallbackDb();
       return;
     }
 
@@ -228,9 +533,21 @@ export async function upsertUser(user: InsertUser): Promise<void> {
     const values: InsertUser = {
       openId: user.openId,
     };
-    const updateSet: Record<string, unknown> = {};
+    const updateSet: Record<string, unknown> = {
+      openId: user.openId,
+    };
 
-    const textFields = ["name", "email", "passwordHash", "loginMethod"] as const;
+    const textFields = [
+      "name",
+      "email",
+      "phone",
+      "companyName",
+      "city",
+      "state",
+      "vehicleType",
+      "passwordHash",
+      "loginMethod",
+    ] as const;
     type TextField = (typeof textFields)[number];
 
     const assignNullable = (field: TextField) => {
@@ -247,12 +564,13 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       values.lastSignedIn = user.lastSignedIn;
       updateSet.lastSignedIn = user.lastSignedIn;
     }
+    if (user.acceptedTermsAt !== undefined) {
+      values.acceptedTermsAt = user.acceptedTermsAt;
+      updateSet.acceptedTermsAt = user.acceptedTermsAt;
+    }
     if (user.role !== undefined) {
       values.role = user.role;
       updateSet.role = user.role;
-    } else if (user.openId === ENV.ownerOpenId) {
-      values.role = 'admin';
-      updateSet.role = 'admin';
     }
 
     if (!values.lastSignedIn) {
@@ -275,7 +593,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
 export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return memory.users.find((item) => item.openId === openId);
     }
 
@@ -292,7 +610,7 @@ export async function getUserByEmail(email: string) {
   const normalizedEmail = email.trim().toLowerCase();
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return memory.users.find(
         (item) =>
           typeof item.email === "string" &&
@@ -313,10 +631,30 @@ export async function getUserByEmail(email: string) {
   return result.length > 0 ? result[0] : undefined;
 }
 
+export async function getUserById(userId: number) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.users.find((item) => item.id === userId);
+    }
+
+    console.warn("[Database] Cannot get user by id: database not available");
+    return undefined;
+  }
+
+  const result = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  return result.length > 0 ? result[0] : undefined;
+}
+
 export async function countUsers() {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return memory.users.length;
     }
     requireConfiguredDatabase();
@@ -326,18 +664,78 @@ export async function countUsers() {
   return Number(result[0]?.count || 0);
 }
 
+export async function cleanupE2eTestUsers() {
+  const db = await getDb();
+  const isE2eUser = (user: { email?: string | null; openId?: string | null }) => {
+    const email = user.email?.trim().toLowerCase() ?? "";
+    const openId = user.openId?.trim().toLowerCase() ?? "";
+    return (
+      (email.startsWith("codex-e2e-") && email.endsWith("@example.com")) ||
+      openId.startsWith("codex-e2e-")
+    );
+  };
+
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const deletedUsers = memory.users.filter(isE2eUser);
+      memory.users = memory.users.filter((user) => !isE2eUser(user));
+      await persistFallbackDb();
+      return {
+        deletedCount: deletedUsers.length,
+        deletedUsers: deletedUsers.map((user) => ({
+          id: user.id,
+          email: user.email ?? null,
+          openId: user.openId ?? null,
+        })),
+      };
+    }
+    requireConfiguredDatabase();
+  }
+
+  const e2eUserWhere = sql`(${users.email} LIKE 'codex-e2e-%@example.com' OR ${users.openId} LIKE 'codex-e2e-%')`;
+  const deletedUsers = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      openId: users.openId,
+    })
+    .from(users)
+    .where(e2eUserWhere);
+
+  if (deletedUsers.length > 0) {
+    await db.delete(users).where(e2eUserWhere);
+  }
+
+  return {
+    deletedCount: deletedUsers.length,
+    deletedUsers,
+  };
+}
+
 export async function createPasswordUser(user: {
   openId: string;
   name: string;
   email: string;
   passwordHash: string;
   role?: "user" | "admin";
+  phone?: string | null;
+  companyName?: string | null;
+  city?: string | null;
+  state?: string | null;
+  vehicleType?: string | null;
+  acceptedTermsAt?: Date | null;
 }) {
   const now = new Date();
   const values: InsertUser = {
     openId: user.openId,
     name: user.name,
     email: user.email.trim().toLowerCase(),
+    phone: user.phone ?? null,
+    companyName: user.companyName ?? null,
+    city: user.city ?? null,
+    state: user.state ?? null,
+    vehicleType: user.vehicleType ?? null,
+    acceptedTermsAt: user.acceptedTermsAt ?? null,
     passwordHash: user.passwordHash,
     loginMethod: "password",
     role: user.role ?? "user",
@@ -346,9 +744,9 @@ export async function createPasswordUser(user: {
 
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       if (memory.users.some((item) => item.openId === user.openId)) {
-        throw new Error("Usuario ja existe");
+        throw new Error("Usuário já existe");
       }
       const created = {
         id: memory.ids.users++,
@@ -357,7 +755,7 @@ export async function createPasswordUser(user: {
         updatedAt: now,
       };
       memory.users.push(created);
-      persistLocalDb();
+      await persistFallbackDb();
       return created;
     }
     requireConfiguredDatabase();
@@ -365,6 +763,161 @@ export async function createPasswordUser(user: {
 
   await db.insert(users).values(values);
   return getUserByOpenId(user.openId);
+}
+
+export async function updateUserProfile(
+  userId: number,
+  profile: {
+    name: string;
+    phone: string;
+    companyName?: string | null;
+    city: string;
+    state: string;
+    vehicleType: string;
+    acceptedTermsAt?: Date | null;
+  }
+) {
+  const db = await getDb();
+  const now = new Date();
+  const values = {
+    name: profile.name,
+    phone: profile.phone,
+    companyName: profile.companyName ?? null,
+    city: profile.city,
+    state: profile.state,
+    vehicleType: profile.vehicleType,
+    acceptedTermsAt: profile.acceptedTermsAt ?? null,
+    updatedAt: now,
+  };
+
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.users.find((item) => item.id === userId);
+      if (!existing) return undefined;
+      Object.assign(existing, values);
+      await persistFallbackDb();
+      return existing;
+    }
+    requireConfiguredDatabase();
+  }
+
+  await db.update(users).set(values).where(eq(users.id, userId));
+  return getUserById(userId);
+}
+
+// ==================== USER INTEGRATIONS ====================
+
+export async function getUserIntegration(userId: number, provider: string) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.userIntegrations.find(
+        (item) => item.userId === userId && item.provider === provider && item.isActive !== false
+      );
+    }
+
+    requireConfiguredDatabase();
+  }
+
+  const result = await db
+    .select()
+    .from(userIntegrations)
+    .where(
+      and(
+        eq(userIntegrations.userId, userId),
+        eq(userIntegrations.provider, provider),
+        eq(userIntegrations.isActive, true)
+      )
+    )
+    .limit(1);
+
+  return result[0];
+}
+
+export async function upsertUserIntegration(
+  userId: number,
+  provider: string,
+  data: Omit<InsertUserIntegration, "id" | "userId" | "provider" | "createdAt" | "updatedAt">
+) {
+  const db = await getDb();
+  const now = new Date();
+
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.userIntegrations.find(
+        (item) => item.userId === userId && item.provider === provider
+      );
+      const nextIntegration = {
+        id: existing?.id ?? memory.ids.userIntegrations++,
+        userId,
+        provider,
+        ...data,
+        isActive: data.isActive ?? true,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+
+      if (existing) {
+        Object.assign(existing, nextIntegration);
+      } else {
+        memory.userIntegrations.push(nextIntegration);
+      }
+
+      await persistFallbackDb();
+      return nextIntegration;
+    }
+
+    requireConfiguredDatabase();
+  }
+
+  const existing = await db
+    .select()
+    .from(userIntegrations)
+    .where(and(eq(userIntegrations.userId, userId), eq(userIntegrations.provider, provider)))
+    .limit(1);
+
+  const values = {
+    ...data,
+    userId,
+    provider,
+    isActive: data.isActive ?? true,
+  };
+
+  if (existing[0]) {
+    await db
+      .update(userIntegrations)
+      .set(values)
+      .where(eq(userIntegrations.id, existing[0].id));
+    return getUserIntegration(userId, provider);
+  }
+
+  await db.insert(userIntegrations).values(values);
+  return getUserIntegration(userId, provider);
+}
+
+export async function deleteUserIntegration(userId: number, provider: string) {
+  const db = await getDb();
+
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.userIntegrations.find(
+        (item) => item.userId === userId && item.provider === provider
+      );
+      if (existing) {
+        existing.isActive = false;
+        existing.updatedAt = new Date();
+        await persistFallbackDb();
+      }
+      return;
+    }
+
+    requireConfiguredDatabase();
+  }
+
+  await db
+    .update(userIntegrations)
+    .set({ isActive: false })
+    .where(and(eq(userIntegrations.userId, userId), eq(userIntegrations.provider, provider)));
 }
 
 // ==================== ROUTES ====================
@@ -382,7 +935,7 @@ export async function createRoute(userId: number, data: {
 }) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = new Date();
       const route = {
         id: memory.ids.routes++,
@@ -403,7 +956,7 @@ export async function createRoute(userId: number, data: {
         updatedAt: now,
       };
       memory.routes.push(route);
-      persistLocalDb();
+      await persistFallbackDb();
       return route;
     }
     requireConfiguredDatabase();
@@ -437,7 +990,7 @@ export async function createRoute(userId: number, data: {
 export async function getRouteById(routeId: number, userId: number) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return (
         memory.routes.find(
           (route) => route.id === routeId && route.userId === userId
@@ -457,7 +1010,7 @@ export async function getRouteById(routeId: number, userId: number) {
 export async function getUserRoutes(userId: number, limit = 50, offset = 0) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateDesc(
         memory.routes.filter((route) => route.userId === userId),
         "createdAt"
@@ -489,13 +1042,13 @@ export async function updateRoute(routeId: number, userId: number, data: Partial
 }>) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const route = memory.routes.find(
         (item) => item.id === routeId && item.userId === userId
       );
       if (route) {
         Object.assign(route, data, { updatedAt: new Date() });
-        persistLocalDb();
+        await persistFallbackDb();
       }
       return;
     }
@@ -510,7 +1063,7 @@ export async function updateRoute(routeId: number, userId: number, data: Partial
 export async function deleteRoute(routeId: number, userId: number) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       memory.routes = memory.routes.filter(
         (route) => !(route.id === routeId && route.userId === userId)
       );
@@ -524,7 +1077,7 @@ export async function deleteRoute(routeId: number, userId: number) {
       memory.chatHistory = memory.chatHistory.filter(
         (message) => message.routeId !== routeId
       );
-      persistLocalDb();
+      await persistFallbackDb();
       return;
     }
     requireConfiguredDatabase();
@@ -545,7 +1098,7 @@ export async function createStops(routeId: number, stopsData: Array<{
 }>) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = new Date();
       const createdStops = stopsData.map((stop) => ({
         id: memory.ids.stops++,
@@ -559,7 +1112,7 @@ export async function createStops(routeId: number, stopsData: Array<{
       }));
 
       memory.stops.push(...createdStops);
-      persistLocalDb();
+      await persistFallbackDb();
       return getRouteStops(routeId);
     }
     requireConfiguredDatabase();
@@ -583,7 +1136,7 @@ export async function createStops(routeId: number, stopsData: Array<{
 export async function getRouteStops(routeId: number) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return [...memory.stops]
         .filter((stop) => stop.routeId === routeId)
         .sort((a, b) => a.sequence - b.sequence);
@@ -596,12 +1149,100 @@ export async function getRouteStops(routeId: number) {
     .orderBy(asc(stops.sequence));
 }
 
+export async function updateStop(routeId: number, stopId: number, data: Partial<{
+  address: string;
+  latitude: number | null;
+  longitude: number | null;
+  sequence: number;
+  notes: string | null;
+}>) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const stop = memory.stops.find(
+        (item) => item.id === stopId && item.routeId === routeId
+      );
+      if (!stop) return null;
+
+      Object.assign(stop, {
+        ...data,
+        latitude:
+          data.latitude !== undefined
+            ? data.latitude === null
+              ? null
+              : String(data.latitude)
+            : stop.latitude,
+        longitude:
+          data.longitude !== undefined
+            ? data.longitude === null
+              ? null
+              : String(data.longitude)
+            : stop.longitude,
+      });
+      await persistFallbackDb();
+      return stop;
+    }
+    requireConfiguredDatabase();
+  }
+
+  await db.update(stops)
+    .set({
+      ...data,
+      latitude:
+        data.latitude !== undefined
+          ? data.latitude === null
+            ? null
+            : String(data.latitude)
+          : undefined,
+      longitude:
+        data.longitude !== undefined
+          ? data.longitude === null
+            ? null
+            : String(data.longitude)
+          : undefined,
+    } as any)
+    .where(and(eq(stops.id, stopId), eq(stops.routeId, routeId)));
+
+  const [updatedStop] = await db.select().from(stops)
+    .where(and(eq(stops.id, stopId), eq(stops.routeId, routeId)))
+    .limit(1);
+  return updatedStop ?? null;
+}
+
+export async function deleteStop(routeId: number, stopId: number) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const initialLength = memory.stops.length;
+      memory.stops = memory.stops.filter(
+        (stop) => !(stop.id === stopId && stop.routeId === routeId)
+      );
+      const deleted = memory.stops.length < initialLength;
+      if (deleted) {
+        await persistFallbackDb();
+      }
+      return deleted;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [existingStop] = await db.select().from(stops)
+    .where(and(eq(stops.id, stopId), eq(stops.routeId, routeId)))
+    .limit(1);
+
+  if (!existingStop) return false;
+
+  await db.delete(stops)
+    .where(and(eq(stops.id, stopId), eq(stops.routeId, routeId)));
+  return true;
+}
+
 export async function deleteRouteStops(routeId: number) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       memory.stops = memory.stops.filter((stop) => stop.routeId !== routeId);
-      persistLocalDb();
+      await persistFallbackDb();
       return;
     }
     requireConfiguredDatabase();
@@ -622,7 +1263,7 @@ export async function createSchedule(userId: number, data: {
 }) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = new Date();
       const schedule = {
         id: memory.ids.routeSchedules++,
@@ -640,7 +1281,7 @@ export async function createSchedule(userId: number, data: {
         updatedAt: now,
       };
       memory.routeSchedules.push(schedule);
-      persistLocalDb();
+      await persistFallbackDb();
       return schedule;
     }
     requireConfiguredDatabase();
@@ -669,7 +1310,7 @@ export async function createSchedule(userId: number, data: {
 export async function getScheduleById(scheduleId: number, userId: number) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return (
         memory.routeSchedules.find(
           (schedule) => schedule.id === scheduleId && schedule.userId === userId
@@ -689,7 +1330,7 @@ export async function getScheduleById(scheduleId: number, userId: number) {
 export async function getUserSchedules(userId: number) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateDesc(
         memory.routeSchedules.filter((schedule) => schedule.userId === userId),
         "nextExecution"
@@ -715,13 +1356,13 @@ export async function updateSchedule(scheduleId: number, userId: number, data: P
 }>) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const schedule = memory.routeSchedules.find(
         (item) => item.id === scheduleId && item.userId === userId
       );
       if (schedule) {
         Object.assign(schedule, data, { updatedAt: new Date() });
-        persistLocalDb();
+        await persistFallbackDb();
       }
       return;
     }
@@ -745,7 +1386,7 @@ export async function createHistory(userId: number, data: {
 }) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = new Date();
       const history = {
         id: memory.ids.routeHistory++,
@@ -764,7 +1405,7 @@ export async function createHistory(userId: number, data: {
         updatedAt: now,
       };
       memory.routeHistory.push(history);
-      persistLocalDb();
+      await persistFallbackDb();
       return history;
     }
     requireConfiguredDatabase();
@@ -792,7 +1433,7 @@ export async function createHistory(userId: number, data: {
 export async function getUserRouteHistory(userId: number, limit = 50, offset = 0) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateDesc(
         memory.routeHistory
           .filter((history) => history.userId === userId)
@@ -837,7 +1478,7 @@ export async function getUserRouteHistory(userId: number, limit = 50, offset = 0
 export async function getRouteHistory(routeId: number, userId: number) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateDesc(
         memory.routeHistory.filter(
           (history) => history.routeId === routeId && history.userId === userId
@@ -864,7 +1505,7 @@ export async function updateHistory(historyId: number, userId: number, data: Par
 }>) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const history = memory.routeHistory.find(
         (item) => item.id === historyId && item.userId === userId
       );
@@ -873,7 +1514,7 @@ export async function updateHistory(historyId: number, userId: number, data: Par
         if (data.actualDistance !== undefined) {
           history.actualDistance = String(data.actualDistance);
         }
-        persistLocalDb();
+        await persistFallbackDb();
       }
       return;
     }
@@ -903,7 +1544,7 @@ export async function addChatMessage(userId: number, data: {
 }) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const now = new Date();
       const message = {
         id: memory.ids.chatHistory++,
@@ -914,7 +1555,7 @@ export async function addChatMessage(userId: number, data: {
         createdAt: now,
       };
       memory.chatHistory.push(message);
-      persistLocalDb();
+      await persistFallbackDb();
       return message;
     }
     requireConfiguredDatabase();
@@ -939,7 +1580,7 @@ export async function addChatMessage(userId: number, data: {
 export async function getUserChatHistory(userId: number, routeId?: number, limit = 100) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       return sortByDateAsc(
         memory.chatHistory.filter(
           (message) =>
@@ -962,12 +1603,271 @@ export async function getUserChatHistory(userId: number, routeId?: number, limit
     .limit(limit);
 }
 
+// ==================== OPERATIONAL EVENTS ====================
+
+export async function createOperationalEvent(data: {
+  userId?: number | null;
+  routeId?: number | null;
+  stopId?: number | null;
+  type: string;
+  severity?: "info" | "warning" | "error" | "fatal";
+  source: string;
+  title: string;
+  message?: string | null;
+  runtime?: string | null;
+  url?: string | null;
+  userAgent?: string | null;
+  appVersion?: string | null;
+  metadata?: Record<string, unknown> | null;
+}) {
+  const event = {
+    userId: data.userId ?? null,
+    routeId: data.routeId ?? null,
+    stopId: data.stopId ?? null,
+    type: data.type.slice(0, 96),
+    severity: data.severity ?? "info",
+    source: data.source.slice(0, 128),
+    title: data.title.slice(0, 255),
+    message: data.message ?? null,
+    runtime: data.runtime?.slice(0, 64) ?? null,
+    url: data.url?.slice(0, 700) ?? null,
+    userAgent: data.userAgent?.slice(0, 700) ?? null,
+    appVersion: data.appVersion?.slice(0, 64) ?? null,
+    metadata: data.metadata ?? null,
+  };
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const created = {
+        id: memory.ids.operationalEvents++,
+        ...event,
+        createdAt: new Date(),
+      };
+      memory.operationalEvents.push(created);
+      await persistFallbackDb();
+      return created;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const inserted = await db
+    .insert(operationalEvents)
+    .values(event as any)
+    .$returningId();
+  const insertedId = inserted[0]?.id;
+  if (insertedId) {
+    const result = await db
+      .select()
+      .from(operationalEvents)
+      .where(eq(operationalEvents.id, insertedId))
+      .limit(1);
+
+    return result[0] ?? null;
+  }
+
+  const result = await db
+    .select()
+    .from(operationalEvents)
+    .where(
+      and(
+        data.userId == null
+          ? sql`${operationalEvents.userId} IS NULL`
+          : eq(operationalEvents.userId, data.userId),
+        eq(operationalEvents.type, event.type),
+        eq(operationalEvents.source, event.source),
+        eq(operationalEvents.title, event.title)
+      )
+    )
+    .orderBy(desc(operationalEvents.id))
+    .limit(1);
+
+  return result[0] ?? null;
+}
+
+export async function getRecentOperationalEvents(limit = 100) {
+  const safeLimit = Math.min(Math.max(limit, 1), 200);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return sortByDateDesc(memory.operationalEvents, "createdAt")
+        .slice(0, safeLimit)
+        .map((event) => ({
+          ...event,
+          userName: memory.users.find((user) => user.id === event.userId)?.name ?? null,
+          userEmail: memory.users.find((user) => user.id === event.userId)?.email ?? null,
+          routeName: memory.routes.find((route) => route.id === event.routeId)?.name ?? null,
+        }));
+    }
+    requireConfiguredDatabase();
+  }
+
+  return db
+    .select({
+      id: operationalEvents.id,
+      userId: operationalEvents.userId,
+      routeId: operationalEvents.routeId,
+      stopId: operationalEvents.stopId,
+      type: operationalEvents.type,
+      severity: operationalEvents.severity,
+      source: operationalEvents.source,
+      title: operationalEvents.title,
+      message: operationalEvents.message,
+      runtime: operationalEvents.runtime,
+      url: operationalEvents.url,
+      userAgent: operationalEvents.userAgent,
+      appVersion: operationalEvents.appVersion,
+      metadata: operationalEvents.metadata,
+      createdAt: operationalEvents.createdAt,
+      userName: users.name,
+      userEmail: users.email,
+      routeName: routes.name,
+    })
+    .from(operationalEvents)
+    .leftJoin(users, eq(operationalEvents.userId, users.id))
+    .leftJoin(routes, eq(operationalEvents.routeId, routes.id))
+    .orderBy(desc(operationalEvents.createdAt))
+    .limit(safeLimit);
+}
+
+export async function getAdminOperationalDashboard() {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const now = Date.now();
+      const oneDay = 24 * 60 * 60 * 1000;
+      const sevenDaysAgo = now - 7 * oneDay;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const events = sortByDateDesc(memory.operationalEvents, "createdAt");
+      const recentUsers = sortByDateDesc(memory.users, "createdAt").slice(0, 8);
+      const recentRoutes = sortByDateDesc(memory.routes, "createdAt").slice(0, 8);
+
+      return {
+        stats: {
+          usersTotal: memory.users.length,
+          usersToday: memory.users.filter((user) => new Date(user.createdAt) >= today).length,
+          activeUsers7d: new Set(
+            memory.operationalEvents
+              .filter((event) => new Date(event.createdAt).getTime() >= sevenDaysAgo && event.userId)
+              .map((event) => event.userId)
+          ).size,
+          routesTotal: memory.routes.length,
+          routesToday: memory.routes.filter((route) => new Date(route.createdAt) >= today).length,
+          events24h: events.filter((event) => now - new Date(event.createdAt).getTime() <= oneDay).length,
+          criticalEvents24h: events.filter(
+            (event) =>
+              now - new Date(event.createdAt).getTime() <= oneDay &&
+              ["error", "fatal"].includes(event.severity)
+          ).length,
+          routeWarnings24h: events.filter(
+            (event) =>
+              now - new Date(event.createdAt).getTime() <= oneDay &&
+              event.severity === "warning" &&
+              event.type.startsWith("route_")
+          ).length,
+        },
+        recentUsers,
+        recentRoutes,
+        recentEvents: events.slice(0, 12),
+      };
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [usersTotal] = await db.select({ count: sql<number>`COUNT(*)` }).from(users);
+  const [usersToday] = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(users)
+    .where(sql`DATE(${users.createdAt}) = CURRENT_DATE()`);
+  const [activeUsers7d] = await db
+    .select({ count: sql<number>`COUNT(DISTINCT ${operationalEvents.userId})` })
+    .from(operationalEvents)
+    .where(sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 7 DAY)`);
+  const [routesTotal] = await db.select({ count: sql<number>`COUNT(*)` }).from(routes);
+  const [routesToday] = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(routes)
+    .where(sql`DATE(${routes.createdAt}) = CURRENT_DATE()`);
+  const [events24h] = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(operationalEvents)
+    .where(sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`);
+  const [criticalEvents24h] = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(operationalEvents)
+    .where(
+      and(
+        sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`,
+        sql`${operationalEvents.severity} IN ('error', 'fatal')`
+      )
+    );
+  const [routeWarnings24h] = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(operationalEvents)
+    .where(
+      and(
+        sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`,
+        eq(operationalEvents.severity, "warning"),
+        sql`${operationalEvents.type} LIKE 'route_%'`
+      )
+    );
+
+  const recentUsers = await db
+    .select({
+      id: users.id,
+      name: users.name,
+      email: users.email,
+      role: users.role,
+      createdAt: users.createdAt,
+      lastSignedIn: users.lastSignedIn,
+    })
+    .from(users)
+    .orderBy(desc(users.createdAt))
+    .limit(8);
+
+  const recentRoutes = await db
+    .select({
+      id: routes.id,
+      userId: routes.userId,
+      name: routes.name,
+      status: routes.status,
+      totalDistance: routes.totalDistance,
+      totalTime: routes.totalTime,
+      createdAt: routes.createdAt,
+      updatedAt: routes.updatedAt,
+      userName: users.name,
+      userEmail: users.email,
+    })
+    .from(routes)
+    .leftJoin(users, eq(routes.userId, users.id))
+    .orderBy(desc(routes.createdAt))
+    .limit(8);
+
+  return {
+    stats: {
+      usersTotal: Number(usersTotal?.count || 0),
+      usersToday: Number(usersToday?.count || 0),
+      activeUsers7d: Number(activeUsers7d?.count || 0),
+      routesTotal: Number(routesTotal?.count || 0),
+      routesToday: Number(routesToday?.count || 0),
+      events24h: Number(events24h?.count || 0),
+      criticalEvents24h: Number(criticalEvents24h?.count || 0),
+      routeWarnings24h: Number(routeWarnings24h?.count || 0),
+    },
+    recentUsers,
+    recentRoutes,
+    recentEvents: await getRecentOperationalEvents(12),
+  };
+}
+
 // ==================== ANALYTICS ====================
 
 export async function getUserStats(userId: number, days = 30) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - days);
 
@@ -1029,7 +1929,7 @@ export async function getUserStats(userId: number, days = 30) {
 export async function getRouteStatsOverTime(userId: number, days = 30) {
   const db = await getDb();
   if (!db) {
-    if (shouldUseMemoryDb()) {
+    if (await shouldUseMemoryDb()) {
       const startDate = new Date();
       startDate.setDate(startDate.getDate() - days);
 
@@ -1077,3 +1977,4 @@ export async function getRouteStatsOverTime(userId: number, days = 30) {
     .groupBy(sql`DATE(executedDate)`)
     .orderBy(asc(sql`DATE(executedDate)`));
 }
+

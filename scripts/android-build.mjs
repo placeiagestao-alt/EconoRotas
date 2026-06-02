@@ -66,8 +66,17 @@ const env = {
     process.env.VITE_ANDROID_APP_VERSION || resolveAndroidVersionName(),
 };
 
+if (mode === "android-production") {
+  env.VITE_API_BASE_URL = "https://econo-rotas.vercel.app";
+  env.VITE_ENABLE_DEV_LOGIN = "false";
+}
+
 const buildCommand = getCorepackCommand(["pnpm", "exec", "vite", "build", "--mode", mode]);
 await run(buildCommand.command, buildCommand.args, env);
+
+if (mode.startsWith("android")) {
+  fs.rmSync("dist/public/downloads", { recursive: true, force: true });
+}
 
 if (capacitorAction) {
   const capacitorCommand = getCorepackCommand(["pnpm", "exec", "cap", capacitorAction, "android"]);

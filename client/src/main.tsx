@@ -8,6 +8,7 @@ import App from "./App";
 import { getLoginUrl } from "./const";
 import "./index.css";
 import { buildApiUrl } from "./lib/apiBase";
+import { reportUnknownError } from "./lib/errorReporter";
 
 const isRetryableRequestError = (error: unknown) => {
   if (error instanceof TRPCClientError) {
@@ -24,6 +25,26 @@ const isRetryableRequestError = (error: unknown) => {
   }
 
   return false;
+};
+
+const isExpectedClientError = (error: unknown) => {
+  if (!(error instanceof TRPCClientError)) return false;
+
+  if (error.message === UNAUTHED_ERR_MSG) return true;
+
+  const httpStatus = error.data?.httpStatus;
+  if (typeof httpStatus === "number" && httpStatus >= 400 && httpStatus < 500) {
+    return true;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("ja existe uma conta") ||
+    message.includes("já existe uma conta") ||
+    message.includes("e-mail ou senha incorretos") ||
+    message.includes("informe seu") ||
+    message.includes("senha")
+  );
 };
 
 const queryClient = new QueryClient({
@@ -72,13 +93,21 @@ queryClient.getQueryCache().subscribe(event => {
     const error = event.query.state.error;
     if (redirectToLoginIfUnauthorized(error)) return;
     console.error("[API Query Error]", error);
+    reportUnknownError("Falha ao consultar dados da API", error, "react-query.query", {
+      queryHash: event.query.queryHash,
+    });
   }
 });
 
 queryClient.getMutationCache().subscribe(event => {
   if (event.type === "updated" && event.action.type === "error") {
     const error = event.mutation.state.error;
+    if (isExpectedClientError(error)) {
+      console.warn("[API Mutation Validation]", error);
+      return;
+    }
     console.error("[API Mutation Error]", error);
+    reportUnknownError("Falha ao salvar ou executar acao na API", error, "react-query.mutation");
   }
 });
 
@@ -88,7 +117,9 @@ const trpcClient = trpc.createClient({
       url: buildApiUrl("/api/trpc"),
       transformer: superjson,
       headers() {
-        return enableDevLogin ? { "x-dev-login": "true" } : {};
+        return {
+          ...(enableDevLogin ? { "x-dev-login": "true" } : {}),
+        };
       },
       fetch(input, init) {
         return globalThis.fetch(input, {
@@ -101,6 +132,36 @@ const trpcClient = trpc.createClient({
 });
 
 setupAnalytics();
+
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register("/sw.js")
+      .then((registration) => {
+        registration.addEventListener("updatefound", () => {
+          const worker = registration.installing;
+          if (!worker) return;
+
+          worker.addEventListener("statechange", () => {
+            if (
+              worker.state === "installed" &&
+              navigator.serviceWorker.controller
+            ) {
+              window.dispatchEvent(new CustomEvent("econorotas:pwa-update"));
+            }
+          });
+        });
+      })
+      .catch((error) => {
+        console.error("[PWA] Service worker registration failed", error);
+        reportUnknownError(
+          "Falha ao preparar funcionamento offline/PWA",
+          error,
+          "pwa.service-worker"
+        );
+      });
+  });
+}
 
 createRoot(document.getElementById("root")!).render(
   <trpc.Provider client={trpcClient} queryClient={queryClient}>

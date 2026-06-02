@@ -1,14 +1,22 @@
 import type { Express, Request } from "express";
+import { getPersistentValue, setPersistentValue } from "../db";
 
 const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = Math.max(
   1,
-  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 30)
+  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 240)
 );
+const EXTERNAL_MIN_INTERVAL_MS = Math.max(
+  0,
+  Number(process.env.GEOCODING_EXTERNAL_MIN_INTERVAL_MS || 350)
+);
+
 const cache = new Map<string, { expiresAt: number; data: unknown }>();
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
+const inFlightSearches = new Map<string, Promise<unknown>>();
+let lastExternalSearchAt = 0;
 
 function getNominatimUserAgent() {
   return (
@@ -17,19 +25,92 @@ function getNominatimUserAgent() {
   );
 }
 
-function getCached(cacheKey: string) {
+function getPersistentCacheKey(cacheKey: string) {
+  return `geocoding:${Buffer.from(cacheKey).toString("base64url")}`;
+}
+
+async function waitForExternalSearchSlot() {
+  if (EXTERNAL_MIN_INTERVAL_MS <= 0) return;
+
+  const elapsed = Date.now() - lastExternalSearchAt;
+  if (elapsed < EXTERNAL_MIN_INTERVAL_MS) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, EXTERNAL_MIN_INTERVAL_MS - elapsed)
+    );
+  }
+  lastExternalSearchAt = Date.now();
+}
+
+function setMemoryCache(cacheKey: string, data: unknown) {
+  cache.set(cacheKey, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+async function getCached(cacheKey: string) {
   const cached = cache.get(cacheKey);
 
-  if (!cached) {
-    return undefined;
-  }
-
-  if (cached.expiresAt <= Date.now()) {
+  if (cached) {
+    if (cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
     cache.delete(cacheKey);
-    return undefined;
   }
 
-  return cached.data;
+  const persistentValue = await getPersistentValue(getPersistentCacheKey(cacheKey));
+  if (!persistentValue) return undefined;
+
+  try {
+    const payload = JSON.parse(persistentValue);
+    if (Number(payload.expiresAt) <= Date.now()) return undefined;
+
+    setMemoryCache(cacheKey, payload.data);
+    return payload.data;
+  } catch {
+    return undefined;
+  }
+}
+
+async function setCached(cacheKey: string, data: unknown) {
+  setMemoryCache(cacheKey, data);
+
+  await setPersistentValue(
+    getPersistentCacheKey(cacheKey),
+    JSON.stringify({ data, expiresAt: Date.now() + CACHE_TTL_MS })
+  ).catch((error) => {
+    console.warn("[Geocoding] Failed to persist cache:", error);
+  });
+}
+
+async function fetchExternalSearch(cacheKey: string, url: string) {
+  const existing = inFlightSearches.get(cacheKey);
+  if (existing) return existing;
+
+  const request = (async () => {
+    await waitForExternalSearchSlot();
+
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": getNominatimUserAgent(),
+      },
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      const error = new Error(body.slice(0, 200));
+      (error as Error & { status?: number; retryAfter?: string }).status =
+        response.status;
+      (error as Error & { status?: number; retryAfter?: string }).retryAfter =
+        response.headers.get("retry-after") || undefined;
+      throw error;
+    }
+
+    return response.json();
+  })().finally(() => {
+    inFlightSearches.delete(cacheKey);
+  });
+
+  inFlightSearches.set(cacheKey, request);
+  return request;
 }
 
 function getClientIp(req: Request) {
@@ -77,20 +158,21 @@ export function registerGeocodingProxy(app: Express) {
       return;
     }
 
+    const cacheKey = `${q.toLowerCase()}|${limit}`;
+    const cached = await getCached(cacheKey);
+
+    if (cached) {
+      res.setHeader("X-EconoRotas-Geocoding-Cache", "hit");
+      res.json(cached);
+      return;
+    }
+
     const rateLimit = checkRateLimit(req);
     if (!rateLimit.allowed) {
       res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
       res.status(429).json({
-        error: "Limite de consultas excedido. Tente novamente em instantes.",
+        error: "Limite de consultas excedido. Aguarde alguns segundos e tente novamente.",
       });
-      return;
-    }
-
-    const cacheKey = `${q.toLowerCase()}|${limit}`;
-    const cached = getCached(cacheKey);
-
-    if (cached) {
-      res.json(cached);
       return;
     }
 
@@ -104,26 +186,36 @@ export function registerGeocodingProxy(app: Express) {
     });
 
     try {
-      const response = await fetch(`${NOMINATIM_SEARCH_URL}?${params.toString()}`, {
-        headers: {
-          Accept: "application/json",
-          "User-Agent": getNominatimUserAgent(),
-        },
-      });
+      const data = await fetchExternalSearch(
+        cacheKey,
+        `${NOMINATIM_SEARCH_URL}?${params.toString()}`
+      );
+      await setCached(cacheKey, data);
+      res.setHeader("X-EconoRotas-Geocoding-Cache", "miss");
+      res.json(data);
+    } catch (error) {
+      const status = (error as Error & { status?: number }).status;
 
-      if (!response.ok) {
-        const body = await response.text();
-        res.status(response.status).json({
-          error: "Nao foi possivel consultar o servico de enderecos.",
-          details: body.slice(0, 200),
+      if (status === 429) {
+        res.setHeader(
+          "Retry-After",
+          (error as Error & { retryAfter?: string }).retryAfter || "3"
+        );
+        res.status(429).json({
+          error: "Servico de enderecos ocupado. Aguarde alguns segundos e tente novamente.",
+          details: error instanceof Error ? error.message : undefined,
         });
         return;
       }
 
-      const data = await response.json();
-      cache.set(cacheKey, { data, expiresAt: Date.now() + CACHE_TTL_MS });
-      res.json(data);
-    } catch (error) {
+      if (status) {
+        res.status(status).json({
+          error: "Nao foi possivel consultar o servico de enderecos.",
+          details: error instanceof Error ? error.message : undefined,
+        });
+        return;
+      }
+
       res.status(502).json({
         error:
           error instanceof Error

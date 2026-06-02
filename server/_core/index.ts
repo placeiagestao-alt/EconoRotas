@@ -1,8 +1,13 @@
+import "./runtimeWarnings";
 import "dotenv/config";
 import express from "express";
 import type { Express } from "express";
+import { execFile } from "node:child_process";
 import { createServer } from "http";
+import fs from "node:fs";
 import net from "net";
+import path from "node:path";
+import { promisify } from "node:util";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
@@ -10,8 +15,47 @@ import { registerGeocodingProxy } from "./geocodingProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { ENV } from "./env";
+import { sdk } from "./sdk";
 import { serveStatic } from "./static";
-import { getDatabaseHealth } from "../db";
+import { recordHealthObservation } from "./monitoring";
+import {
+  ensurePersistentFallbackDbLoaded,
+  getDatabaseHealth,
+  getPersistentFallbackDbHealth,
+  getPersistentValue,
+  hasPersistentFallbackDbConfigured,
+  setPersistentValue,
+} from "../db";
+
+const execFileAsync = promisify(execFile);
+let imileCaptureRunPromise: Promise<string> | null = null;
+
+function getLocalImileCapturePath() {
+  return path.resolve(
+    process.cwd(),
+    ".tmp",
+    "imile-capture",
+    "imile-capture-merged.xml"
+  );
+}
+
+async function runLocalImileCapture() {
+  const scriptPath = path.resolve(process.cwd(), "scripts", "capture-imile-screen.mjs");
+
+  await execFileAsync(process.execPath, [scriptPath, "--pages=130", "--delay=700"], {
+    cwd: process.cwd(),
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: 12 * 60 * 1000,
+    windowsHide: true,
+  });
+
+  const capturePath = getLocalImileCapturePath();
+  if (!fs.existsSync(capturePath)) {
+    throw new Error("Captura finalizada, mas o XML consolidado nao foi encontrado.");
+  }
+
+  return fs.readFileSync(capturePath, "utf8");
+}
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -58,6 +102,27 @@ function parseAllowedOrigins() {
   ]);
 }
 
+function normalizeCaptureOwner(value: string | null | undefined) {
+  return value?.trim().toLowerCase().replace(/[^a-z0-9@._+-]+/g, "-") || "";
+}
+
+function getCaptureKeys(owner: string) {
+  const normalizedOwner = normalizeCaptureOwner(owner);
+  return {
+    userKey: normalizedOwner ? `imile-capture:user:${normalizedOwner}` : "",
+    globalKey: "imile-capture:global",
+  };
+}
+
+async function getAuthenticatedCaptureOwner(req: express.Request) {
+  try {
+    const user = await sdk.authenticateRequest(req);
+    return normalizeCaptureOwner(user.email || user.openId || String(user.id));
+  } catch {
+    return "";
+  }
+}
+
 function isLocalDevelopmentOrigin(origin: string) {
   return /^https?:\/\/(localhost|127\.0\.0\.1|10\.0\.2\.2)(:\d+)?$/.test(
     origin
@@ -68,7 +133,13 @@ function validateProductionEnvironment() {
   if (!ENV.isProduction) return;
 
   const missing = [];
-  if (!ENV.databaseUrl && !ENV.allowEphemeralDb) missing.push("DATABASE_URL");
+  if (ENV.requireManagedDatabase) {
+    if (!ENV.databaseUrl || ENV.hasInvalidProductionDatabaseUrl) {
+      missing.push("DATABASE_URL MySQL gerenciado");
+    }
+  } else if (!ENV.databaseUrl && !hasPersistentFallbackDbConfigured()) {
+    missing.push("DATABASE_URL or Upstash Redis");
+  }
   if (!ENV.cookieSecret) missing.push("JWT_SECRET");
 
   if (missing.length > 0) {
@@ -84,6 +155,55 @@ function validateProductionEnvironment() {
   if (process.env.VITE_ENABLE_DEV_LOGIN === "true") {
     throw new Error("VITE_ENABLE_DEV_LOGIN cannot be true in production");
   }
+
+  if (
+    ENV.allowEphemeralDb &&
+    !hasPersistentFallbackDbConfigured() &&
+    !ENV.databaseUrl
+  ) {
+    throw new Error(
+      "ALLOW_EPHEMERAL_DB cannot be the only production storage. Configure a managed database or Upstash Redis."
+    );
+  }
+}
+
+async function getStorageHealthSnapshot(source: string) {
+  const database = await getDatabaseHealth();
+  if (!database.connected) {
+    try {
+      await ensurePersistentFallbackDbLoaded();
+    } catch {
+      // The fallback health object below exposes the load error.
+    }
+  }
+
+  const fallbackStore = getPersistentFallbackDbHealth();
+  const canUseLocalFallback =
+    !ENV.isProduction ||
+    (ENV.allowEphemeralDb && !ENV.hasInvalidProductionDatabaseUrl);
+  const storageAvailable = ENV.requireManagedDatabase
+    ? database.connected
+    : database.connected || fallbackStore.loaded || canUseLocalFallback;
+  const mode = database.connected
+    ? "persistent"
+    : fallbackStore.configured
+      ? "redis-fallback"
+      : "local-fallback";
+
+  await recordHealthObservation({
+    database,
+    fallbackStore,
+    storageAvailable,
+    mode,
+    source,
+  });
+
+  return {
+    database,
+    fallbackStore,
+    storageAvailable,
+    mode,
+  };
 }
 
 export function createApp(options: { serveClient?: boolean } = {}): Express {
@@ -118,17 +238,36 @@ export function createApp(options: { serveClient?: boolean } = {}): Express {
     next();
   });
   app.get("/api/health", async (_req, res) => {
-    const database = await getDatabaseHealth();
-    const databaseAvailable = ENV.databaseUrl
-      ? database.connected
-      : ENV.allowEphemeralDb || !ENV.isProduction;
+    const { database, fallbackStore, storageAvailable, mode } =
+      await getStorageHealthSnapshot("api.health");
 
-    res.status(databaseAvailable ? 200 : 500).json({
-      ok: databaseAvailable,
+    res.status(storageAvailable ? 200 : 500).json({
+      ok: storageAvailable,
       app: "EconoRotas",
       environment: ENV.isProduction ? "production" : "development",
-      mode: ENV.databaseUrl ? "persistent" : "local-fallback",
+      mode,
       database,
+      fallbackStore,
+      requiredManagedDatabase: ENV.requireManagedDatabase,
+      warning: ENV.hasInvalidProductionDatabaseUrl
+        ? "DATABASE_URL aponta para host local/Docker e não funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis."
+        : undefined,
+      timestamp: new Date().toISOString(),
+    });
+  });
+  app.get("/api/monitor/ping", async (_req, res) => {
+    const { database, fallbackStore, storageAvailable, mode } =
+      await getStorageHealthSnapshot("api.monitor.ping");
+
+    res.status(storageAvailable ? 200 : 500).json({
+      ok: storageAvailable,
+      monitor: true,
+      app: "EconoRotas",
+      environment: ENV.isProduction ? "production" : "development",
+      mode,
+      database,
+      fallbackStore,
+      requiredManagedDatabase: ENV.requireManagedDatabase,
       timestamp: new Date().toISOString(),
     });
   });
@@ -152,6 +291,96 @@ export function createApp(options: { serveClient?: boolean } = {}): Express {
       publishedAt: ENV.androidUpdatePublishedAt.trim() || undefined,
     });
   });
+  app.get("/api/imile/capture/latest", async (req, res) => {
+    const owner = await getAuthenticatedCaptureOwner(req);
+    if (!owner) {
+      res.status(401).json({
+        message: "Entre no EconoRotas para importar a captura iMile.",
+      });
+      return;
+    }
+
+    const { userKey, globalKey } = getCaptureKeys(owner);
+    const storedCapture =
+      (userKey ? await getPersistentValue(userKey) : null) ??
+      (await getPersistentValue(globalKey));
+
+    if (storedCapture) {
+      res.type("application/xml").send(storedCapture);
+      return;
+    }
+
+    const capturePath = getLocalImileCapturePath();
+
+    if (!fs.existsSync(capturePath)) {
+      res.status(404).json({
+        message: "Nenhuma captura iMile encontrada. Rode a captura no Android antes de importar.",
+      });
+      return;
+    }
+
+    res.type("application/xml").send(fs.readFileSync(capturePath, "utf8"));
+  });
+  app.post("/api/imile/capture/run", async (_req, res) => {
+    if (process.env.VERCEL) {
+      res.status(501).json({
+        message:
+          "Captura automatica exige Android conectado via ADB no computador local. No Vercel/iPhone, use envio ou importacao da captura.",
+      });
+      return;
+    }
+
+    try {
+      if (!imileCaptureRunPromise) {
+        imileCaptureRunPromise = runLocalImileCapture().finally(() => {
+          imileCaptureRunPromise = null;
+        });
+      }
+
+      const capture = await imileCaptureRunPromise;
+      res.type("application/xml").send(capture);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Falha ao capturar a tela do Rider Delivery.";
+      res.status(500).json({ message });
+    }
+  });
+  app.post(
+    "/api/imile/capture/latest",
+    express.text({ limit: "15mb", type: ["application/xml", "text/xml", "text/plain", "*/*"] }),
+    async (req, res) => {
+      const uploadToken = req.headers["x-imile-capture-token"];
+      const hasValidUploadToken =
+        ENV.imileCaptureUploadToken &&
+        typeof uploadToken === "string" &&
+        uploadToken === ENV.imileCaptureUploadToken;
+      const authenticatedOwner = await getAuthenticatedCaptureOwner(req);
+
+      if (!hasValidUploadToken && !authenticatedOwner) {
+        res.status(401).json({ message: "Captura iMile nao autorizada." });
+        return;
+      }
+
+      const capture = typeof req.body === "string" ? req.body.trim() : "";
+      if (!capture || !capture.includes("<")) {
+        res.status(400).json({ message: "Arquivo de captura iMile invalido." });
+        return;
+      }
+
+      const owner = authenticatedOwner;
+      const { userKey, globalKey } = getCaptureKeys(owner);
+      const key = userKey || globalKey;
+
+      await setPersistentValue(key, capture);
+      res.json({
+        ok: true,
+        owner: owner || "global",
+        bytes: Buffer.byteLength(capture, "utf8"),
+      });
+    }
+  );
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));

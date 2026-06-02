@@ -19,6 +19,7 @@
     "test": "vitest run",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
     "db:migrate": "drizzle-kit migrate",
+    "db:check": "node scripts/check-managed-mysql.mjs",
     "build:android": "node scripts/android-build.mjs android",
     "build:android:prod": "node scripts/android-build.mjs android-production",
     "android:add": "cap add android",
@@ -27,7 +28,9 @@
     "android:sync": "node scripts/android-build.mjs android sync",
     "android:sync:prod": "node scripts/android-build.mjs android-production sync",
     "android:usb": "node scripts/android-usb-reverse.mjs",
-    "android:open": "cap open android"
+    "android:open": "cap open android",
+    "imile:capture": "node scripts/capture-imile-screen.mjs",
+    "imile:capture:upload": "node scripts/capture-imile-screen.mjs --upload-url=https://econo-rotas.vercel.app/api/imile/capture/latest"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.693.0",
@@ -65,6 +68,7 @@
     "@trpc/client": "^11.6.0",
     "@trpc/react-query": "^11.6.0",
     "@trpc/server": "^11.6.0",
+    "@vercel/functions": "^3.6.1",
     "axios": "^1.12.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -126,8 +130,11 @@
     "vite-plugin-manus-runtime": "^0.0.57",
     "vitest": "^2.1.4"
   },
-  "packageManager": "pnpm@10.4.1+sha512.c753b6c3ad7afa13af388fa6d808035a008e30ea9993f58c6663e2bc5ff21679aa834db094987129aa4d488b86df57f7b634981b2f827cdcacc698cc0cfb88af",
+  "packageManager": "pnpm@10.33.4+sha512.1c67b3b359b2d408119ba1ed289f34b8fc3c6873412bec6fd264fbdc82489e510fcbecb9ce9d22dae7f3b76269d8441046014bdca53b9979cd7a561ad631b800",
   "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ],
     "patchedDependencies": {
       "wouter@3.7.1": "patches/wouter@3.7.1.patch"
     },
