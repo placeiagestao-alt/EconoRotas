@@ -80,6 +80,62 @@ describe("OSRM route metrics", () => {
     expect(result?.totalTime).toBe(5);
   });
 
+  it("generates different sequences for distance and time modes when road metrics conflict", async () => {
+    mockOsrmTable(
+      [
+        [0, 1, 2, 1],
+        [1, 0, 1, 1.2],
+        [2, 1, 0, 2],
+        [1, 1.2, 2, 0],
+      ],
+      [
+        [0, 4, 2, 1],
+        [4, 0, 1, 1.2],
+        [2, 1, 0, 2],
+        [1, 1.2, 2, 0],
+      ]
+    );
+
+    const locations: Location[] = [
+      { latitude: -22.12, longitude: -51.4, address: "A" },
+      { latitude: -22.121, longitude: -51.401, address: "B" },
+      { latitude: -22.122, longitude: -51.402, address: "C" },
+    ];
+    const options = {
+      startLocation: {
+        latitude: -22.119,
+        longitude: -51.399,
+        address: "Origem",
+      },
+    };
+
+    const distanceRoute = await optimizeRouteWithRoadMetrics(
+      locations,
+      "shortest_distance",
+      0,
+      options
+    );
+    const timeRoute = await optimizeRouteWithRoadMetrics(
+      locations,
+      "shortest_time",
+      0,
+      options
+    );
+    const balancedRoute = await optimizeRouteWithRoadMetrics(
+      locations,
+      "balanced",
+      0,
+      options
+    );
+
+    expect(distanceRoute?.sequence).toEqual([0, 1, 2]);
+    expect(timeRoute?.sequence).toEqual([0, 2, 1]);
+    expect(balancedRoute?.sequence).toEqual([0, 2, 1]);
+    expect(distanceRoute?.sequence).not.toEqual(timeRoute?.sequence);
+    expect(distanceRoute?.totalDistance).toBeLessThan(timeRoute?.totalDistance ?? Infinity);
+    expect(timeRoute?.totalTime).toBeLessThan(distanceRoute?.totalTime ?? Infinity);
+  });
+
   it("keeps spreadsheet order while replacing estimated metrics", async () => {
     mockOsrmTable([
       [0, 9, 3],

@@ -3,6 +3,13 @@
  * Builds nearest-neighbor candidates and improves them with 2-opt.
  */
 
+import {
+  calculateObjectiveCost,
+  chooseObjective,
+  type RouteMode,
+  type RouteObjective,
+} from "./routeObjective";
+
 export interface Location {
   latitude: number;
   longitude: number;
@@ -197,10 +204,7 @@ function calculateSequenceDistance(
   sequence: number[],
   options: RouteOptimizationOptions = {}
 ) {
-  return buildRouteLegs(locations, sequence, options).reduce(
-    (total, leg) => total + calculateDistance(leg.from, leg.to),
-    0
-  );
+  return calculateSequenceTotals(locations, sequence, options).distanceKm;
 }
 
 function calculateSequenceTime(
@@ -208,10 +212,37 @@ function calculateSequenceTime(
   sequence: number[],
   options: RouteOptimizationOptions = {}
 ) {
+  return calculateSequenceTotals(locations, sequence, options).durationMin;
+}
+
+function calculateSequenceTotals(
+  locations: Location[],
+  sequence: number[],
+  options: RouteOptimizationOptions = {}
+) {
   return buildRouteLegs(locations, sequence, options).reduce(
-    (total, leg) => total + estimateTravelTime(calculateDistance(leg.from, leg.to)),
-    0
+    (totals, leg) => {
+      const distance = calculateDistance(leg.from, leg.to);
+      totals.distanceKm += distance;
+      totals.durationMin += estimateTravelTime(distance);
+      return totals;
+    },
+    { distanceKm: 0, durationMin: 0 }
   );
+}
+
+function calculateSequenceObjective(
+  locations: Location[],
+  sequence: number[],
+  objective: RouteObjective,
+  options: RouteOptimizationOptions = {}
+) {
+  const { distanceKm, durationMin } = calculateSequenceTotals(
+    locations,
+    sequence,
+    options
+  );
+  return calculateObjectiveCost(distanceKm, durationMin, objective);
 }
 
 function buildOptimizedRoute(
@@ -219,12 +250,12 @@ function buildOptimizedRoute(
   sequence: number[],
   options: RouteOptimizationOptions = {}
 ): OptimizedRoute {
-  const totalDistance = calculateSequenceDistance(locations, sequence, options);
+  const totals = calculateSequenceTotals(locations, sequence, options);
 
   return {
     sequence,
-    totalDistance: Math.round(totalDistance * 100) / 100,
-    totalTime: calculateSequenceTime(locations, sequence, options),
+    totalDistance: Math.round(totals.distanceKm * 100) / 100,
+    totalTime: totals.durationMin,
     waypoints: sequence.map((idx, seq) => ({
       ...locations[idx],
       sequence: seq,
@@ -329,6 +360,7 @@ export function clusterStops(
 function buildNearestNeighborSequence(
   locations: Location[],
   startIndex: number,
+  objective: RouteObjective = chooseObjective("balanced"),
   options: RouteOptimizationOptions = {}
 ) {
   const n = locations.length;
@@ -343,14 +375,19 @@ function buildNearestNeighborSequence(
 
   while (sequence.length < n) {
     let nearestIndex = -1;
-    let nearestDistance = Infinity;
+    let nearestMetric = Infinity;
 
     for (let i = 0; i < n; i++) {
       if (visited[i]) continue;
 
       const distance = calculateDistance(currentLocation, locations[i]);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
+      const metric = calculateObjectiveCost(
+        distance,
+        estimateTravelTime(distance),
+        objective
+      );
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
         nearestIndex = i;
       }
     }
@@ -368,10 +405,11 @@ function buildNearestNeighborSequence(
 function improveSequenceWithTwoOpt(
   locations: Location[],
   initialSequence: number[],
+  objective: RouteObjective = chooseObjective("balanced"),
   options: RouteOptimizationOptions = {}
 ) {
   let sequence = [...initialSequence];
-  let bestDistance = calculateSequenceDistance(locations, sequence, options);
+  let bestMetric = calculateSequenceObjective(locations, sequence, objective, options);
   let improved = true;
   let passes = 0;
   const firstMutableIndex = options.startLocation ? 1 : 0;
@@ -387,15 +425,16 @@ function improveSequenceWithTwoOpt(
           ...sequence.slice(i, k + 1).reverse(),
           ...sequence.slice(k + 1),
         ];
-        const candidateDistance = calculateSequenceDistance(
+        const candidateMetric = calculateSequenceObjective(
           locations,
           candidate,
+          objective,
           options
         );
 
-        if (candidateDistance + 0.000001 < bestDistance) {
+        if (candidateMetric + 0.000001 < bestMetric) {
           sequence = candidate;
-          bestDistance = candidateDistance;
+          bestMetric = candidateMetric;
           improved = true;
         }
       }
@@ -408,6 +447,7 @@ function improveSequenceWithTwoOpt(
 function buildNearestSequenceForIndexes(
   locations: Location[],
   indexes: number[],
+  objective: RouteObjective = chooseObjective("balanced"),
   startLocation?: Location
 ) {
   const remaining = new Set(indexes);
@@ -421,12 +461,17 @@ function buildNearestSequenceForIndexes(
 
   while (remaining.size > 0) {
     let nearestIndex = -1;
-    let nearestDistance = Infinity;
+    let nearestMetric = Infinity;
 
     for (const candidateIndex of Array.from(remaining)) {
       const distance = calculateDistance(currentLocation, locations[candidateIndex]);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
+      const metric = calculateObjectiveCost(
+        distance,
+        estimateTravelTime(distance),
+        objective
+      );
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
         nearestIndex = candidateIndex;
       }
     }
@@ -444,24 +489,32 @@ function buildNearestSequenceForIndexes(
 function optimizeClusterStops(
   locations: Location[],
   clusterIndexes: number[],
+  objective: RouteObjective = chooseObjective("balanced"),
   startLocation?: Location
 ) {
   if (clusterIndexes.length <= 2) {
-    return buildNearestSequenceForIndexes(locations, clusterIndexes, startLocation);
+    return buildNearestSequenceForIndexes(
+      locations,
+      clusterIndexes,
+      objective,
+      startLocation
+    );
   }
 
   const nearest = buildNearestSequenceForIndexes(
     locations,
     clusterIndexes,
+    objective,
     startLocation
   );
-  const improved = improveSequenceWithTwoOpt(locations, nearest);
+  const improved = improveSequenceWithTwoOpt(locations, nearest, objective);
 
   return improved.filter((index) => clusterIndexes.includes(index));
 }
 
 function buildClusteredSequence(
   locations: Location[],
+  objective: RouteObjective = chooseObjective("balanced"),
   options: RouteOptimizationOptions = {}
 ) {
   const clusters = clusterStops(locations, options);
@@ -491,6 +544,7 @@ function buildClusteredSequence(
     const clusterSequence = optimizeClusterStops(
       locations,
       clusterIndexes,
+      objective,
       currentLocation
     );
 
@@ -640,10 +694,11 @@ function calculateClusterRevisitPenalty(
 function calculateDriverFriendlyScore(
   locations: Location[],
   sequence: number[],
+  objective: RouteObjective = chooseObjective("balanced"),
   options: RouteOptimizationOptions = {}
 ) {
   return (
-    calculateSequenceDistance(locations, sequence, options) +
+    calculateSequenceObjective(locations, sequence, objective, options) +
     calculateAvoidableJumpPenalty(locations, sequence, options) +
     calculateClusterRevisitPenalty(locations, sequence, options)
   );
@@ -651,6 +706,7 @@ function calculateDriverFriendlyScore(
 
 function optimizeOpenRoute(
   locations: Location[],
+  mode: RouteMode = "balanced",
   startIndex: number = 0,
   options: RouteOptimizationOptions = {}
 ) {
@@ -668,15 +724,17 @@ function optimizeOpenRoute(
 
   let bestSequence: number[] | null = null;
   let bestScore = Infinity;
+  const objective = chooseObjective(mode);
 
   for (const candidateStartIndex of uniqueStartIndexes) {
     const nearestSequence = buildNearestNeighborSequence(
       locations,
       candidateStartIndex,
+      objective,
       options
     );
     const inputSequence = locations.map((_, index) => index);
-    const clusteredSequence = buildClusteredSequence(locations, options);
+    const clusteredSequence = buildClusteredSequence(locations, objective, options);
     const seedSequences = [
       nearestSequence,
       ...(clusteredSequence ? [clusteredSequence] : []),
@@ -688,6 +746,7 @@ function optimizeOpenRoute(
       const improvedSequence = improveSequenceWithTwoOpt(
         locations,
         seedSequence,
+        objective,
         options
       );
       const candidateSequences = [
@@ -700,6 +759,7 @@ function optimizeOpenRoute(
         const score = calculateDriverFriendlyScore(
           locations,
           candidateSequence,
+          objective,
           options
         );
 
@@ -745,7 +805,12 @@ export function optimizeRouteNearestNeighbor(
   }
 
   if (options.startLocation || options.endLocation) {
-    const sequence = buildNearestNeighborSequence(locations, startIndex, options);
+    const sequence = buildNearestNeighborSequence(
+      locations,
+      startIndex,
+      chooseObjective("balanced"),
+      options
+    );
     return buildOptimizedRoute(locations, sequence, options);
   }
 
@@ -814,11 +879,11 @@ export function optimizeRouteNearestNeighbor(
  */
 export function optimizeRoute(
   locations: Location[],
-  mode: "shortest_distance" | "shortest_time" | "balanced" = "balanced",
+  mode: RouteMode = "balanced",
   startIndex: number = 0,
   options: RouteOptimizationOptions = {}
 ): OptimizedRoute {
-  return optimizeOpenRoute(locations, startIndex, options);
+  return optimizeOpenRoute(locations, mode, startIndex, options);
 }
 
 /**

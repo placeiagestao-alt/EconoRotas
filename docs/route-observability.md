@@ -79,6 +79,28 @@ CREATE TABLE route_metrics (
 
 ## Endpoints
 
+## Modos reais de otimizacao
+
+O roteirizador usa pesos diferentes para cada modo:
+
+- `shortest_distance`: `distanceKm * 0.8 + durationMin * 0.2`
+- `shortest_time`: `distanceKm * 0.1 + durationMin * 0.9`
+- `balanced`: `distanceKm * 0.5 + durationMin * 0.5`
+
+Quando o OSRM retorna matriz de distancia e duracao conflitantes, os modos podem
+gerar sequencias diferentes. O modo usado fica persistido em `route_metrics.routeMode`.
+
+## Comparacao por modo
+
+O painel administrativo agrega `route_metrics` por modo e compara:
+
+- rotas medidas;
+- score medio;
+- distancia media;
+- tempo medio;
+- taxa de correcao do fiscal;
+- taxa de fallback OSRM.
+
 - `admin.dashboard`: inclui `routeMetrics` com resumo dos ultimos 30 dias.
 - `admin.routeMetrics({ days })`: retorna indicadores agregados de 1 a 365 dias.
 

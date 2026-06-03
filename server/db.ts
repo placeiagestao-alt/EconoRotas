@@ -1979,6 +1979,34 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
       Number(metric.regionRevisitedCount || 0) > 0 ||
       Number(metric.prematureRegionExitCount || 0) > 0
   ).length;
+  const routeModes = ["shortest_distance", "shortest_time", "balanced"] as const;
+  const modePerformance = routeModes.map((mode) => {
+    const modeMetrics = metrics.filter((metric) => metric.routeMode === mode);
+    const modeTotal = modeMetrics.length;
+    const modeCorrected = modeMetrics.filter(
+      (metric) => Number(metric.issuesCorrectedCount || 0) > 0
+    ).length;
+    const modeFallback = modeMetrics.filter((metric) =>
+      Boolean(metric.osrmFallback)
+    ).length;
+
+    return {
+      mode,
+      routeMetricCount: modeTotal,
+      averageQualityScore: roundMetric(
+        metricAverage(modeMetrics.map((metric) => Number(metric.qualityScore || 0)))
+      ),
+      averageDistanceKm: roundMetric(
+        metricAverage(modeMetrics.map((metric) => Number(metric.totalDistanceKm || 0))),
+        2
+      ),
+      averageTimeMinutes: roundMetric(
+        metricAverage(modeMetrics.map((metric) => Number(metric.totalTimeMinutes || 0)))
+      ),
+      auditorCorrectionRate: roundMetric(metricPercent(modeCorrected, modeTotal)),
+      osrmFallbackRate: roundMetric(metricPercent(modeFallback, modeTotal)),
+    };
+  });
 
   return {
     periodDays: days,
@@ -2054,6 +2082,7 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
       corrected: correctedIssues,
       blocked: blockedIssues,
     },
+    modePerformance,
   };
 }
 

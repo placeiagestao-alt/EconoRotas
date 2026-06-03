@@ -56,6 +56,12 @@ function StatCard({
   );
 }
 
+function modeLabel(mode: string) {
+  if (mode === "shortest_distance") return "Menor distancia";
+  if (mode === "shortest_time") return "Menor tempo";
+  return "Balanceado";
+}
+
 export default function Operations() {
   const utils = trpc.useUtils();
   const dashboardQuery = trpc.admin.dashboard.useQuery(undefined, {
@@ -73,7 +79,7 @@ export default function Operations() {
 
   const data = dashboardQuery.data;
   const stats = data?.stats;
-  const routeQuality = (data as any)?.routeQuality;
+  const routeMetrics = (data as any)?.routeMetrics;
 
   return (
     <DashboardLayout>
@@ -124,67 +130,124 @@ export default function Operations() {
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <StatCard
                   title="Taxa correcao fiscal"
-                  value={Math.round(routeQuality?.correctionRate ?? 0)}
+                  value={Math.round(routeMetrics?.auditorCorrectionRate ?? 0)}
                   suffix="%"
                   icon={ShieldCheck}
                 />
                 <StatCard
                   title="Fallback OSRM"
-                  value={Math.round(routeQuality?.osrmFallbackRate ?? 0)}
+                  value={Math.round(routeMetrics?.osrmFallbackRate ?? 0)}
                   suffix="%"
                   icon={AlertTriangle}
                 />
                 <StatCard
                   title="Retrabalho regional"
-                  value={Math.round(routeQuality?.regionalReworkIndex ?? 0)}
+                  value={Math.round(routeMetrics?.regionalReworkIndex ?? 0)}
+                  suffix="%"
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Eficiencia cluster"
+                  value={Math.round(routeMetrics?.clusterEfficiencyIndex ?? 0)}
                   suffix="%"
                   icon={MapPinned}
                 />
                 <StatCard
                   title="Score medio"
-                  value={Math.round(routeQuality?.averageScore ?? 0)}
+                  value={Math.round(routeMetrics?.averageQualityScore ?? 0)}
                   icon={Gauge}
                 />
                 <StatCard
-                  title="Rotas avaliadas"
-                  value={routeQuality?.scoredRoutes ?? 0}
+                  title="Metricas gravadas"
+                  value={routeMetrics?.routeMetricCount ?? 0}
                   icon={Route}
                 />
                 <StatCard
                   title="Correcoes do fiscal"
-                  value={routeQuality?.corrections ?? 0}
+                  value={routeMetrics?.routeOutcomes?.correctedCount ?? 0}
                   icon={ShieldCheck}
                 />
                 <StatCard
-                  title="Revisitas evitadas"
-                  value={routeQuality?.revisitsAvoided ?? 0}
-                  icon={MapPinned}
-                />
-                <StatCard
-                  title="Saidas corrigidas"
-                  value={routeQuality?.prematureExitsCorrected ?? 0}
+                  title="Bloqueios fiscal"
+                  value={routeMetrics?.routeOutcomes?.blockedCount ?? 0}
                   icon={AlertTriangle}
                 />
                 <StatCard
-                  title="Cruzamentos detectados"
-                  value={routeQuality?.routeCrossingsDetected ?? 0}
+                  title="Revisitas"
+                  value={routeMetrics?.issues?.regionRevisited ?? 0}
                   icon={MapPinned}
                 />
                 <StatCard
-                  title="KM economizados"
-                  value={Math.round(routeQuality?.estimatedKmSaved ?? 0)}
+                  title="Saidas prematuras"
+                  value={routeMetrics?.issues?.prematureRegionExit ?? 0}
+                  icon={AlertTriangle}
+                />
+                <StatCard
+                  title="Paradas puladas"
+                  value={routeMetrics?.issues?.nearbyStopSkipped ?? 0}
                   icon={MapPinned}
                 />
                 <StatCard
-                  title="Min. economizados"
-                  value={routeQuality?.estimatedMinutesSaved ?? 0}
+                  title="Cruzamentos"
+                  value={routeMetrics?.issues?.routeCrossing ?? 0}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Clusters medio"
+                  value={Math.round(routeMetrics?.averageClusterCount ?? 0)}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Runtime medio"
+                  value={Math.round(routeMetrics?.averageOptimizationRuntimeSeconds ?? 0)}
+                  suffix="s"
                   icon={Activity}
                 />
               </div>
               <p className="mt-3 text-xs text-muted-foreground">
-                Economia estimada a partir dos alertas corrigidos pelo fiscal.
-                Dados reais de antes/depois entram quando houver telemetria de execucao completa.
+                Metricas dos ultimos 30 dias gravadas em route_metrics a cada
+                otimizacao, reotimizacao ou bloqueio do fiscal.
               </p>
+              <div className="mt-5 overflow-x-auto rounded-lg border border-border/80">
+                <table className="w-full min-w-[720px] text-left text-sm">
+                  <thead className="bg-muted/60 text-xs uppercase text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">Modo</th>
+                      <th className="px-3 py-2 font-medium">Rotas</th>
+                      <th className="px-3 py-2 font-medium">Score</th>
+                      <th className="px-3 py-2 font-medium">KM medio</th>
+                      <th className="px-3 py-2 font-medium">Tempo medio</th>
+                      <th className="px-3 py-2 font-medium">Correcao</th>
+                      <th className="px-3 py-2 font-medium">Fallback OSRM</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(routeMetrics?.modePerformance ?? []).map((item: any) => (
+                      <tr key={item.mode} className="border-t border-border/80">
+                        <td className="px-3 py-2 font-medium">
+                          {modeLabel(item.mode)}
+                        </td>
+                        <td className="px-3 py-2">{item.routeMetricCount ?? 0}</td>
+                        <td className="px-3 py-2">
+                          {Math.round(item.averageQualityScore ?? 0)}
+                        </td>
+                        <td className="px-3 py-2">
+                          {Number(item.averageDistanceKm ?? 0).toFixed(1)}
+                        </td>
+                        <td className="px-3 py-2">
+                          {Math.round(item.averageTimeMinutes ?? 0)} min
+                        </td>
+                        <td className="px-3 py-2">
+                          {Math.round(item.auditorCorrectionRate ?? 0)}%
+                        </td>
+                        <td className="px-3 py-2">
+                          {Math.round(item.osrmFallbackRate ?? 0)}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </CardContent>
           </Card>
         )}

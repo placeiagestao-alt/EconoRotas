@@ -1677,6 +1677,33 @@ function buildRouteMetricsSummary(metrics, days) {
   const routesWithRegionalProblems = metrics.filter(
     (metric) => Number(metric.regionRevisitedCount || 0) > 0 || Number(metric.prematureRegionExitCount || 0) > 0
   ).length;
+  const routeModes = ["shortest_distance", "shortest_time", "balanced"];
+  const modePerformance = routeModes.map((mode) => {
+    const modeMetrics = metrics.filter((metric) => metric.routeMode === mode);
+    const modeTotal = modeMetrics.length;
+    const modeCorrected = modeMetrics.filter(
+      (metric) => Number(metric.issuesCorrectedCount || 0) > 0
+    ).length;
+    const modeFallback = modeMetrics.filter(
+      (metric) => Boolean(metric.osrmFallback)
+    ).length;
+    return {
+      mode,
+      routeMetricCount: modeTotal,
+      averageQualityScore: roundMetric(
+        metricAverage(modeMetrics.map((metric) => Number(metric.qualityScore || 0)))
+      ),
+      averageDistanceKm: roundMetric(
+        metricAverage(modeMetrics.map((metric) => Number(metric.totalDistanceKm || 0))),
+        2
+      ),
+      averageTimeMinutes: roundMetric(
+        metricAverage(modeMetrics.map((metric) => Number(metric.totalTimeMinutes || 0)))
+      ),
+      auditorCorrectionRate: roundMetric(metricPercent(modeCorrected, modeTotal)),
+      osrmFallbackRate: roundMetric(metricPercent(modeFallback, modeTotal))
+    };
+  });
   return {
     periodDays: days,
     routeMetricCount: total,
@@ -1742,7 +1769,8 @@ function buildRouteMetricsSummary(metrics, days) {
       detected: detectedIssues,
       corrected: correctedIssues,
       blocked: blockedIssues
-    }
+    },
+    modePerformance
   };
 }
 async function getRouteMetricsDashboard(days = 30) {
@@ -3428,6 +3456,32 @@ async function verifyPassword(password, storedHash) {
   return timingSafeEqual(storedBuffer, suppliedBuffer);
 }
 
+// server/routeObjective.ts
+function chooseObjective(mode = "balanced") {
+  if (mode === "shortest_distance") {
+    return {
+      mode,
+      distanceWeight: 0.8,
+      durationWeight: 0.2
+    };
+  }
+  if (mode === "shortest_time") {
+    return {
+      mode,
+      distanceWeight: 0.1,
+      durationWeight: 0.9
+    };
+  }
+  return {
+    mode: "balanced",
+    distanceWeight: 0.5,
+    durationWeight: 0.5
+  };
+}
+function calculateObjectiveCost(distanceKm, durationMin, objective) {
+  return distanceKm * objective.distanceWeight + durationMin * objective.durationWeight;
+}
+
 // server/optimization.ts
 function getLocalitySettings(localityMode = "local") {
   if (localityMode === "strict") {
@@ -3523,24 +3577,31 @@ function buildRouteLegs(locations, sequence, options = {}) {
   }
   return legs;
 }
-function calculateSequenceDistance(locations, sequence, options = {}) {
+function calculateSequenceTotals(locations, sequence, options = {}) {
   return buildRouteLegs(locations, sequence, options).reduce(
-    (total, leg) => total + calculateDistance(leg.from, leg.to),
-    0
+    (totals, leg) => {
+      const distance = calculateDistance(leg.from, leg.to);
+      totals.distanceKm += distance;
+      totals.durationMin += estimateTravelTime(distance);
+      return totals;
+    },
+    { distanceKm: 0, durationMin: 0 }
   );
 }
-function calculateSequenceTime(locations, sequence, options = {}) {
-  return buildRouteLegs(locations, sequence, options).reduce(
-    (total, leg) => total + estimateTravelTime(calculateDistance(leg.from, leg.to)),
-    0
+function calculateSequenceObjective(locations, sequence, objective, options = {}) {
+  const { distanceKm, durationMin } = calculateSequenceTotals(
+    locations,
+    sequence,
+    options
   );
+  return calculateObjectiveCost(distanceKm, durationMin, objective);
 }
 function buildOptimizedRoute(locations, sequence, options = {}) {
-  const totalDistance = calculateSequenceDistance(locations, sequence, options);
+  const totals = calculateSequenceTotals(locations, sequence, options);
   return {
     sequence,
-    totalDistance: Math.round(totalDistance * 100) / 100,
-    totalTime: calculateSequenceTime(locations, sequence, options),
+    totalDistance: Math.round(totals.distanceKm * 100) / 100,
+    totalTime: totals.durationMin,
     waypoints: sequence.map((idx, seq) => ({
       ...locations[idx],
       sequence: seq
@@ -3610,7 +3671,7 @@ function clusterStops(stops2, options = {}) {
     }))
   }));
 }
-function buildNearestNeighborSequence(locations, startIndex, options = {}) {
+function buildNearestNeighborSequence(locations, startIndex, objective = chooseObjective("balanced"), options = {}) {
   const n = locations.length;
   const visited = new Array(n).fill(false);
   const sequence = [];
@@ -3621,12 +3682,17 @@ function buildNearestNeighborSequence(locations, startIndex, options = {}) {
   }
   while (sequence.length < n) {
     let nearestIndex = -1;
-    let nearestDistance = Infinity;
+    let nearestMetric = Infinity;
     for (let i = 0; i < n; i++) {
       if (visited[i]) continue;
       const distance = calculateDistance(currentLocation, locations[i]);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
+      const metric = calculateObjectiveCost(
+        distance,
+        estimateTravelTime(distance),
+        objective
+      );
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
         nearestIndex = i;
       }
     }
@@ -3637,9 +3703,9 @@ function buildNearestNeighborSequence(locations, startIndex, options = {}) {
   }
   return sequence;
 }
-function improveSequenceWithTwoOpt(locations, initialSequence, options = {}) {
+function improveSequenceWithTwoOpt(locations, initialSequence, objective = chooseObjective("balanced"), options = {}) {
   let sequence = [...initialSequence];
-  let bestDistance = calculateSequenceDistance(locations, sequence, options);
+  let bestMetric = calculateSequenceObjective(locations, sequence, objective, options);
   let improved = true;
   let passes = 0;
   const firstMutableIndex = options.startLocation ? 1 : 0;
@@ -3653,14 +3719,15 @@ function improveSequenceWithTwoOpt(locations, initialSequence, options = {}) {
           ...sequence.slice(i, k + 1).reverse(),
           ...sequence.slice(k + 1)
         ];
-        const candidateDistance = calculateSequenceDistance(
+        const candidateMetric = calculateSequenceObjective(
           locations,
           candidate,
+          objective,
           options
         );
-        if (candidateDistance + 1e-6 < bestDistance) {
+        if (candidateMetric + 1e-6 < bestMetric) {
           sequence = candidate;
-          bestDistance = candidateDistance;
+          bestMetric = candidateMetric;
           improved = true;
         }
       }
@@ -3668,7 +3735,7 @@ function improveSequenceWithTwoOpt(locations, initialSequence, options = {}) {
   }
   return sequence;
 }
-function buildNearestSequenceForIndexes(locations, indexes, startLocation) {
+function buildNearestSequenceForIndexes(locations, indexes, objective = chooseObjective("balanced"), startLocation) {
   const remaining = new Set(indexes);
   const sequence = [];
   let currentLocation = startLocation ?? locations[indexes[0]];
@@ -3678,11 +3745,16 @@ function buildNearestSequenceForIndexes(locations, indexes, startLocation) {
   }
   while (remaining.size > 0) {
     let nearestIndex = -1;
-    let nearestDistance = Infinity;
+    let nearestMetric = Infinity;
     for (const candidateIndex of Array.from(remaining)) {
       const distance = calculateDistance(currentLocation, locations[candidateIndex]);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
+      const metric = calculateObjectiveCost(
+        distance,
+        estimateTravelTime(distance),
+        objective
+      );
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
         nearestIndex = candidateIndex;
       }
     }
@@ -3693,19 +3765,25 @@ function buildNearestSequenceForIndexes(locations, indexes, startLocation) {
   }
   return sequence;
 }
-function optimizeClusterStops(locations, clusterIndexes, startLocation) {
+function optimizeClusterStops(locations, clusterIndexes, objective = chooseObjective("balanced"), startLocation) {
   if (clusterIndexes.length <= 2) {
-    return buildNearestSequenceForIndexes(locations, clusterIndexes, startLocation);
+    return buildNearestSequenceForIndexes(
+      locations,
+      clusterIndexes,
+      objective,
+      startLocation
+    );
   }
   const nearest = buildNearestSequenceForIndexes(
     locations,
     clusterIndexes,
+    objective,
     startLocation
   );
-  const improved = improveSequenceWithTwoOpt(locations, nearest);
+  const improved = improveSequenceWithTwoOpt(locations, nearest, objective);
   return improved.filter((index2) => clusterIndexes.includes(index2));
 }
-function buildClusteredSequence(locations, options = {}) {
+function buildClusteredSequence(locations, objective = chooseObjective("balanced"), options = {}) {
   const clusters = clusterStops(locations, options);
   if (clusters.length <= 1) return null;
   const remainingClusters = new Set(clusters.map((cluster) => cluster.clusterId));
@@ -3727,6 +3805,7 @@ function buildClusteredSequence(locations, options = {}) {
     const clusterSequence = optimizeClusterStops(
       locations,
       clusterIndexes,
+      objective,
       currentLocation
     );
     sequence.push(...clusterSequence);
@@ -3826,10 +3905,10 @@ function calculateClusterRevisitPenalty(locations, sequence, options = {}) {
   }
   return penalty;
 }
-function calculateDriverFriendlyScore(locations, sequence, options = {}) {
-  return calculateSequenceDistance(locations, sequence, options) + calculateAvoidableJumpPenalty(locations, sequence, options) + calculateClusterRevisitPenalty(locations, sequence, options);
+function calculateDriverFriendlyScore(locations, sequence, objective = chooseObjective("balanced"), options = {}) {
+  return calculateSequenceObjective(locations, sequence, objective, options) + calculateAvoidableJumpPenalty(locations, sequence, options) + calculateClusterRevisitPenalty(locations, sequence, options);
 }
-function optimizeOpenRoute(locations, startIndex = 0, options = {}) {
+function optimizeOpenRoute(locations, mode = "balanced", startIndex = 0, options = {}) {
   if (locations.length === 0) {
     return buildOptimizedRoute(locations, [], options);
   }
@@ -3837,14 +3916,16 @@ function optimizeOpenRoute(locations, startIndex = 0, options = {}) {
   const uniqueStartIndexes = Array.from(/* @__PURE__ */ new Set([startIndex, ...startIndexes])).filter((index2) => index2 >= 0 && index2 < locations.length);
   let bestSequence = null;
   let bestScore = Infinity;
+  const objective = chooseObjective(mode);
   for (const candidateStartIndex of uniqueStartIndexes) {
     const nearestSequence = buildNearestNeighborSequence(
       locations,
       candidateStartIndex,
+      objective,
       options
     );
     const inputSequence = locations.map((_, index2) => index2);
-    const clusteredSequence = buildClusteredSequence(locations, options);
+    const clusteredSequence = buildClusteredSequence(locations, objective, options);
     const seedSequences = [
       nearestSequence,
       ...clusteredSequence ? [clusteredSequence] : [],
@@ -3855,6 +3936,7 @@ function optimizeOpenRoute(locations, startIndex = 0, options = {}) {
       const improvedSequence = improveSequenceWithTwoOpt(
         locations,
         seedSequence,
+        objective,
         options
       );
       const candidateSequences = [
@@ -3866,6 +3948,7 @@ function optimizeOpenRoute(locations, startIndex = 0, options = {}) {
         const score = calculateDriverFriendlyScore(
           locations,
           candidateSequence,
+          objective,
           options
         );
         if (score < bestScore) {
@@ -3878,7 +3961,7 @@ function optimizeOpenRoute(locations, startIndex = 0, options = {}) {
   return buildOptimizedRoute(locations, bestSequence ?? [], options);
 }
 function optimizeRoute(locations, mode = "balanced", startIndex = 0, options = {}) {
-  return optimizeOpenRoute(locations, startIndex, options);
+  return optimizeOpenRoute(locations, mode, startIndex, options);
 }
 function validateLocations(locations) {
   if (!locations || locations.length === 0) {
@@ -4009,6 +4092,13 @@ async function fetchRoadMatrix(locations, options = {}) {
 function getMetric(matrix, mode, from, to) {
   return mode === "duration" ? matrix.durationsMinutes[from][to] : matrix.distancesKm[from][to];
 }
+function getObjectiveMetric(matrix, objective, from, to) {
+  return calculateObjectiveCost(
+    matrix.distancesKm[from][to],
+    matrix.durationsMinutes[from][to],
+    objective
+  );
+}
 function calculateSequenceMetric(matrix, sequence, mode, startNodeIndex, endNodeIndex) {
   let total = 0;
   if (sequence.length === 0) {
@@ -4024,6 +4114,23 @@ function calculateSequenceMetric(matrix, sequence, mode, startNodeIndex, endNode
     total += getMetric(matrix, mode, sequence[sequence.length - 1], endNodeIndex);
   }
   return total;
+}
+function calculateSequenceObjective2(matrix, sequence, objective, startNodeIndex, endNodeIndex) {
+  const distanceKm = calculateSequenceMetric(
+    matrix,
+    sequence,
+    "distance",
+    startNodeIndex,
+    endNodeIndex
+  );
+  const durationMin = calculateSequenceMetric(
+    matrix,
+    sequence,
+    "duration",
+    startNodeIndex,
+    endNodeIndex
+  );
+  return calculateObjectiveCost(distanceKm, durationMin, objective);
 }
 function buildRoadRoute(matrix, sequence, startNodeIndex, endNodeIndex) {
   return {
@@ -4052,7 +4159,7 @@ function buildNearestSequence(matrix, deliveryNodeIndexes, startIndex, objective
     let nearestIndex = -1;
     let nearestMetric = Infinity;
     for (const candidateIndex of Array.from(available)) {
-      const metric = getMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
       if (metric < nearestMetric) {
         nearestMetric = metric;
         nearestIndex = candidateIndex;
@@ -4067,7 +4174,7 @@ function buildNearestSequence(matrix, deliveryNodeIndexes, startIndex, objective
 }
 function improveSequenceWithTwoOpt2(matrix, initialSequence, objective, startNodeIndex, endNodeIndex) {
   let sequence = [...initialSequence];
-  let bestMetric = calculateSequenceMetric(
+  let bestMetric = calculateSequenceObjective2(
     matrix,
     sequence,
     objective,
@@ -4087,7 +4194,7 @@ function improveSequenceWithTwoOpt2(matrix, initialSequence, objective, startNod
           ...sequence.slice(i, k + 1).reverse(),
           ...sequence.slice(k + 1)
         ];
-        const candidateMetric = calculateSequenceMetric(
+        const candidateMetric = calculateSequenceObjective2(
           matrix,
           candidate,
           objective,
@@ -4113,15 +4220,15 @@ function enforceLocalNearestRoadSequence(matrix, initialSequence, objective, sta
     const plannedNext = initialSequence.find((nodeIndex) => remaining.has(nodeIndex));
     if (plannedNext === void 0) break;
     let nearestIndex = plannedNext;
-    let nearestMetric = getMetric(matrix, objective, currentNodeIndex, plannedNext);
+    let nearestMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
     for (const candidateIndex of Array.from(remaining)) {
-      const metric = getMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
       if (metric < nearestMetric) {
         nearestMetric = metric;
         nearestIndex = candidateIndex;
       }
     }
-    const plannedMetric = getMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
     const jumpIsOperationallyBad = nearestIndex !== plannedNext && isAvoidableLocalJump2(nearestMetric, plannedMetric, localitySettings);
     const nextIndex = jumpIsOperationallyBad ? nearestIndex : plannedNext;
     remaining.delete(nextIndex);
@@ -4137,10 +4244,10 @@ function calculateAvoidableJumpPenalty2(matrix, sequence, objective, startNodeIn
   let penalty = 0;
   for (const plannedNext of sequence) {
     remaining.delete(plannedNext);
-    const plannedMetric = getMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
     let nearestMetric = plannedMetric;
     for (const candidateIndex of [plannedNext, ...Array.from(remaining)]) {
-      const metric = getMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
       if (metric < nearestMetric) {
         nearestMetric = metric;
       }
@@ -4151,9 +4258,6 @@ function calculateAvoidableJumpPenalty2(matrix, sequence, objective, startNodeIn
     currentNodeIndex = plannedNext;
   }
   return penalty;
-}
-function chooseObjective(_mode) {
-  return "duration";
 }
 function buildClusteredDeliveryNodeSequence(locations, deliveryNodeIndexes, options = {}) {
   const clusters = clusterStops(locations, options);
@@ -4263,7 +4367,7 @@ async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startI
         )
       ];
       for (const candidateSequence of candidateSequences) {
-        const metric = calculateSequenceMetric(
+        const metric = calculateSequenceObjective2(
           result.matrix,
           candidateSequence,
           objective,

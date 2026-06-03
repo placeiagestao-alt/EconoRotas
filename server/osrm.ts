@@ -5,9 +5,15 @@ import {
   type OptimizedRoute,
   type RouteOptimizationOptions,
 } from "./optimization";
+import {
+  calculateObjectiveCost,
+  chooseObjective,
+  type RouteMode,
+  type RouteObjective,
+} from "./routeObjective";
 
 type MatrixValue = number[][];
-type MatrixMode = "distance" | "duration";
+type MatrixMetric = "distance" | "duration";
 
 type OsrmTableResponse = {
   code: string;
@@ -204,16 +210,29 @@ async function fetchRoadMatrix(
   }
 }
 
-function getMetric(matrix: RoadMatrix, mode: MatrixMode, from: number, to: number) {
+function getMetric(matrix: RoadMatrix, mode: MatrixMetric, from: number, to: number) {
   return mode === "duration"
     ? matrix.durationsMinutes[from][to]
     : matrix.distancesKm[from][to];
 }
 
+function getObjectiveMetric(
+  matrix: RoadMatrix,
+  objective: RouteObjective,
+  from: number,
+  to: number
+) {
+  return calculateObjectiveCost(
+    matrix.distancesKm[from][to],
+    matrix.durationsMinutes[from][to],
+    objective
+  );
+}
+
 function calculateSequenceMetric(
   matrix: RoadMatrix,
   sequence: number[],
-  mode: MatrixMode,
+  mode: MatrixMetric,
   startNodeIndex?: number,
   endNodeIndex?: number
 ) {
@@ -238,6 +257,30 @@ function calculateSequenceMetric(
   }
 
   return total;
+}
+
+function calculateSequenceObjective(
+  matrix: RoadMatrix,
+  sequence: number[],
+  objective: RouteObjective,
+  startNodeIndex?: number,
+  endNodeIndex?: number
+) {
+  const distanceKm = calculateSequenceMetric(
+    matrix,
+    sequence,
+    "distance",
+    startNodeIndex,
+    endNodeIndex
+  );
+  const durationMin = calculateSequenceMetric(
+    matrix,
+    sequence,
+    "duration",
+    startNodeIndex,
+    endNodeIndex
+  );
+  return calculateObjectiveCost(distanceKm, durationMin, objective);
 }
 
 function buildRoadRoute(
@@ -266,7 +309,7 @@ function buildNearestSequence(
   matrix: RoadMatrix,
   deliveryNodeIndexes: number[],
   startIndex: number,
-  objective: MatrixMode,
+  objective: RouteObjective,
   startNodeIndex?: number
 ) {
   const available = new Set(deliveryNodeIndexes);
@@ -284,7 +327,7 @@ function buildNearestSequence(
     let nearestMetric = Infinity;
 
     for (const candidateIndex of Array.from(available)) {
-      const metric = getMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
       if (metric < nearestMetric) {
         nearestMetric = metric;
         nearestIndex = candidateIndex;
@@ -304,12 +347,12 @@ function buildNearestSequence(
 function improveSequenceWithTwoOpt(
   matrix: RoadMatrix,
   initialSequence: number[],
-  objective: MatrixMode,
+  objective: RouteObjective,
   startNodeIndex?: number,
   endNodeIndex?: number
 ) {
   let sequence = [...initialSequence];
-  let bestMetric = calculateSequenceMetric(
+  let bestMetric = calculateSequenceObjective(
     matrix,
     sequence,
     objective,
@@ -331,7 +374,7 @@ function improveSequenceWithTwoOpt(
           ...sequence.slice(i, k + 1).reverse(),
           ...sequence.slice(k + 1),
         ];
-        const candidateMetric = calculateSequenceMetric(
+        const candidateMetric = calculateSequenceObjective(
           matrix,
           candidate,
           objective,
@@ -354,7 +397,7 @@ function improveSequenceWithTwoOpt(
 function enforceLocalNearestRoadSequence(
   matrix: RoadMatrix,
   initialSequence: number[],
-  objective: MatrixMode,
+  objective: RouteObjective,
   startNodeIndex?: number,
   localityMode: RouteOptimizationOptions["localityMode"] = "local"
 ) {
@@ -368,17 +411,17 @@ function enforceLocalNearestRoadSequence(
     if (plannedNext === undefined) break;
 
     let nearestIndex = plannedNext;
-    let nearestMetric = getMetric(matrix, objective, currentNodeIndex, plannedNext);
+    let nearestMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
 
     for (const candidateIndex of Array.from(remaining)) {
-      const metric = getMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
       if (metric < nearestMetric) {
         nearestMetric = metric;
         nearestIndex = candidateIndex;
       }
     }
 
-    const plannedMetric = getMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
     const jumpIsOperationallyBad =
       nearestIndex !== plannedNext &&
       isAvoidableLocalJump(nearestMetric, plannedMetric, localitySettings);
@@ -395,7 +438,7 @@ function enforceLocalNearestRoadSequence(
 function calculateAvoidableJumpPenalty(
   matrix: RoadMatrix,
   sequence: number[],
-  objective: MatrixMode,
+  objective: RouteObjective,
   startNodeIndex?: number,
   localityMode: RouteOptimizationOptions["localityMode"] = "local"
 ) {
@@ -406,11 +449,11 @@ function calculateAvoidableJumpPenalty(
 
   for (const plannedNext of sequence) {
     remaining.delete(plannedNext);
-    const plannedMetric = getMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
     let nearestMetric = plannedMetric;
 
     for (const candidateIndex of [plannedNext, ...Array.from(remaining)]) {
-      const metric = getMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
       if (metric < nearestMetric) {
         nearestMetric = metric;
       }
@@ -424,12 +467,6 @@ function calculateAvoidableJumpPenalty(
   }
 
   return penalty;
-}
-
-function chooseObjective(
-  _mode: "shortest_distance" | "shortest_time" | "balanced"
-): MatrixMode {
-  return "duration";
 }
 
 function buildClusteredDeliveryNodeSequence(
@@ -532,7 +569,7 @@ export async function buildSequentialRouteWithRoadMetrics(
 
 export async function optimizeRouteWithRoadMetrics(
   locations: Location[],
-  mode: "shortest_distance" | "shortest_time" | "balanced" = "balanced",
+  mode: RouteMode = "balanced",
   startIndex: number = 0,
   options: RouteOptimizationOptions = {}
 ): Promise<OptimizedRoute | null> {
@@ -592,7 +629,7 @@ export async function optimizeRouteWithRoadMetrics(
       ];
 
       for (const candidateSequence of candidateSequences) {
-        const metric = calculateSequenceMetric(
+        const metric = calculateSequenceObjective(
           result.matrix,
           candidateSequence,
           objective,
