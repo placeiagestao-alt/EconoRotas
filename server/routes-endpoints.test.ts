@@ -257,7 +257,7 @@ describe("Route endpoints", () => {
     expect(stops.map((stop: any) => Number(stop.sequence))).toEqual([0, 1, 2]);
   });
 
-  it("respects input stop order when sequential routing is requested", async () => {
+  it("corrects incoherent input stop order even when sequential routing is requested", async () => {
     const caller = appRouter.createCaller(createAuthContext(8203));
 
     const result = await caller.routes.createAndOptimize({
@@ -287,10 +287,56 @@ describe("Route endpoints", () => {
     });
 
     const stops = await caller.stops.list({ routeId: result.route.id });
+    expect(result.optimization?.auditSource).toContain("audit");
+    expect(
+      result.optimization?.audit.issues.some(
+        (issue: any) =>
+          issue.type === "nearby_stop_skipped" || issue.type === "region_revisited"
+      )
+    ).toBe(false);
     expect(stops.map((stop: any) => stop.address)).toEqual([
       "Rua Jose Bongiovani, 100, Presidente Prudente - SP",
-      "Rua Jose Bongiovani, 200, Presidente Prudente - SP",
       "Rua Jose Bongiovani, 300, Presidente Prudente - SP",
+      "Rua Jose Bongiovani, 200, Presidente Prudente - SP",
+    ]);
+    expect(stops.map((stop: any) => Number(stop.sequence))).toEqual([0, 1, 2]);
+  });
+
+  it("keeps coherent input stop order when sequential routing is requested", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8215));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Rota por STOP coerente",
+      mode: "balanced",
+      respectInputSequence: true,
+      stops: [
+        {
+          address: "Rua Sequencial, 100, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+        },
+        {
+          address: "Rua Sequencial, 200, Presidente Prudente - SP",
+          latitude: -22.1217,
+          longitude: -51.3889,
+          sequence: 1,
+        },
+        {
+          address: "Rua Sequencial, 300, Presidente Prudente - SP",
+          latitude: -22.1227,
+          longitude: -51.3889,
+          sequence: 2,
+        },
+      ],
+    });
+
+    const stops = await caller.stops.list({ routeId: result.route.id });
+    expect(result.optimization?.auditSource).not.toContain("audit-corrected");
+    expect(stops.map((stop: any) => stop.address)).toEqual([
+      "Rua Sequencial, 100, Presidente Prudente - SP",
+      "Rua Sequencial, 200, Presidente Prudente - SP",
+      "Rua Sequencial, 300, Presidente Prudente - SP",
     ]);
     expect(stops.map((stop: any) => Number(stop.sequence))).toEqual([0, 1, 2]);
   });

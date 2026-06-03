@@ -67,6 +67,36 @@ function roundKm(value: number) {
   return Math.round(value * 100) / 100;
 }
 
+function stopLabel(sequence: number | undefined) {
+  return sequence === undefined ? "" : `parada ${sequence + 1}`;
+}
+
+function describeExpectedPlacement(
+  movedSequence: number,
+  anchorSequence: number | undefined,
+  beforeSequence: number,
+  distanceKm: number,
+  skippedDistanceKm: number
+) {
+  const moved = stopLabel(movedSequence);
+  const before = stopLabel(beforeSequence);
+
+  if (anchorSequence === undefined) {
+    return `${moved} esta a ${roundKm(
+      distanceKm
+    )} km da origem e foi pulada antes da ${before}. Ela deve entrar no inicio da rota, antes da ${before}, porque seguir para a ${before} gera um deslocamento de ${roundKm(
+      skippedDistanceKm
+    )} km.`;
+  }
+
+  const anchor = stopLabel(anchorSequence);
+  return `${moved} esta a ${roundKm(
+    distanceKm
+  )} km da ${anchor} e foi deixada para depois da ${before}. Ela deve ficar junto dessa regiao, logo apos a ${anchor} e antes da ${before}, porque seguir para a ${before} gera um deslocamento de ${roundKm(
+    skippedDistanceKm
+  )} km.`;
+}
+
 function coordinateKey(stop: AuditableStop) {
   return `${stop.latitude.toFixed(COORDINATE_PRECISION)},${stop.longitude.toFixed(
     COORDINATE_PRECISION
@@ -277,9 +307,13 @@ export function auditRouteSequence(
         title: immediateSkip
           ? "Parada muito próxima foi pulada"
           : "Parada próxima deixada para depois",
-        message: `A sequência escolheu uma parada a ${roundKm(
+        message: describeExpectedPlacement(
+          nearest.sequence,
+          index === 0 ? undefined : routeableStops[index - 1].sequence,
+          planned.sequence,
+          nearestDistance,
           plannedDistance
-        )} km, mas havia outra pendente a ${roundKm(nearestDistance)} km.`,
+        ),
         fromSequence: index === 0 ? undefined : routeableStops[index - 1].sequence,
         toSequence: planned.sequence,
         nearestSequence: nearest.sequence,
@@ -299,11 +333,13 @@ export function auditRouteSequence(
           type: "region_revisited",
           severity: "high",
           title: "Retorno desnecessario para regiao proxima",
-          message: `A rota sai para ${roundKm(
+          message: describeExpectedPlacement(
+            later.sequence,
+            index === 0 ? undefined : routeableStops[index - 1].sequence,
+            planned.sequence,
+            returnDistance,
             plannedDistance
-          )} km, mas ainda existe parada a ${roundKm(
-            returnDistance
-          )} km da regiao atual que ficara para depois.`,
+          ),
           fromSequence: index === 0 ? undefined : routeableStops[index - 1].sequence,
           toSequence: planned.sequence,
           nearestSequence: later.sequence,
@@ -391,3 +427,4 @@ export function auditRouteSequence(
     issues,
   };
 }
+

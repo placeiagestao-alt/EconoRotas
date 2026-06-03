@@ -3688,6 +3688,26 @@ var BRAZIL_LONGITUDE_MAX = -28;
 function roundKm(value) {
   return Math.round(value * 100) / 100;
 }
+function stopLabel(sequence) {
+  return sequence === void 0 ? "" : `parada ${sequence + 1}`;
+}
+function describeExpectedPlacement(movedSequence, anchorSequence, beforeSequence, distanceKm, skippedDistanceKm) {
+  const moved = stopLabel(movedSequence);
+  const before = stopLabel(beforeSequence);
+  if (anchorSequence === void 0) {
+    return `${moved} esta a ${roundKm(
+      distanceKm
+    )} km da origem e foi pulada antes da ${before}. Ela deve entrar no inicio da rota, antes da ${before}, porque seguir para a ${before} gera um deslocamento de ${roundKm(
+      skippedDistanceKm
+    )} km.`;
+  }
+  const anchor = stopLabel(anchorSequence);
+  return `${moved} esta a ${roundKm(
+    distanceKm
+  )} km da ${anchor} e foi deixada para depois da ${before}. Ela deve ficar junto dessa regiao, logo apos a ${anchor} e antes da ${before}, porque seguir para a ${before} gera um deslocamento de ${roundKm(
+    skippedDistanceKm
+  )} km.`;
+}
 function coordinateKey(stop) {
   return `${stop.latitude.toFixed(COORDINATE_PRECISION)},${stop.longitude.toFixed(
     COORDINATE_PRECISION
@@ -3844,9 +3864,13 @@ function auditRouteSequence(stops2, options = {}) {
         type: "nearby_stop_skipped",
         severity: immediateSkip ? "critical" : "high",
         title: immediateSkip ? "Parada muito pr\xF3xima foi pulada" : "Parada pr\xF3xima deixada para depois",
-        message: `A sequ\xEAncia escolheu uma parada a ${roundKm(
+        message: describeExpectedPlacement(
+          nearest.sequence,
+          index2 === 0 ? void 0 : routeableStops[index2 - 1].sequence,
+          planned.sequence,
+          nearestDistance,
           plannedDistance
-        )} km, mas havia outra pendente a ${roundKm(nearestDistance)} km.`,
+        ),
         fromSequence: index2 === 0 ? void 0 : routeableStops[index2 - 1].sequence,
         toSequence: planned.sequence,
         nearestSequence: nearest.sequence,
@@ -3862,11 +3886,13 @@ function auditRouteSequence(stops2, options = {}) {
           type: "region_revisited",
           severity: "high",
           title: "Retorno desnecessario para regiao proxima",
-          message: `A rota sai para ${roundKm(
+          message: describeExpectedPlacement(
+            later.sequence,
+            index2 === 0 ? void 0 : routeableStops[index2 - 1].sequence,
+            planned.sequence,
+            returnDistance,
             plannedDistance
-          )} km, mas ainda existe parada a ${roundKm(
-            returnDistance
-          )} km da regiao atual que ficara para depois.`,
+          ),
           fromSequence: index2 === 0 ? void 0 : routeableStops[index2 - 1].sequence,
           toSequence: planned.sequence,
           nearestSequence: later.sequence,
@@ -4552,6 +4578,7 @@ var BLOCKING_AUDIT_ISSUE_TYPES = /* @__PURE__ */ new Set([
   "generic_address"
 ]);
 var DUPLICATE_COORDINATE_BLOCKING_GROUPS = 3;
+var MAX_AUDIT_CORRECTION_ATTEMPTS = 20;
 var imileCredentialInput = z2.object({
   label: z2.string().max(255).optional(),
   baseUrl: z2.string().url().optional().or(z2.literal("")),
@@ -4690,13 +4717,13 @@ function getBlockingAuditIssues(audit) {
   return audit.issues.filter((issue) => BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type));
 }
 function getPostOptimizationBlockingReason(audit) {
-  const criticalNearbySkip = audit.issues.find(
-    (issue) => issue.type === "nearby_stop_skipped" && issue.severity === "critical"
+  const nearbySkip = audit.issues.find(
+    (issue) => issue.type === "nearby_stop_skipped" && (issue.severity === "critical" || issue.severity === "high")
   );
-  if (criticalNearbySkip) {
+  if (nearbySkip) {
     return {
-      issue: criticalNearbySkip,
-      message: `${criticalNearbySkip.title}: ${criticalNearbySkip.message}`
+      issue: nearbySkip,
+      message: `${nearbySkip.title}: ${nearbySkip.message}`
     };
   }
   const regionRevisited = audit.issues.find(
@@ -4721,6 +4748,38 @@ function getPostOptimizationBlockingReason(audit) {
 }
 function isSequenceCoherenceIssue(issue) {
   return issue.type === "nearby_stop_skipped" || issue.type === "region_revisited";
+}
+function routeWaypointSignature(route) {
+  return route.waypoints.map(
+    (waypoint) => [
+      waypoint.latitude.toFixed(6),
+      waypoint.longitude.toFixed(6),
+      waypoint.address ?? ""
+    ].join(",")
+  ).join("|");
+}
+function reorderRouteByAuditIssue(route, issue) {
+  if (!isSequenceCoherenceIssue(issue) || issue.nearestSequence === void 0 || issue.toSequence === void 0) {
+    return null;
+  }
+  const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
+  const nearestIndex = waypoints.findIndex(
+    (waypoint) => waypoint.sequence === issue.nearestSequence
+  );
+  const plannedIndex = waypoints.findIndex(
+    (waypoint) => waypoint.sequence === issue.toSequence
+  );
+  if (nearestIndex < 0 || plannedIndex < 0 || nearestIndex <= plannedIndex) {
+    return null;
+  }
+  const [nearestWaypoint] = waypoints.splice(nearestIndex, 1);
+  waypoints.splice(plannedIndex, 0, nearestWaypoint);
+  return waypoints.map((waypoint) => ({
+    latitude: waypoint.latitude,
+    longitude: waypoint.longitude,
+    address: waypoint.address,
+    notes: waypoint.notes
+  }));
 }
 function assertRouteStopsReadyForOptimization(routeStops) {
   const audit = auditRouteSequence(routeStopsToAuditableStops(routeStops));
@@ -4834,6 +4893,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
   }
   const mode = requestedMode || route.mode;
   async function buildOptimizationAttempt(attempt) {
+    const attemptLocations = attempt.orderedLocations ?? locations;
     const roadMetricOptions = {
       startLocation,
       endLocation,
@@ -4843,20 +4903,26 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     let auditSource2 = "geo-default";
     if (attempt.respectInputSequence) {
       optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
-        locations,
+        attemptLocations,
         roadMetricOptions
       );
       auditSource2 = optimizedWithRoadMetrics ? "road-sequential" : "geo-sequential";
+    } else if (attempt.orderedLocations) {
+      optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
+        attemptLocations,
+        roadMetricOptions
+      );
+      auditSource2 = optimizedWithRoadMetrics ? "road-audit-repair" : "geo-audit-repair";
     } else {
       optimizedWithRoadMetrics = await optimizeRouteWithRoadMetrics(
-        locations,
+        attemptLocations,
         mode,
         0,
         roadMetricOptions
       );
       auditSource2 = optimizedWithRoadMetrics ? "road-default" : "geo-default";
     }
-    const optimized2 = optimizedWithRoadMetrics ?? (attempt.respectInputSequence ? buildSequentialRoute(locations, roadMetricOptions) : optimizeRoute(locations, mode, 0, roadMetricOptions));
+    const optimized2 = optimizedWithRoadMetrics ?? (attempt.respectInputSequence ? buildSequentialRoute(attemptLocations, roadMetricOptions) : attempt.orderedLocations ? buildSequentialRoute(attemptLocations, roadMetricOptions) : optimizeRoute(attemptLocations, mode, 0, roadMetricOptions));
     const audit2 = auditOptimizedRoute(optimized2, {
       startLocation,
       usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
@@ -4878,8 +4944,10 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
   let postOptimizationBlockingReason = getPostOptimizationBlockingReason(
     optimizationAttempt.audit
   );
-  if (postOptimizationBlockingReason && isSequenceCoherenceIssue(postOptimizationBlockingReason.issue) && (optimizationAttempt.localityMode !== "strict" || optimizationAttempt.respectInputSequence)) {
-    const firstBlockingReason = postOptimizationBlockingReason;
+  let firstBlockingReason = postOptimizationBlockingReason;
+  const correctionAttempts = [];
+  if (postOptimizationBlockingReason && isSequenceCoherenceIssue(postOptimizationBlockingReason.issue)) {
+    const firstBlockingIssue = postOptimizationBlockingReason.issue;
     optimizationAttempt = await buildOptimizationAttempt({
       localityMode: "strict",
       respectInputSequence: false,
@@ -4888,6 +4956,47 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     postOptimizationBlockingReason = getPostOptimizationBlockingReason(
       optimizationAttempt.audit
     );
+    correctionAttempts.push({
+      blockingIssue: firstBlockingIssue,
+      auditSource: optimizationAttempt.auditSource,
+      status: optimizationAttempt.audit.status,
+      score: optimizationAttempt.audit.score,
+      issueCount: optimizationAttempt.audit.issueCount
+    });
+    const seenSignatures = /* @__PURE__ */ new Set([routeWaypointSignature(optimizationAttempt.optimized)]);
+    const maxRepairAttempts = Math.min(
+      MAX_AUDIT_CORRECTION_ATTEMPTS,
+      Math.max(1, locations.length * 2)
+    );
+    for (let repairAttempt = 0; postOptimizationBlockingReason && isSequenceCoherenceIssue(postOptimizationBlockingReason.issue) && repairAttempt < maxRepairAttempts; repairAttempt += 1) {
+      const repairedLocations = reorderRouteByAuditIssue(
+        optimizationAttempt.optimized,
+        postOptimizationBlockingReason.issue
+      );
+      if (!repairedLocations) break;
+      const repairedAttempt = await buildOptimizationAttempt({
+        localityMode: "strict",
+        respectInputSequence: false,
+        auditSourceSuffix: `audit-repaired-${repairAttempt + 1}`,
+        orderedLocations: repairedLocations
+      });
+      const signature = routeWaypointSignature(repairedAttempt.optimized);
+      if (seenSignatures.has(signature)) break;
+      seenSignatures.add(signature);
+      correctionAttempts.push({
+        blockingIssue: postOptimizationBlockingReason.issue,
+        auditSource: repairedAttempt.auditSource,
+        status: repairedAttempt.audit.status,
+        score: repairedAttempt.audit.score,
+        issueCount: repairedAttempt.audit.issueCount
+      });
+      optimizationAttempt = repairedAttempt;
+      postOptimizationBlockingReason = getPostOptimizationBlockingReason(
+        optimizationAttempt.audit
+      );
+    }
+  }
+  if (correctionAttempts.length > 0 && firstBlockingReason) {
     await createOperationalEvent({
       userId,
       routeId,
@@ -4896,7 +5005,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       severity: postOptimizationBlockingReason ? "warning" : "info",
       source: "routes.audit",
       title: postOptimizationBlockingReason ? "Auditor tentou corrigir a sequ\xEAncia" : "Auditor corrigiu a sequ\xEAncia",
-      message: postOptimizationBlockingReason ? `A segunda otimiza\xE7\xE3o ainda tem incoer\xEAncia. ${postOptimizationBlockingReason.message}` : `A rota foi reotimizada em modo r\xEDgido ap\xF3s o fiscal detectar incoer\xEAncia. ${firstBlockingReason.message}`,
+      message: postOptimizationBlockingReason ? `O fiscal tentou ${correctionAttempts.length} correcao(oes), mas a rota ainda tem incoerencia. ${postOptimizationBlockingReason.message}` : `A rota foi reotimizada em modo r\xEDgido ap\xF3s o fiscal detectar incoer\xEAncia. ${firstBlockingReason.message}`,
       runtime: null,
       url: null,
       userAgent: null,
@@ -4907,6 +5016,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         finalScore: optimizationAttempt.audit.score,
         finalIssueCount: optimizationAttempt.audit.issueCount,
         finalIssues: optimizationAttempt.audit.issues.slice(0, 8),
+        correctionAttempts,
         localityMode: optimizationAttempt.localityMode,
         respectInputSequence: optimizationAttempt.respectInputSequence,
         auditSource: optimizationAttempt.auditSource
