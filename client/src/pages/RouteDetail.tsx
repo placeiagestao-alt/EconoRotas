@@ -353,7 +353,8 @@ export default function RouteDetail() {
       ]);
       toast.success("Rota restante reotimizada.");
     },
-    onError: (error) => {
+    onError: async (error) => {
+      await utils.routes.audit.invalidate({ id: routeId });
       toast.error(error.message || "Não foi possível reotimizar as paradas restantes.");
     },
   });
@@ -368,7 +369,8 @@ export default function RouteDetail() {
       ]);
       toast.success("Rota otimizada.");
     },
-    onError: (error) => {
+    onError: async (error) => {
+      await utils.routes.audit.invalidate({ id: routeId });
       toast.error(error.message || "Não foi possível otimizar a rota.");
     },
   });
@@ -1086,6 +1088,14 @@ export default function RouteDetail() {
   };
 
   const handleOptimizeRoute = async () => {
+    if (hasBlockingAuditIssues) {
+      const firstIssue = blockingAuditIssues[0];
+      toast.error(
+        `${firstIssue.title}: corrija os problemas apontados pelo fiscal antes de otimizar.`
+      );
+      return;
+    }
+
     if (stops.length < 2) {
       toast.error("Adicione pelo menos 2 paradas para otimizar.");
       return;
@@ -1114,6 +1124,14 @@ export default function RouteDetail() {
   };
 
   const handleOptimizeRemainingRoute = async () => {
+    if (hasBlockingAuditIssues) {
+      const firstIssue = blockingAuditIssues[0];
+      toast.error(
+        `${firstIssue.title}: corrija os problemas apontados pelo fiscal antes de reotimizar.`
+      );
+      return;
+    }
+
     if (remainingStopsCount < 2) {
       toast.error("A rota precisa ter pelo menos 2 paradas pendentes para reotimizar.");
       return;
@@ -1143,6 +1161,14 @@ export default function RouteDetail() {
   };
 
   const handleImproveRoutePreference = async () => {
+    if (hasBlockingAuditIssues) {
+      const firstIssue = blockingAuditIssues[0];
+      toast.error(
+        `${firstIssue.title}: corrija os problemas apontados pelo fiscal antes de ajustar a sequência.`
+      );
+      return;
+    }
+
     if (remainingStopsCount < 2) {
       toast.error("A rota precisa ter pelo menos 2 paradas pendentes para ajustar a sequência.");
       return;
@@ -1378,7 +1404,9 @@ export default function RouteDetail() {
                 stops.length < 2 ||
                 optimizeRouteMutation.isPending ||
                 optimizeRemainingMutation.isPending ||
-                isLocatingForReoptimization
+                isLocatingForReoptimization ||
+                auditQuery.isLoading ||
+                hasBlockingAuditIssues
               }
             >
               <Zap className="mr-2 h-4 w-4" />
@@ -1392,7 +1420,9 @@ export default function RouteDetail() {
                 remainingStopsCount < 2 ||
                 optimizeRouteMutation.isPending ||
                 optimizeRemainingMutation.isPending ||
-                isLocatingForReoptimization
+                isLocatingForReoptimization ||
+                auditQuery.isLoading ||
+                hasBlockingAuditIssues
               }
             >
               <Zap className="mr-2 h-4 w-4" />
@@ -1410,7 +1440,9 @@ export default function RouteDetail() {
                 remainingStopsCount < 2 ||
                 optimizeRouteMutation.isPending ||
                 optimizeRemainingMutation.isPending ||
-                isLocatingForReoptimization
+                isLocatingForReoptimization ||
+                auditQuery.isLoading ||
+                hasBlockingAuditIssues
               }
             >
               <Navigation className="mr-2 h-4 w-4" />
