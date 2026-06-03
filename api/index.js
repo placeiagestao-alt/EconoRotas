@@ -1502,6 +1502,83 @@ async function getLatestRouteOptimizationEvent(routeId, userId) {
   ).orderBy(desc(operationalEvents.createdAt)).limit(1);
   return result[0] ?? null;
 }
+function parseOperationalMetadata(metadata) {
+  if (!metadata) return {};
+  if (typeof metadata === "string") {
+    try {
+      const parsed = JSON.parse(metadata);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof metadata === "object" ? metadata : {};
+}
+function metadataNumber(metadata, keys) {
+  for (const key of keys) {
+    const value = metadata[key];
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return void 0;
+}
+function collectIssueTypes(value) {
+  if (!value) return [];
+  const values = Array.isArray(value) ? value : [value];
+  const issueTypes = [];
+  for (const item of values) {
+    if (!item || typeof item !== "object") continue;
+    const issue = item;
+    if (typeof issue.type === "string") issueTypes.push(issue.type);
+    if (issue.blockingIssue?.type) issueTypes.push(String(issue.blockingIssue.type));
+  }
+  return issueTypes;
+}
+function buildRouteQualityDashboard(events) {
+  const routeEvents = events.filter((event) => String(event.type || "").startsWith("route_"));
+  const scores = [];
+  let corrections = 0;
+  let revisitsAvoided = 0;
+  let prematureExitsCorrected = 0;
+  let routeCrossingsDetected = 0;
+  let estimatedKmSaved = 0;
+  for (const event of routeEvents) {
+    const metadata = parseOperationalMetadata(event.metadata);
+    const score = metadataNumber(metadata, ["auditScore", "finalScore", "score"]);
+    if (score !== void 0) scores.push(score);
+    const issueTypes = [
+      ...collectIssueTypes(metadata.firstBlockingIssue),
+      ...collectIssueTypes(metadata.issues),
+      ...collectIssueTypes(metadata.finalIssues),
+      ...collectIssueTypes(metadata.correctionAttempts)
+    ];
+    if (event.type === "route_audit_corrected_optimization") {
+      corrections += 1;
+      if (issueTypes.includes("region_revisited")) revisitsAvoided += 1;
+      if (issueTypes.includes("premature_region_exit")) prematureExitsCorrected += 1;
+    }
+    if (issueTypes.includes("route_crossing")) routeCrossingsDetected += 1;
+    const firstBlockingIssue = metadata.firstBlockingIssue;
+    if (firstBlockingIssue && typeof firstBlockingIssue === "object") {
+      const distanceKm = Number(firstBlockingIssue.distanceKm);
+      const nearestDistanceKm = Number(firstBlockingIssue.nearestDistanceKm);
+      if (Number.isFinite(distanceKm) && Number.isFinite(nearestDistanceKm) && distanceKm > nearestDistanceKm) {
+        estimatedKmSaved += distanceKm - nearestDistanceKm;
+      }
+    }
+  }
+  const averageScore = scores.length > 0 ? scores.reduce((total, score) => total + score, 0) / scores.length : 0;
+  return {
+    averageScore: Math.round(averageScore * 10) / 10,
+    scoredRoutes: scores.length,
+    corrections,
+    revisitsAvoided,
+    prematureExitsCorrected,
+    routeCrossingsDetected,
+    estimatedKmSaved: Math.round(estimatedKmSaved * 10) / 10,
+    estimatedMinutesSaved: Math.round(estimatedKmSaved * 2.5)
+  };
+}
 async function getAdminOperationalDashboard() {
   const db = await getDb();
   if (!db) {
@@ -1514,6 +1591,7 @@ async function getAdminOperationalDashboard() {
       const events = sortByDateDesc(memory.operationalEvents, "createdAt");
       const recentUsers2 = sortByDateDesc(memory.users, "createdAt").slice(0, 8);
       const recentRoutes2 = sortByDateDesc(memory.routes, "createdAt").slice(0, 8);
+      const routeQuality2 = buildRouteQualityDashboard(events.slice(0, 200));
       return {
         stats: {
           usersTotal: memory.users.length,
@@ -1531,6 +1609,7 @@ async function getAdminOperationalDashboard() {
             (event) => now - new Date(event.createdAt).getTime() <= oneDay && event.severity === "warning" && event.type.startsWith("route_")
           ).length
         },
+        routeQuality: routeQuality2,
         recentUsers: recentUsers2,
         recentRoutes: recentRoutes2,
         recentEvents: events.slice(0, 12)
@@ -1557,6 +1636,8 @@ async function getAdminOperationalDashboard() {
       sql`${operationalEvents.type} LIKE 'route_%'`
     )
   );
+  const recentOperationalEvents = await getRecentOperationalEvents(200);
+  const routeQuality = buildRouteQualityDashboard(recentOperationalEvents);
   const recentUsers = await db.select({
     id: users.id,
     name: users.name,
@@ -1588,9 +1669,10 @@ async function getAdminOperationalDashboard() {
       criticalEvents24h: Number(criticalEvents24h?.count || 0),
       routeWarnings24h: Number(routeWarnings24h?.count || 0)
     },
+    routeQuality,
     recentUsers,
     recentRoutes,
-    recentEvents: await getRecentOperationalEvents(12)
+    recentEvents: recentOperationalEvents.slice(0, 12)
   };
 }
 async function getUserStats(userId, days = 30) {
@@ -3061,7 +3143,7 @@ function getLocalitySettings(localityMode = "local") {
       penaltyMultiplier: 4,
       clusterRadiusKm: 0.45,
       clusterRevisitPenaltyKm: 8,
-      prematureClusterSwitchPenalty: 5e3
+      prematureClusterSwitchPenalty: 18
     };
   }
   if (localityMode === "balanced") {
@@ -3075,7 +3157,7 @@ function getLocalitySettings(localityMode = "local") {
       penaltyMultiplier: 2,
       clusterRadiusKm: 0.9,
       clusterRevisitPenaltyKm: 4,
-      prematureClusterSwitchPenalty: 5e3
+      prematureClusterSwitchPenalty: 8
     };
   }
   return {
@@ -3088,7 +3170,7 @@ function getLocalitySettings(localityMode = "local") {
     penaltyMultiplier: 3,
     clusterRadiusKm: 0.65,
     clusterRevisitPenaltyKm: 6,
-    prematureClusterSwitchPenalty: 5e3
+    prematureClusterSwitchPenalty: 12
   };
 }
 function isAvoidableLocalJump(nearestDistance, plannedDistance, settings) {
@@ -3425,9 +3507,17 @@ function calculateClusterRevisitPenalty(locations, sequence, options = {}) {
       continue;
     }
     if (activeCluster !== void 0 && activeCluster !== clusterId) {
-      const hasPendingInPreviousCluster = sequence.slice(sequenceIndex + 1).some((laterStopIndex) => clusterByStopIndex.get(laterStopIndex) === activeCluster);
-      if (hasPendingInPreviousCluster) {
-        penalty += settings.prematureClusterSwitchPenalty;
+      const pendingInPreviousCluster = sequence.slice(sequenceIndex + 1).filter((laterStopIndex) => clusterByStopIndex.get(laterStopIndex) === activeCluster);
+      if (pendingInPreviousCluster.length > 0) {
+        const switchDistance = calculateDistance(
+          locations[sequence[sequenceIndex - 1]],
+          locations[stopIndex]
+        );
+        const averagePendingDistance = pendingInPreviousCluster.reduce(
+          (total, laterStopIndex) => total + calculateDistance(locations[sequence[sequenceIndex - 1]], locations[laterStopIndex]),
+          0
+        ) / pendingInPreviousCluster.length;
+        penalty += settings.prematureClusterSwitchPenalty * pendingInPreviousCluster.length + switchDistance * settings.penaltyMultiplier + averagePendingDistance * settings.penaltyMultiplier;
       }
       closedClusters.add(activeCluster);
     }
@@ -3523,7 +3613,7 @@ function getLocalitySettings2(localityMode = "local") {
       extraThreshold: 0.08,
       longJumpThreshold: 0.35,
       penaltyMultiplier: 4,
-      prematureClusterSwitchPenalty: 5e3
+      prematureClusterSwitchPenalty: 30
     };
   }
   if (localityMode === "balanced") {
@@ -3535,7 +3625,7 @@ function getLocalitySettings2(localityMode = "local") {
       extraThreshold: 0.35,
       longJumpThreshold: 1.25,
       penaltyMultiplier: 2,
-      prematureClusterSwitchPenalty: 5e3
+      prematureClusterSwitchPenalty: 15
     };
   }
   return {
@@ -3546,7 +3636,7 @@ function getLocalitySettings2(localityMode = "local") {
     extraThreshold: 0.18,
     longJumpThreshold: 0.7,
     penaltyMultiplier: 3,
-    prematureClusterSwitchPenalty: 5e3
+    prematureClusterSwitchPenalty: 20
   };
 }
 function isAvoidableLocalJump2(nearestMetric, plannedMetric, settings) {
@@ -3803,9 +3893,16 @@ function calculateClusterSwitchPenalty(matrix, locations, sequence, localityMode
     if (!previousCluster || !currentCluster || previousCluster === currentCluster) {
       continue;
     }
-    const hasPendingInPreviousCluster = sequence.slice(sequenceIndex + 1).some((nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster);
-    if (hasPendingInPreviousCluster) {
-      penalty += settings.prematureClusterSwitchPenalty;
+    const pendingInPreviousCluster = sequence.slice(sequenceIndex + 1).filter((nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster);
+    if (pendingInPreviousCluster.length > 0) {
+      const fromNode = sequence[sequenceIndex - 1];
+      const toNode = sequence[sequenceIndex];
+      const switchDuration = matrix.durationsMinutes[fromNode]?.[toNode] ?? 0;
+      const averagePendingDuration = pendingInPreviousCluster.reduce(
+        (total, pendingNode) => total + (matrix.durationsMinutes[fromNode]?.[pendingNode] ?? 0),
+        0
+      ) / pendingInPreviousCluster.length;
+      penalty += settings.prematureClusterSwitchPenalty * pendingInPreviousCluster.length + switchDuration * settings.penaltyMultiplier + averagePendingDuration * settings.penaltyMultiplier;
     }
   }
   return penalty;

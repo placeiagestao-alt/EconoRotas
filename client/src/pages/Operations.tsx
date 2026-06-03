@@ -7,6 +7,7 @@ import { trpc } from "@/lib/trpc";
 import {
   Activity,
   AlertTriangle,
+  Gauge,
   MapPinned,
   Route,
   ShieldCheck,
@@ -67,6 +68,7 @@ export default function Operations() {
 
   const data = dashboardQuery.data;
   const stats = data?.stats;
+  const routeQuality = (data as any)?.routeQuality;
 
   return (
     <DashboardLayout>
@@ -97,6 +99,71 @@ export default function Operations() {
             <StatCard title="Erros 24h" value={stats?.criticalEvents24h ?? 0} icon={AlertTriangle} />
             <StatCard title="Alertas de rota 24h" value={stats?.routeWarnings24h ?? 0} icon={MapPinned} />
           </div>
+        )}
+
+        {dashboardQuery.isLoading ? (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            {Array.from({ length: 8 }).map((_, index) => (
+              <Skeleton key={index} className="h-28 rounded-xl" />
+            ))}
+          </div>
+        ) : (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Gauge className="h-5 w-5 text-primary" />
+                Route Quality Dashboard
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <StatCard
+                  title="Score medio"
+                  value={Math.round(routeQuality?.averageScore ?? 0)}
+                  icon={Gauge}
+                />
+                <StatCard
+                  title="Rotas avaliadas"
+                  value={routeQuality?.scoredRoutes ?? 0}
+                  icon={Route}
+                />
+                <StatCard
+                  title="Correcoes do fiscal"
+                  value={routeQuality?.corrections ?? 0}
+                  icon={ShieldCheck}
+                />
+                <StatCard
+                  title="Revisitas evitadas"
+                  value={routeQuality?.revisitsAvoided ?? 0}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Saidas corrigidas"
+                  value={routeQuality?.prematureExitsCorrected ?? 0}
+                  icon={AlertTriangle}
+                />
+                <StatCard
+                  title="Cruzamentos detectados"
+                  value={routeQuality?.routeCrossingsDetected ?? 0}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="KM economizados"
+                  value={Math.round(routeQuality?.estimatedKmSaved ?? 0)}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Min. economizados"
+                  value={routeQuality?.estimatedMinutesSaved ?? 0}
+                  icon={Activity}
+                />
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">
+                Economia estimada a partir dos alertas corrigidos pelo fiscal.
+                Dados reais de antes/depois entram quando houver telemetria de execucao completa.
+              </p>
+            </CardContent>
+          </Card>
         )}
 
         <div className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">

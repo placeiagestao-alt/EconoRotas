@@ -61,7 +61,7 @@ function getLocalitySettings(
       penaltyMultiplier: 4,
       clusterRadiusKm: 0.45,
       clusterRevisitPenaltyKm: 8,
-      prematureClusterSwitchPenalty: 5000,
+      prematureClusterSwitchPenalty: 18,
     };
   }
 
@@ -76,7 +76,7 @@ function getLocalitySettings(
       penaltyMultiplier: 2,
       clusterRadiusKm: 0.9,
       clusterRevisitPenaltyKm: 4,
-      prematureClusterSwitchPenalty: 5000,
+      prematureClusterSwitchPenalty: 8,
     };
   }
 
@@ -90,7 +90,7 @@ function getLocalitySettings(
     penaltyMultiplier: 3,
     clusterRadiusKm: 0.65,
     clusterRevisitPenaltyKm: 6,
-    prematureClusterSwitchPenalty: 5000,
+    prematureClusterSwitchPenalty: 12,
   };
 }
 
@@ -604,11 +604,25 @@ function calculateClusterRevisitPenalty(
     }
 
     if (activeCluster !== undefined && activeCluster !== clusterId) {
-      const hasPendingInPreviousCluster = sequence
+      const pendingInPreviousCluster = sequence
         .slice(sequenceIndex + 1)
-        .some((laterStopIndex) => clusterByStopIndex.get(laterStopIndex) === activeCluster);
-      if (hasPendingInPreviousCluster) {
-        penalty += settings.prematureClusterSwitchPenalty;
+        .filter((laterStopIndex) => clusterByStopIndex.get(laterStopIndex) === activeCluster);
+      if (pendingInPreviousCluster.length > 0) {
+        const switchDistance = calculateDistance(
+          locations[sequence[sequenceIndex - 1]],
+          locations[stopIndex]
+        );
+        const averagePendingDistance =
+          pendingInPreviousCluster.reduce(
+            (total, laterStopIndex) =>
+              total + calculateDistance(locations[sequence[sequenceIndex - 1]], locations[laterStopIndex]),
+            0
+          ) / pendingInPreviousCluster.length;
+
+        penalty +=
+          settings.prematureClusterSwitchPenalty * pendingInPreviousCluster.length +
+          switchDistance * settings.penaltyMultiplier +
+          averagePendingDistance * settings.penaltyMultiplier;
       }
       closedClusters.add(activeCluster);
     }

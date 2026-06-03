@@ -50,7 +50,7 @@ function getLocalitySettings(
       extraThreshold: 0.08,
       longJumpThreshold: 0.35,
       penaltyMultiplier: 4,
-      prematureClusterSwitchPenalty: 5000,
+      prematureClusterSwitchPenalty: 30,
     };
   }
 
@@ -63,7 +63,7 @@ function getLocalitySettings(
       extraThreshold: 0.35,
       longJumpThreshold: 1.25,
       penaltyMultiplier: 2,
-      prematureClusterSwitchPenalty: 5000,
+      prematureClusterSwitchPenalty: 15,
     };
   }
 
@@ -75,7 +75,7 @@ function getLocalitySettings(
     extraThreshold: 0.18,
     longJumpThreshold: 0.7,
     penaltyMultiplier: 3,
-    prematureClusterSwitchPenalty: 5000,
+    prematureClusterSwitchPenalty: 20,
   };
 }
 
@@ -487,11 +487,24 @@ function calculateClusterSwitchPenalty(
       continue;
     }
 
-    const hasPendingInPreviousCluster = sequence
+    const pendingInPreviousCluster = sequence
       .slice(sequenceIndex + 1)
-      .some((nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster);
-    if (hasPendingInPreviousCluster) {
-      penalty += settings.prematureClusterSwitchPenalty;
+      .filter((nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster);
+    if (pendingInPreviousCluster.length > 0) {
+      const fromNode = sequence[sequenceIndex - 1];
+      const toNode = sequence[sequenceIndex];
+      const switchDuration = matrix.durationsMinutes[fromNode]?.[toNode] ?? 0;
+      const averagePendingDuration =
+        pendingInPreviousCluster.reduce(
+          (total, pendingNode) =>
+            total + (matrix.durationsMinutes[fromNode]?.[pendingNode] ?? 0),
+          0
+        ) / pendingInPreviousCluster.length;
+
+      penalty +=
+        settings.prematureClusterSwitchPenalty * pendingInPreviousCluster.length +
+        switchDuration * settings.penaltyMultiplier +
+        averagePendingDuration * settings.penaltyMultiplier;
     }
   }
 

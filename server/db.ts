@@ -1787,6 +1787,104 @@ export async function getLatestRouteOptimizationEvent(routeId: number, userId: n
   return result[0] ?? null;
 }
 
+function parseOperationalMetadata(metadata: unknown): Record<string, any> {
+  if (!metadata) return {};
+  if (typeof metadata === "string") {
+    try {
+      const parsed = JSON.parse(metadata);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  return typeof metadata === "object" ? (metadata as Record<string, any>) : {};
+}
+
+function metadataNumber(metadata: Record<string, any>, keys: string[]) {
+  for (const key of keys) {
+    const value = metadata[key];
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+
+  return undefined;
+}
+
+function collectIssueTypes(value: unknown): string[] {
+  if (!value) return [];
+  const values = Array.isArray(value) ? value : [value];
+  const issueTypes: string[] = [];
+
+  for (const item of values) {
+    if (!item || typeof item !== "object") continue;
+    const issue = item as Record<string, any>;
+    if (typeof issue.type === "string") issueTypes.push(issue.type);
+    if (issue.blockingIssue?.type) issueTypes.push(String(issue.blockingIssue.type));
+  }
+
+  return issueTypes;
+}
+
+function buildRouteQualityDashboard(events: any[]) {
+  const routeEvents = events.filter((event) => String(event.type || "").startsWith("route_"));
+  const scores: number[] = [];
+  let corrections = 0;
+  let revisitsAvoided = 0;
+  let prematureExitsCorrected = 0;
+  let routeCrossingsDetected = 0;
+  let estimatedKmSaved = 0;
+
+  for (const event of routeEvents) {
+    const metadata = parseOperationalMetadata(event.metadata);
+    const score = metadataNumber(metadata, ["auditScore", "finalScore", "score"]);
+    if (score !== undefined) scores.push(score);
+
+    const issueTypes = [
+      ...collectIssueTypes(metadata.firstBlockingIssue),
+      ...collectIssueTypes(metadata.issues),
+      ...collectIssueTypes(metadata.finalIssues),
+      ...collectIssueTypes(metadata.correctionAttempts),
+    ];
+
+    if (event.type === "route_audit_corrected_optimization") {
+      corrections += 1;
+      if (issueTypes.includes("region_revisited")) revisitsAvoided += 1;
+      if (issueTypes.includes("premature_region_exit")) prematureExitsCorrected += 1;
+    }
+    if (issueTypes.includes("route_crossing")) routeCrossingsDetected += 1;
+
+    const firstBlockingIssue = metadata.firstBlockingIssue;
+    if (firstBlockingIssue && typeof firstBlockingIssue === "object") {
+      const distanceKm = Number(firstBlockingIssue.distanceKm);
+      const nearestDistanceKm = Number(firstBlockingIssue.nearestDistanceKm);
+      if (
+        Number.isFinite(distanceKm) &&
+        Number.isFinite(nearestDistanceKm) &&
+        distanceKm > nearestDistanceKm
+      ) {
+        estimatedKmSaved += distanceKm - nearestDistanceKm;
+      }
+    }
+  }
+
+  const averageScore =
+    scores.length > 0
+      ? scores.reduce((total, score) => total + score, 0) / scores.length
+      : 0;
+
+  return {
+    averageScore: Math.round(averageScore * 10) / 10,
+    scoredRoutes: scores.length,
+    corrections,
+    revisitsAvoided,
+    prematureExitsCorrected,
+    routeCrossingsDetected,
+    estimatedKmSaved: Math.round(estimatedKmSaved * 10) / 10,
+    estimatedMinutesSaved: Math.round(estimatedKmSaved * 2.5),
+  };
+}
+
 export async function getAdminOperationalDashboard() {
   const db = await getDb();
   if (!db) {
@@ -1800,6 +1898,7 @@ export async function getAdminOperationalDashboard() {
       const events = sortByDateDesc(memory.operationalEvents, "createdAt");
       const recentUsers = sortByDateDesc(memory.users, "createdAt").slice(0, 8);
       const recentRoutes = sortByDateDesc(memory.routes, "createdAt").slice(0, 8);
+      const routeQuality = buildRouteQualityDashboard(events.slice(0, 200));
 
       return {
         stats: {
@@ -1825,6 +1924,7 @@ export async function getAdminOperationalDashboard() {
               event.type.startsWith("route_")
           ).length,
         },
+        routeQuality,
         recentUsers,
         recentRoutes,
         recentEvents: events.slice(0, 12),
@@ -1871,6 +1971,9 @@ export async function getAdminOperationalDashboard() {
       )
     );
 
+  const recentOperationalEvents = await getRecentOperationalEvents(200);
+  const routeQuality = buildRouteQualityDashboard(recentOperationalEvents);
+
   const recentUsers = await db
     .select({
       id: users.id,
@@ -1913,9 +2016,10 @@ export async function getAdminOperationalDashboard() {
       criticalEvents24h: Number(criticalEvents24h?.count || 0),
       routeWarnings24h: Number(routeWarnings24h?.count || 0),
     },
+    routeQuality,
     recentUsers,
     recentRoutes,
-    recentEvents: await getRecentOperationalEvents(12),
+    recentEvents: recentOperationalEvents.slice(0, 12),
   };
 }
 
