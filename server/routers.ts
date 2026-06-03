@@ -250,6 +250,16 @@ function getPostOptimizationBlockingReason(audit: RouteAuditReport) {
     };
   }
 
+  const prematureRegionExit = audit.issues.find(
+    (issue) => issue.type === "premature_region_exit"
+  );
+  if (prematureRegionExit) {
+    return {
+      issue: prematureRegionExit,
+      message: `${prematureRegionExit.title}: ${prematureRegionExit.message}`,
+    };
+  }
+
   const routeCrossing = audit.issues.find((issue) => issue.type === "route_crossing");
   if (routeCrossing) {
     return {
@@ -275,6 +285,7 @@ function isSequenceCoherenceIssue(issue: RouteAuditReport["issues"][number]) {
   return (
     issue.type === "nearby_stop_skipped" ||
     issue.type === "region_revisited" ||
+    issue.type === "premature_region_exit" ||
     issue.type === "route_crossing"
   );
 }
@@ -304,6 +315,36 @@ function reorderRouteByAuditIssue(
   }
 
   const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
+
+  if (issue.type === "premature_region_exit" && issue.pendingSequences?.length) {
+    const plannedIndex = waypoints.findIndex(
+      (waypoint) => waypoint.sequence === issue.toSequence
+    );
+    if (plannedIndex < 0) return null;
+
+    const pendingSequenceSet = new Set(issue.pendingSequences);
+    const pendingWaypoints = waypoints.filter((waypoint) =>
+      pendingSequenceSet.has(waypoint.sequence)
+    );
+    if (pendingWaypoints.length === 0) return null;
+
+    const remainingWaypoints = waypoints.filter(
+      (waypoint) => !pendingSequenceSet.has(waypoint.sequence)
+    );
+    const insertionIndex = remainingWaypoints.findIndex(
+      (waypoint) => waypoint.sequence === issue.toSequence
+    );
+    if (insertionIndex < 0) return null;
+
+    remainingWaypoints.splice(insertionIndex, 0, ...pendingWaypoints);
+    return remainingWaypoints.map((waypoint) => ({
+      latitude: waypoint.latitude,
+      longitude: waypoint.longitude,
+      address: waypoint.address,
+      notes: waypoint.notes,
+    }));
+  }
+
   const nearestIndex = waypoints.findIndex(
     (waypoint) => waypoint.sequence === issue.nearestSequence
   );

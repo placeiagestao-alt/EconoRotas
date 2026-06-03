@@ -277,6 +277,60 @@ describe("Route auditor", () => {
     expect(report.issues.some((issue) => issue.type === "route_crossing")).toBe(true);
   });
 
+  it("flags leaving a region before finishing pending stops in that region", () => {
+    const report = auditRouteSequence([
+      {
+        latitude: -22.1200,
+        longitude: -51.4000,
+        address: "Rua Centro, 100",
+        sequence: 0,
+      },
+      {
+        latitude: -22.1300,
+        longitude: -51.3900,
+        address: "Rua Norte, 200",
+        sequence: 1,
+      },
+      {
+        latitude: -22.1301,
+        longitude: -51.3901,
+        address: "Rua Norte, 220",
+        sequence: 2,
+      },
+      {
+        latitude: -22.1201,
+        longitude: -51.4001,
+        address: "Rua Centro, 120",
+        sequence: 3,
+      },
+    ]);
+
+    const exit = report.issues.find(
+      (issue) => issue.type === "premature_region_exit"
+    );
+
+    expect(exit).toBeTruthy();
+    expect(exit?.pendingSequences).toEqual([3]);
+    expect(report.score).toBeLessThanOrEqual(75);
+  });
+
+  it("reports cluster compactness and flags very spread regions", () => {
+    const stops: AuditableStop[] = Array.from({ length: 31 }, (_, index) => ({
+      latitude: -22.2 + index * 0.0045,
+      longitude: -51.4,
+      address: `Rua Longa, ${100 + index}`,
+      sequence: index,
+    }));
+
+    const report = auditRouteSequence(stops);
+
+    expect(report.clusterMetrics.clusterCount).toBe(1);
+    expect(report.clusterMetrics.maxRadiusKm).toBeGreaterThan(5);
+    expect(
+      report.issues.some((issue) => issue.type === "cluster_spread_high")
+    ).toBe(true);
+  });
+
   it("uses explicit route quality penalties by issue type", () => {
     const report = auditRouteSequence([
       {

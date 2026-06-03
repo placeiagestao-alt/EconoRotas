@@ -1,4 +1,4 @@
-import { calculateDistance, type Location } from "./optimization";
+import { calculateDistance, clusterStops, type Location } from "./optimization";
 
 export type RouteAuditSeverity = "low" | "medium" | "high" | "critical";
 
@@ -9,6 +9,8 @@ export type RouteAuditIssue = {
     | "duplicate_coordinates"
     | "first_stop_far"
     | "region_revisited"
+    | "premature_region_exit"
+    | "cluster_spread_high"
     | "route_crossing"
     | "high_road_detour"
     | "missing_driver_origin"
@@ -30,6 +32,7 @@ export type RouteAuditIssue = {
   nearestDistanceKm?: number;
   gapKm?: number;
   addresses?: string[];
+  pendingSequences?: number[];
 };
 
 export type AuditableStop = Location & {
@@ -47,6 +50,17 @@ export type RouteAuditReport = {
   warningCount: number;
   totalDistanceKm: number;
   maxLegKm: number;
+  clusterMetrics: {
+    clusterCount: number;
+    averageRadiusKm: number;
+    maxRadiusKm: number;
+    spreadClusters: Array<{
+      clusterId: number;
+      stopCount: number;
+      averageRadiusKm: number;
+      maxRadiusKm: number;
+    }>;
+  };
   issues: RouteAuditIssue[];
 };
 
@@ -64,8 +78,12 @@ const BRAZIL_LATITUDE_MIN = -34;
 const BRAZIL_LATITUDE_MAX = 6;
 const BRAZIL_LONGITUDE_MIN = -74;
 const BRAZIL_LONGITUDE_MAX = -28;
+const CLUSTER_SPREAD_ATTENTION_KM = 2.5;
+const CLUSTER_SPREAD_HIGH_KM = 5;
 const ROUTE_QUALITY_PENALTIES: Partial<Record<RouteAuditIssue["type"], number>> = {
   region_revisited: 20,
+  premature_region_exit: 25,
+  cluster_spread_high: 10,
   nearby_stop_skipped: 15,
   route_crossing: 10,
   high_road_detour: 10,
@@ -250,6 +268,105 @@ export function detectRouteCrossings(route: AuditableStop[]) {
   return crossings;
 }
 
+function emptyClusterMetrics(): RouteAuditReport["clusterMetrics"] {
+  return {
+    clusterCount: 0,
+    averageRadiusKm: 0,
+    maxRadiusKm: 0,
+    spreadClusters: [],
+  };
+}
+
+function calculateClusterMetrics(
+  route: AuditableStop[]
+): RouteAuditReport["clusterMetrics"] {
+  const clusters = clusterStops(route);
+  if (clusters.length === 0) return emptyClusterMetrics();
+
+  const clusterMetrics = clusters.map((cluster) => {
+    const distances = cluster.stops.map((stop) =>
+      calculateDistance(cluster.centroid, route[stop.originalIndex])
+    );
+    const averageRadiusKm =
+      distances.reduce((total, distance) => total + distance, 0) /
+      Math.max(1, distances.length);
+    const maxRadiusKm = Math.max(0, ...distances);
+
+    return {
+      clusterId: cluster.clusterId,
+      stopCount: cluster.stops.length,
+      averageRadiusKm: roundKm(averageRadiusKm),
+      maxRadiusKm: roundKm(maxRadiusKm),
+    };
+  });
+
+  return {
+    clusterCount: clusterMetrics.length,
+    averageRadiusKm: roundKm(
+      clusterMetrics.reduce((total, cluster) => total + cluster.averageRadiusKm, 0) /
+        Math.max(1, clusterMetrics.length)
+    ),
+    maxRadiusKm: Math.max(0, ...clusterMetrics.map((cluster) => cluster.maxRadiusKm)),
+    spreadClusters: clusterMetrics.filter(
+      (cluster) => cluster.averageRadiusKm >= CLUSTER_SPREAD_ATTENTION_KM
+    ),
+  };
+}
+
+function detectPrematureRegionExits(route: AuditableStop[]) {
+  const clusters = clusterStops(route);
+  if (clusters.length <= 1) return [];
+
+  const clusterByOriginalIndex = new Map<number, number>();
+  for (const cluster of clusters) {
+    if (cluster.stops.length < 2) continue;
+    for (const stop of cluster.stops) {
+      clusterByOriginalIndex.set(stop.originalIndex, cluster.clusterId);
+    }
+  }
+
+  const exits: Array<{
+    fromClusterId: number;
+    toClusterId: number;
+    fromSequence: number;
+    toSequence: number;
+    pendingSequences: number[];
+  }> = [];
+  let activeClusterId: number | undefined;
+
+  for (let index = 0; index < route.length; index += 1) {
+    const clusterId = clusterByOriginalIndex.get(index);
+    if (!clusterId) {
+      activeClusterId = undefined;
+      continue;
+    }
+
+    if (activeClusterId !== undefined && activeClusterId !== clusterId) {
+      const pendingSequences = route
+        .slice(index + 1)
+        .filter((_, laterIndex) => {
+          const originalIndex = index + 1 + laterIndex;
+          return clusterByOriginalIndex.get(originalIndex) === activeClusterId;
+        })
+        .map((stop) => stop.sequence);
+
+      if (pendingSequences.length > 0) {
+        exits.push({
+          fromClusterId: activeClusterId,
+          toClusterId: clusterId,
+          fromSequence: route[index - 1].sequence,
+          toSequence: route[index].sequence,
+          pendingSequences,
+        });
+      }
+    }
+
+    activeClusterId = clusterId;
+  }
+
+  return exits;
+}
+
 export function auditRouteSequence(
   stops: AuditableStop[],
   options: {
@@ -325,6 +442,24 @@ export function auditRouteSequence(
       !hasMissingCoordinateValues(stop) &&
       !hasSuspiciousBrazilCoordinate(stop)
   );
+  const clusterMetrics = calculateClusterMetrics(routeableStops);
+
+  for (const cluster of clusterMetrics.spreadClusters) {
+    if (
+      cluster.averageRadiusKm < CLUSTER_SPREAD_HIGH_KM &&
+      cluster.maxRadiusKm < CLUSTER_SPREAD_HIGH_KM
+    ) {
+      continue;
+    }
+
+    issues.push({
+      type: "cluster_spread_high",
+      severity: "medium",
+      title: "Cluster muito espalhado",
+      message: `A regiao ${cluster.clusterId} tem raio medio de ${cluster.averageRadiusKm} km e raio maximo de ${cluster.maxRadiusKm} km. Isso indica agrupamento amplo demais e merece conferencia.`,
+      distanceKm: cluster.maxRadiusKm,
+    });
+  }
 
   if (options.requireStartLocation && !options.startLocation && routeableStops.length > 1) {
     issues.push({
@@ -333,6 +468,21 @@ export function auditRouteSequence(
       title: "Rota criada sem origem do motorista",
       message:
         "Sem a origem real, o sistema otimiza a sequencia entre paradas, mas pode escolher uma primeira entrega ruim para quem esta na rua.",
+    });
+  }
+
+  for (const exit of detectPrematureRegionExits(routeableStops)) {
+    issues.push({
+      type: "premature_region_exit",
+      severity: "high",
+      title: "Saida prematura da regiao",
+      message: `A rota saiu da regiao ${exit.fromClusterId} para a regiao ${
+        exit.toClusterId
+      } antes de concluir ${exit.pendingSequences.length} parada(s) pendente(s) da regiao anterior.`,
+      fromSequence: exit.fromSequence,
+      toSequence: exit.toSequence,
+      nearestSequence: exit.pendingSequences[0],
+      pendingSequences: exit.pendingSequences,
     });
   }
 
@@ -543,6 +693,7 @@ export function auditRouteSequence(
     warningCount: finalWarningCount,
     totalDistanceKm: roundKm(totalDistanceKm),
     maxLegKm: roundKm(maxLegKm),
+    clusterMetrics,
     issues,
   };
 }

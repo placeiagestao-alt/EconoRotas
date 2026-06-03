@@ -96,6 +96,7 @@ const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "generic_address",
   "duplicate_sequence",
   "region_revisited",
+  "premature_region_exit",
   "route_crossing",
 ]);
 const STRUCTURAL_AUDIT_ISSUE_TYPES = new Set([
@@ -1594,6 +1595,21 @@ export default function RouteDetail() {
                   <Badge variant="outline">
                     maior salto {auditQuery.data.maxLegKm.toFixed(2)} km
                   </Badge>
+                  {(auditQuery.data as any).clusterMetrics ? (
+                    <>
+                      <Badge variant="outline">
+                        {(auditQuery.data as any).clusterMetrics.clusterCount} região(ões)
+                      </Badge>
+                      <Badge variant="outline">
+                        raio médio{" "}
+                        {(auditQuery.data as any).clusterMetrics.averageRadiusKm.toFixed(2)} km
+                      </Badge>
+                      <Badge variant="outline">
+                        maior região{" "}
+                        {(auditQuery.data as any).clusterMetrics.maxRadiusKm.toFixed(2)} km
+                      </Badge>
+                    </>
+                  ) : null}
                 </div>
                 {hasBlockingAuditIssues ? (
                   <p className="text-sm font-semibold">

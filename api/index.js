@@ -3918,8 +3918,12 @@ var BRAZIL_LATITUDE_MIN = -34;
 var BRAZIL_LATITUDE_MAX = 6;
 var BRAZIL_LONGITUDE_MIN = -74;
 var BRAZIL_LONGITUDE_MAX = -28;
+var CLUSTER_SPREAD_ATTENTION_KM = 2.5;
+var CLUSTER_SPREAD_HIGH_KM = 5;
 var ROUTE_QUALITY_PENALTIES = {
   region_revisited: 20,
+  premature_region_exit: 25,
+  cluster_spread_high: 10,
   nearby_stop_skipped: 15,
   route_crossing: 10,
   high_road_detour: 10,
@@ -4045,6 +4049,78 @@ function detectRouteCrossings(route) {
   }
   return crossings;
 }
+function emptyClusterMetrics() {
+  return {
+    clusterCount: 0,
+    averageRadiusKm: 0,
+    maxRadiusKm: 0,
+    spreadClusters: []
+  };
+}
+function calculateClusterMetrics(route) {
+  const clusters = clusterStops(route);
+  if (clusters.length === 0) return emptyClusterMetrics();
+  const clusterMetrics = clusters.map((cluster) => {
+    const distances = cluster.stops.map(
+      (stop) => calculateDistance(cluster.centroid, route[stop.originalIndex])
+    );
+    const averageRadiusKm = distances.reduce((total, distance) => total + distance, 0) / Math.max(1, distances.length);
+    const maxRadiusKm = Math.max(0, ...distances);
+    return {
+      clusterId: cluster.clusterId,
+      stopCount: cluster.stops.length,
+      averageRadiusKm: roundKm(averageRadiusKm),
+      maxRadiusKm: roundKm(maxRadiusKm)
+    };
+  });
+  return {
+    clusterCount: clusterMetrics.length,
+    averageRadiusKm: roundKm(
+      clusterMetrics.reduce((total, cluster) => total + cluster.averageRadiusKm, 0) / Math.max(1, clusterMetrics.length)
+    ),
+    maxRadiusKm: Math.max(0, ...clusterMetrics.map((cluster) => cluster.maxRadiusKm)),
+    spreadClusters: clusterMetrics.filter(
+      (cluster) => cluster.averageRadiusKm >= CLUSTER_SPREAD_ATTENTION_KM
+    )
+  };
+}
+function detectPrematureRegionExits(route) {
+  const clusters = clusterStops(route);
+  if (clusters.length <= 1) return [];
+  const clusterByOriginalIndex = /* @__PURE__ */ new Map();
+  for (const cluster of clusters) {
+    if (cluster.stops.length < 2) continue;
+    for (const stop of cluster.stops) {
+      clusterByOriginalIndex.set(stop.originalIndex, cluster.clusterId);
+    }
+  }
+  const exits = [];
+  let activeClusterId;
+  for (let index2 = 0; index2 < route.length; index2 += 1) {
+    const clusterId = clusterByOriginalIndex.get(index2);
+    if (!clusterId) {
+      activeClusterId = void 0;
+      continue;
+    }
+    if (activeClusterId !== void 0 && activeClusterId !== clusterId) {
+      const pendingSequences = route.slice(index2 + 1).filter((_, laterIndex) => {
+        const originalIndex = index2 + 1 + laterIndex;
+        return clusterByOriginalIndex.get(originalIndex) === activeClusterId;
+      }).map((stop) => stop.sequence);
+      if (pendingSequences.length > 0) {
+        exits.push({
+          fromClusterId: activeClusterId,
+          toClusterId: clusterId,
+          fromSequence: route[index2 - 1].sequence,
+          toSequence: route[index2].sequence,
+          pendingSequences
+        });
+      }
+    }
+    activeClusterId = clusterId;
+  }
+  return exits;
+}
 function auditRouteSequence(stops2, options = {}) {
   const orderedStops = [...stops2].sort((a, b) => a.sequence - b.sequence);
   const issues = [];
@@ -4103,12 +4179,37 @@ function auditRouteSequence(stops2, options = {}) {
   const routeableStops = orderedStops.filter(
     (stop) => hasValidCoordinateValues(stop) && !hasMissingCoordinateValues(stop) && !hasSuspiciousBrazilCoordinate(stop)
   );
+  const clusterMetrics = calculateClusterMetrics(routeableStops);
+  for (const cluster of clusterMetrics.spreadClusters) {
+    if (cluster.averageRadiusKm < CLUSTER_SPREAD_HIGH_KM && cluster.maxRadiusKm < CLUSTER_SPREAD_HIGH_KM) {
+      continue;
+    }
+    issues.push({
+      type: "cluster_spread_high",
+      severity: "medium",
+      title: "Cluster muito espalhado",
+      message: `A regiao ${cluster.clusterId} tem raio medio de ${cluster.averageRadiusKm} km e raio maximo de ${cluster.maxRadiusKm} km. Isso indica agrupamento amplo demais e merece conferencia.`,
+      distanceKm: cluster.maxRadiusKm
+    });
+  }
   if (options.requireStartLocation && !options.startLocation && routeableStops.length > 1) {
     issues.push({
       type: "missing_driver_origin",
       severity: "medium",
       title: "Rota criada sem origem do motorista",
       message: "Sem a origem real, o sistema otimiza a sequencia entre paradas, mas pode escolher uma primeira entrega ruim para quem esta na rua."
+    });
+  }
+  for (const exit of detectPrematureRegionExits(routeableStops)) {
+    issues.push({
+      type: "premature_region_exit",
+      severity: "high",
+      title: "Saida prematura da regiao",
+      message: `A rota saiu da regiao ${exit.fromClusterId} para a regiao ${exit.toClusterId} antes de concluir ${exit.pendingSequences.length} parada(s) pendente(s) da regiao anterior.`,
+      fromSequence: exit.fromSequence,
+      toSequence: exit.toSequence,
+      nearestSequence: exit.pendingSequences[0],
+      pendingSequences: exit.pendingSequences
     });
   }
   if (options.usedRoadMetrics === false && routeableStops.length > 1) {
@@ -4281,6 +4382,7 @@ function auditRouteSequence(stops2, options = {}) {
     warningCount: finalWarningCount,
     totalDistanceKm: roundKm(totalDistanceKm),
     maxLegKm: roundKm(maxLegKm),
+    clusterMetrics,
     issues
   };
 }
@@ -5051,6 +5153,15 @@ function getPostOptimizationBlockingReason(audit) {
       message: `${regionRevisited.title}: ${regionRevisited.message}`
     };
   }
+  const prematureRegionExit = audit.issues.find(
+    (issue) => issue.type === "premature_region_exit"
+  );
+  if (prematureRegionExit) {
+    return {
+      issue: prematureRegionExit,
+      message: `${prematureRegionExit.title}: ${prematureRegionExit.message}`
+    };
+  }
   const routeCrossing = audit.issues.find((issue) => issue.type === "route_crossing");
   if (routeCrossing) {
     return {
@@ -5070,7 +5181,7 @@ function getPostOptimizationBlockingReason(audit) {
   return null;
 }
 function isSequenceCoherenceIssue(issue) {
-  return issue.type === "nearby_stop_skipped" || issue.type === "region_revisited" || issue.type === "route_crossing";
+  return issue.type === "nearby_stop_skipped" || issue.type === "region_revisited" || issue.type === "premature_region_exit" || issue.type === "route_crossing";
 }
 function routeWaypointSignature(route) {
   return route.waypoints.map(
@@ -5086,6 +5197,31 @@ function reorderRouteByAuditIssue(route, issue) {
     return null;
   }
   const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
+  if (issue.type === "premature_region_exit" && issue.pendingSequences?.length) {
+    const plannedIndex2 = waypoints.findIndex(
+      (waypoint) => waypoint.sequence === issue.toSequence
+    );
+    if (plannedIndex2 < 0) return null;
+    const pendingSequenceSet = new Set(issue.pendingSequences);
+    const pendingWaypoints = waypoints.filter(
+      (waypoint) => pendingSequenceSet.has(waypoint.sequence)
+    );
+    if (pendingWaypoints.length === 0) return null;
+    const remainingWaypoints = waypoints.filter(
+      (waypoint) => !pendingSequenceSet.has(waypoint.sequence)
+    );
+    const insertionIndex = remainingWaypoints.findIndex(
+      (waypoint) => waypoint.sequence === issue.toSequence
+    );
+    if (insertionIndex < 0) return null;
+    remainingWaypoints.splice(insertionIndex, 0, ...pendingWaypoints);
+    return remainingWaypoints.map((waypoint) => ({
+      latitude: waypoint.latitude,
+      longitude: waypoint.longitude,
+      address: waypoint.address,
+      notes: waypoint.notes
+    }));
+  }
   const nearestIndex = waypoints.findIndex(
     (waypoint) => waypoint.sequence === issue.nearestSequence
   );

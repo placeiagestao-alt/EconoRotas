@@ -141,6 +141,7 @@ export default function RouteMap({
       const hasProblem = auditIssues.some((issue) => {
         if (
           issue.type !== "region_revisited" &&
+          issue.type !== "premature_region_exit" &&
           issue.type !== "route_crossing" &&
           issue.type !== "nearby_stop_skipped"
         ) {
