@@ -130,6 +130,10 @@ corrigida pelo fiscal e o problema original informava `distanceKm` maior que
 - Indice de Eficiencia de Cluster: percentual sem revisita, saida prematura ou parada proxima pulada entre rotas clusterizadas.
 - Score Medio de Qualidade: media de `qualityScore`.
 - Tempo Medio de Otimizacao: media de `optimizationRuntimeMs`.
+- Rotas Particionadas: quantidade e percentual de otimizacoes grandes quebradas
+  por regiao antes da matriz OSRM.
+- Media de Particoes: media de blocos regionais por rota particionada.
+- Maior Particao: maior quantidade de paradas em uma particao OSRM.
 
 ## OSRM proprio
 
@@ -163,6 +167,10 @@ paradas
 Isso evita uma matriz unica gigante, reduz timeout e diminui a chance de cair
 para fallback geografico. O tamanho padrao de particao e 70 paradas, com origem
 da particao anterior usada como ponto de partida da proxima.
+
+Os dados de particionamento ficam em `route_metrics.metadata.routeMetadata`,
+incluindo `partitioned`, `partitionCount`, `maxPartitionSize` e
+`largestPartitionSize`.
 
 ## Consultas SQL
 

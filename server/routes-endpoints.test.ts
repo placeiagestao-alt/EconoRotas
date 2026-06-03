@@ -172,6 +172,48 @@ describe("Route endpoints", () => {
     expect(metrics.commercialImpact.estimatedCo2KgAvoided).toBeGreaterThan(0);
   });
 
+  it("aggregates partitioned route metrics from optimization metadata", async () => {
+    await db.createRouteMetric({
+      userId: 8221,
+      routeId: 8221,
+      qualityScore: 88,
+      optimizationRuntimeMs: 250,
+      osrmUsed: true,
+      osrmFallback: false,
+      clusterCount: 4,
+      averageClusterRadius: 0.5,
+      maxClusterRadius: 0.9,
+      regionRevisitedCount: 0,
+      prematureRegionExitCount: 0,
+      nearbyStopSkippedCount: 0,
+      routeCrossingCount: 0,
+      issuesDetectedCount: 0,
+      issuesCorrectedCount: 0,
+      issuesBlockedCount: 0,
+      auditStatus: "approved",
+      auditQuality: "good",
+      auditSource: "road-default",
+      routeMode: "balanced",
+      localityMode: "strict",
+      stopCount: 150,
+      totalDistanceKm: 42,
+      totalTimeMinutes: 80,
+      metadata: {
+        routeMetadata: {
+          partitioned: true,
+          partitionCount: 3,
+          maxPartitionSize: 70,
+          largestPartitionSize: 62,
+        },
+      },
+    });
+
+    const metrics = await db.getRouteMetricsDashboard(30);
+    expect(metrics.partitioning.partitionedRouteCount).toBeGreaterThanOrEqual(1);
+    expect(metrics.partitioning.averagePartitionCount).toBeGreaterThanOrEqual(3);
+    expect(metrics.partitioning.largestPartitionSize).toBeGreaterThanOrEqual(62);
+  });
+
   it("keeps route as draft when optimization rejects invalid stops", async () => {
     const caller = appRouter.createCaller(createAuthContext(8202));
 

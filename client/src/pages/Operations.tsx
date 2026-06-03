@@ -204,6 +204,27 @@ export default function Operations() {
                   icon={Activity}
                 />
                 <StatCard
+                  title="Rotas particionadas"
+                  value={routeMetrics?.partitioning?.partitionedRouteCount ?? 0}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Taxa particionada"
+                  value={Math.round(routeMetrics?.partitioning?.partitionedRouteRate ?? 0)}
+                  suffix="%"
+                  icon={Gauge}
+                />
+                <StatCard
+                  title="Média partições"
+                  value={Math.round(routeMetrics?.partitioning?.averagePartitionCount ?? 0)}
+                  icon={Route}
+                />
+                <StatCard
+                  title="Maior partição"
+                  value={routeMetrics?.partitioning?.largestPartitionSize ?? 0}
+                  icon={MapPinned}
+                />
+                <StatCard
                   title="KM economizados"
                   value={Math.round(routeMetrics?.commercialImpact?.estimatedKmSaved ?? 0)}
                   icon={MapPinned}

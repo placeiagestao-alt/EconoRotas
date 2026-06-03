@@ -702,6 +702,7 @@ async function optimizeUserRoute(
         localityMode: optimizationAttempt.localityMode,
         respectInputSequence: optimizationAttempt.respectInputSequence,
         auditSource: optimizationAttempt.auditSource,
+        routeMetadata: optimizationAttempt.optimized.metadata ?? null,
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record route audit correction event:", error);
@@ -750,6 +751,7 @@ async function optimizeUserRoute(
         blockingIssue: blockedReason?.issue ?? null,
         correctionAttempts,
         finalIssues: attemptAudit.issues.slice(0, 12),
+        routeMetadata: optimizationAttempt.optimized.metadata ?? null,
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record route metric:", error);

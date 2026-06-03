@@ -22,6 +22,12 @@ export interface OptimizedRoute {
   totalDistance: number;
   totalTime: number;
   waypoints: Array<Location & { sequence: number }>;
+  metadata?: {
+    partitioned?: boolean;
+    partitionCount?: number;
+    maxPartitionSize?: number;
+    largestPartitionSize?: number;
+  };
 }
 
 export interface RouteOptimizationOptions {

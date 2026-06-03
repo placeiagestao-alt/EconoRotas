@@ -1591,6 +1591,10 @@ function estimateCorrectedKmSaved(metric) {
   }, 0);
   return bestSaving;
 }
+function getMetricRouteMetadata(metric) {
+  const metadata = parseMetricMetadata(metric.metadata);
+  return metadata.routeMetadata && typeof metadata.routeMetadata === "object" ? metadata.routeMetadata : {};
+}
 async function createRouteMetric(data) {
   const metric = {
     userId: data.userId ?? null,
@@ -1716,6 +1720,15 @@ function buildRouteMetricsSummary(metrics, days) {
   const estimatedMinutesSaved = estimatedKmSaved * 2.5;
   const estimatedFuelLitersSaved = estimatedKmSaved / 10;
   const estimatedCo2KgAvoided = estimatedFuelLitersSaved * 2.31;
+  const partitionedMetrics = metrics.filter(
+    (metric) => Boolean(getMetricRouteMetadata(metric).partitioned)
+  );
+  const partitionCounts = partitionedMetrics.map(
+    (metric) => Number(getMetricRouteMetadata(metric).partitionCount || 0)
+  );
+  const largestPartitionSizes = partitionedMetrics.map(
+    (metric) => Number(getMetricRouteMetadata(metric).largestPartitionSize || 0)
+  );
   const routeModes = ["shortest_distance", "shortest_time", "balanced"];
   const modePerformance = routeModes.map((mode) => {
     const modeMetrics = metrics.filter((metric) => metric.routeMode === mode);
@@ -1814,6 +1827,13 @@ function buildRouteMetricsSummary(metrics, days) {
       estimatedMinutesSaved: Math.round(estimatedMinutesSaved),
       estimatedFuelLitersSaved: roundMetric(estimatedFuelLitersSaved, 1),
       estimatedCo2KgAvoided: roundMetric(estimatedCo2KgAvoided, 1)
+    },
+    partitioning: {
+      partitionedRouteCount: partitionedMetrics.length,
+      partitionedRouteRate: roundMetric(metricPercent(partitionedMetrics.length, total)),
+      averagePartitionCount: roundMetric(metricAverage(partitionCounts)),
+      maxPartitionCount: Math.max(0, ...partitionCounts),
+      largestPartitionSize: Math.max(0, ...largestPartitionSizes)
     },
     modePerformance
   };
@@ -4482,6 +4502,10 @@ async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options 
   });
   if (partitions.length <= 1) return null;
   const remaining = [...partitions];
+  const largestPartitionSize = Math.max(
+    0,
+    ...partitions.map((partition) => partition.stops.length)
+  );
   const finalSequence = [];
   const finalWaypoints = [];
   let totalDistance = 0;
@@ -4530,7 +4554,13 @@ async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options 
     sequence: finalSequence,
     totalDistance: Math.round(totalDistance * 100) / 100,
     totalTime: Math.round(totalTime),
-    waypoints: finalWaypoints
+    waypoints: finalWaypoints,
+    metadata: {
+      partitioned: true,
+      partitionCount: partitions.length,
+      maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE,
+      largestPartitionSize
+    }
   };
 }
 async function buildSequentialRouteWithRoadMetrics(locations, options = {}) {
@@ -6211,7 +6241,8 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         correctionAttempts,
         localityMode: optimizationAttempt.localityMode,
         respectInputSequence: optimizationAttempt.respectInputSequence,
-        auditSource: optimizationAttempt.auditSource
+        auditSource: optimizationAttempt.auditSource,
+        routeMetadata: optimizationAttempt.optimized.metadata ?? null
       }
     }).catch((error) => {
       console.warn("[Routes] Failed to record route audit correction event:", error);
@@ -6254,7 +6285,8 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         firstBlockingIssue: firstBlockingReason?.issue ?? null,
         blockingIssue: blockedReason?.issue ?? null,
         correctionAttempts,
-        finalIssues: attemptAudit.issues.slice(0, 12)
+        finalIssues: attemptAudit.issues.slice(0, 12),
+        routeMetadata: optimizationAttempt.optimized.metadata ?? null
       }
     }).catch((error) => {
       console.warn("[Routes] Failed to record route metric:", error);

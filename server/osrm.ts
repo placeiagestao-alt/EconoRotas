@@ -671,6 +671,10 @@ async function optimizePartitionedRouteWithRoadMetrics(
   if (partitions.length <= 1) return null;
 
   const remaining = [...partitions];
+  const largestPartitionSize = Math.max(
+    0,
+    ...partitions.map((partition) => partition.stops.length)
+  );
   const finalSequence: number[] = [];
   const finalWaypoints: OptimizedRoute["waypoints"] = [];
   let totalDistance = 0;
@@ -726,6 +730,12 @@ async function optimizePartitionedRouteWithRoadMetrics(
     totalDistance: Math.round(totalDistance * 100) / 100,
     totalTime: Math.round(totalTime),
     waypoints: finalWaypoints,
+    metadata: {
+      partitioned: true,
+      partitionCount: partitions.length,
+      maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE,
+      largestPartitionSize,
+    },
   };
 }
 

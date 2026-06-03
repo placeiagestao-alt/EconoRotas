@@ -1885,6 +1885,13 @@ function estimateCorrectedKmSaved(metric: any) {
   return bestSaving;
 }
 
+function getMetricRouteMetadata(metric: any) {
+  const metadata = parseMetricMetadata(metric.metadata);
+  return metadata.routeMetadata && typeof metadata.routeMetadata === "object"
+    ? metadata.routeMetadata
+    : {};
+}
+
 export async function createRouteMetric(data: CreateRouteMetricInput) {
   const metric = {
     userId: data.userId ?? null,
@@ -2026,6 +2033,15 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
   const estimatedMinutesSaved = estimatedKmSaved * 2.5;
   const estimatedFuelLitersSaved = estimatedKmSaved / 10;
   const estimatedCo2KgAvoided = estimatedFuelLitersSaved * 2.31;
+  const partitionedMetrics = metrics.filter((metric) =>
+    Boolean(getMetricRouteMetadata(metric).partitioned)
+  );
+  const partitionCounts = partitionedMetrics.map((metric) =>
+    Number(getMetricRouteMetadata(metric).partitionCount || 0)
+  );
+  const largestPartitionSizes = partitionedMetrics.map((metric) =>
+    Number(getMetricRouteMetadata(metric).largestPartitionSize || 0)
+  );
   const routeModes = ["shortest_distance", "shortest_time", "balanced"] as const;
   const modePerformance = routeModes.map((mode) => {
     const modeMetrics = metrics.filter((metric) => metric.routeMode === mode);
@@ -2134,6 +2150,13 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
       estimatedMinutesSaved: Math.round(estimatedMinutesSaved),
       estimatedFuelLitersSaved: roundMetric(estimatedFuelLitersSaved, 1),
       estimatedCo2KgAvoided: roundMetric(estimatedCo2KgAvoided, 1),
+    },
+    partitioning: {
+      partitionedRouteCount: partitionedMetrics.length,
+      partitionedRouteRate: roundMetric(metricPercent(partitionedMetrics.length, total)),
+      averagePartitionCount: roundMetric(metricAverage(partitionCounts)),
+      maxPartitionCount: Math.max(0, ...partitionCounts),
+      largestPartitionSize: Math.max(0, ...largestPartitionSizes),
     },
     modePerformance,
   };
