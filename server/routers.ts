@@ -48,8 +48,6 @@ const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",
   "invalid_coordinates",
   "empty_address",
-  "generic_address",
-  "duplicate_sequence",
 ]);
 const DUPLICATE_COORDINATE_BLOCKING_GROUPS = 3;
 
@@ -238,6 +236,16 @@ function getPostOptimizationBlockingReason(audit: RouteAuditReport) {
     };
   }
 
+  const regionRevisited = audit.issues.find(
+    (issue) => issue.type === "region_revisited"
+  );
+  if (regionRevisited) {
+    return {
+      issue: regionRevisited,
+      message: `${regionRevisited.title}: ${regionRevisited.message}`,
+    };
+  }
+
   const duplicateCoordinateIssues = audit.issues.filter(
     (issue) => issue.type === "duplicate_coordinates"
   );
@@ -249,6 +257,10 @@ function getPostOptimizationBlockingReason(audit: RouteAuditReport) {
   }
 
   return null;
+}
+
+function isSequenceCoherenceIssue(issue: RouteAuditReport["issues"][number]) {
+  return issue.type === "nearby_stop_skipped" || issue.type === "region_revisited";
 }
 
 function assertRouteStopsReadyForOptimization(routeStops: any[]) {
@@ -409,40 +421,114 @@ async function optimizeUserRoute(
   }
 
   const mode = requestedMode || route.mode;
-  const roadMetricOptions = {
-    startLocation,
-    endLocation,
-    localityMode: options?.localityMode,
-  };
-  let optimizedWithRoadMetrics: OptimizedRoute | null = null;
-  let auditSource = "geo-default";
+  async function buildOptimizationAttempt(attempt: {
+    localityMode?: "balanced" | "local" | "strict";
+    respectInputSequence?: boolean;
+    auditSourceSuffix?: string;
+  }) {
+    const roadMetricOptions = {
+      startLocation,
+      endLocation,
+      localityMode: attempt.localityMode,
+    };
+    let optimizedWithRoadMetrics: OptimizedRoute | null = null;
+    let auditSource = "geo-default";
 
-  if (options?.respectInputSequence) {
-    optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
-      locations,
-      roadMetricOptions
-    );
-    auditSource = optimizedWithRoadMetrics ? "road-sequential" : "geo-sequential";
-  } else {
-    optimizedWithRoadMetrics = await optimizeRouteWithRoadMetrics(
-      locations,
-      mode,
-      0,
-      roadMetricOptions
-    );
-    auditSource = optimizedWithRoadMetrics ? "road-default" : "geo-default";
+    if (attempt.respectInputSequence) {
+      optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
+        locations,
+        roadMetricOptions
+      );
+      auditSource = optimizedWithRoadMetrics ? "road-sequential" : "geo-sequential";
+    } else {
+      optimizedWithRoadMetrics = await optimizeRouteWithRoadMetrics(
+        locations,
+        mode,
+        0,
+        roadMetricOptions
+      );
+      auditSource = optimizedWithRoadMetrics ? "road-default" : "geo-default";
+    }
+
+    const optimized = optimizedWithRoadMetrics
+      ?? (attempt.respectInputSequence
+        ? buildSequentialRoute(locations, roadMetricOptions)
+        : optimizeRoute(locations, mode, 0, roadMetricOptions));
+    const audit = auditOptimizedRoute(optimized, {
+      startLocation,
+      usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
+      respectInputSequence: Boolean(attempt.respectInputSequence),
+    });
+
+    return {
+      optimized,
+      audit,
+      auditSource: attempt.auditSourceSuffix
+        ? `${auditSource}-${attempt.auditSourceSuffix}`
+        : auditSource,
+      usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
+      localityMode: attempt.localityMode,
+      respectInputSequence: Boolean(attempt.respectInputSequence),
+    };
   }
 
-  const optimized = optimizedWithRoadMetrics
-    ?? (options?.respectInputSequence
-      ? buildSequentialRoute(locations, roadMetricOptions)
-      : optimizeRoute(locations, mode, 0, roadMetricOptions));
-  const audit = auditOptimizedRoute(optimized, {
-    startLocation,
-    usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
+  let optimizationAttempt = await buildOptimizationAttempt({
+    localityMode: options?.localityMode,
     respectInputSequence: Boolean(options?.respectInputSequence),
   });
-  const postOptimizationBlockingReason = getPostOptimizationBlockingReason(audit);
+  let postOptimizationBlockingReason = getPostOptimizationBlockingReason(
+    optimizationAttempt.audit
+  );
+
+  if (
+    postOptimizationBlockingReason &&
+    isSequenceCoherenceIssue(postOptimizationBlockingReason.issue) &&
+    (optimizationAttempt.localityMode !== "strict" ||
+      optimizationAttempt.respectInputSequence)
+  ) {
+    const firstBlockingReason = postOptimizationBlockingReason;
+    optimizationAttempt = await buildOptimizationAttempt({
+      localityMode: "strict",
+      respectInputSequence: false,
+      auditSourceSuffix: "audit-corrected",
+    });
+    postOptimizationBlockingReason = getPostOptimizationBlockingReason(
+      optimizationAttempt.audit
+    );
+
+    await db.createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "route_audit_corrected_optimization",
+      severity: postOptimizationBlockingReason ? "warning" : "info",
+      source: "routes.audit",
+      title: postOptimizationBlockingReason
+        ? "Auditor tentou corrigir a sequência"
+        : "Auditor corrigiu a sequência",
+      message: postOptimizationBlockingReason
+        ? `A segunda otimização ainda tem incoerência. ${postOptimizationBlockingReason.message}`
+        : `A rota foi reotimizada em modo rígido após o fiscal detectar incoerência. ${firstBlockingReason.message}`,
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        firstBlockingIssue: firstBlockingReason.issue,
+        finalStatus: optimizationAttempt.audit.status,
+        finalScore: optimizationAttempt.audit.score,
+        finalIssueCount: optimizationAttempt.audit.issueCount,
+        finalIssues: optimizationAttempt.audit.issues.slice(0, 8),
+        localityMode: optimizationAttempt.localityMode,
+        respectInputSequence: optimizationAttempt.respectInputSequence,
+        auditSource: optimizationAttempt.auditSource,
+      },
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record route audit correction event:", error);
+    });
+  }
+
+  const { optimized, audit, auditSource } = optimizationAttempt;
   if (postOptimizationBlockingReason) {
     await db.createOperationalEvent({
       userId,

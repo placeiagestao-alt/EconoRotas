@@ -54,7 +54,7 @@ async function buildRouteContext(userId: number, routeId?: number): Promise<stri
 
 function buildFallbackAssistantResponse(routeContext: string) {
   return [
-    "No momento o assistente de IA não conseguiu acessar o provedor externo, mas o EconoRotas continua operacional.",
+    "No momento o assistente de IA não conseguiu acessar o provedor externo, mas o EconoRota continua operacional.",
     "",
     "Resumo disponível:",
     routeContext,

@@ -405,7 +405,7 @@ export default function Home() {
                       className="mt-1 h-4 w-4 accent-emerald-600"
                     />
                     <span>
-                      Manter conectado neste aparelho. O EconoRotas manterá sua
+                      Manter conectado neste aparelho. O EconoRota manterá sua
                       sessão ativa e o Safari/iCloud poderá preencher sua senha.
                     </span>
                   </label>
@@ -438,7 +438,7 @@ export default function Home() {
                     />
                     <span>
                       Confirmo que os dados informados são corretos e aceito o uso operacional
-                      do EconoRotas para roteirização e suporte.
+                      do EconoRota para roteirização e suporte.
                     </span>
                   </label>
                 )}
@@ -448,7 +448,7 @@ export default function Home() {
 
                 <Button type="submit" size="lg" disabled={authPending} className="w-full">
                   {authPending
-                    ? "Aguarde..."
+                    ? "Carregando..."
                     : authMode === "login"
                     ? "Entrar"
                     : "Criar conta"}

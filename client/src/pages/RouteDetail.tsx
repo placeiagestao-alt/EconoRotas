@@ -93,8 +93,6 @@ const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",
   "invalid_coordinates",
   "empty_address",
-  "generic_address",
-  "duplicate_sequence",
 ]);
 const EMPTY_ROUTE_POINT: RoutePoint = { address: "", latitude: 0, longitude: 0 };
 const FAR_FROM_STOP_ALERT_KM = 0.5;

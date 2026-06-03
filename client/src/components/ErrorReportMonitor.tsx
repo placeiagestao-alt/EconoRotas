@@ -76,7 +76,7 @@ export default function ErrorReportMonitor() {
       if (!shouldPromptAnomalyReport()) return;
       markAnomalyReportPrompted();
 
-      toast.error("Erro detectado no EconoRotas.", {
+      toast.error("Erro detectado no EconoRota.", {
         description:
           "Envie o relatorio para o suporte analisar a falha pelo WhatsApp.",
         action: {

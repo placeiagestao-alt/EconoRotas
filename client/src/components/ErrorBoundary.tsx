@@ -42,7 +42,7 @@ class ErrorBoundary extends Component<Props, State> {
 
             <p className="mb-6 max-w-md text-center text-sm text-muted-foreground">
               Atualize a página. Se estiver usando como app no iPhone, confirme a
-              conexão com a internet e abra novamente pelo ícone EconoRotas.
+              conexão com a internet e abra novamente pelo ícone EconoRota.
             </p>
 
             <button

@@ -2816,7 +2816,7 @@ function registerGeocodingProxy(app2) {
     if (!rateLimit.allowed) {
       res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
       res.status(429).json({
-        error: "Limite de consultas excedido. Aguarde alguns segundos e tente novamente."
+        error: "Limite de consultas excedido. Tente novamente em alguns segundos."
       });
       return;
     }
@@ -2844,7 +2844,7 @@ function registerGeocodingProxy(app2) {
           error.retryAfter || "3"
         );
         res.status(429).json({
-          error: "Servico de enderecos ocupado. Aguarde alguns segundos e tente novamente.",
+          error: "Servico de enderecos ocupado. Tente novamente em alguns segundos.",
           details: error instanceof Error ? error.message : void 0
         });
         return;
@@ -4159,7 +4159,7 @@ Estat\xEDsticas do Usu\xE1rio:
 }
 function buildFallbackAssistantResponse(routeContext) {
   return [
-    "No momento o assistente de IA n\xE3o conseguiu acessar o provedor externo, mas o EconoRotas continua operacional.",
+    "No momento o assistente de IA n\xE3o conseguiu acessar o provedor externo, mas o EconoRota continua operacional.",
     "",
     "Resumo dispon\xEDvel:",
     routeContext,
@@ -4548,9 +4548,7 @@ var IMILE_PROVIDER = "imile_rider_delivery";
 var BLOCKING_AUDIT_ISSUE_TYPES = /* @__PURE__ */ new Set([
   "missing_coordinates",
   "invalid_coordinates",
-  "empty_address",
-  "generic_address",
-  "duplicate_sequence"
+  "empty_address"
 ]);
 var DUPLICATE_COORDINATE_BLOCKING_GROUPS = 3;
 var imileCredentialInput = z2.object({
@@ -4700,6 +4698,15 @@ function getPostOptimizationBlockingReason(audit) {
       message: `${criticalNearbySkip.title}: ${criticalNearbySkip.message}`
     };
   }
+  const regionRevisited = audit.issues.find(
+    (issue) => issue.type === "region_revisited"
+  );
+  if (regionRevisited) {
+    return {
+      issue: regionRevisited,
+      message: `${regionRevisited.title}: ${regionRevisited.message}`
+    };
+  }
   const duplicateCoordinateIssues = audit.issues.filter(
     (issue) => issue.type === "duplicate_coordinates"
   );
@@ -4710,6 +4717,9 @@ function getPostOptimizationBlockingReason(audit) {
     };
   }
   return null;
+}
+function isSequenceCoherenceIssue(issue) {
+  return issue.type === "nearby_stop_skipped" || issue.type === "region_revisited";
 }
 function assertRouteStopsReadyForOptimization(routeStops) {
   const audit = auditRouteSequence(routeStopsToAuditableStops(routeStops));
@@ -4822,35 +4832,89 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     });
   }
   const mode = requestedMode || route.mode;
-  const roadMetricOptions = {
-    startLocation,
-    endLocation,
-    localityMode: options?.localityMode
-  };
-  let optimizedWithRoadMetrics = null;
-  let auditSource = "geo-default";
-  if (options?.respectInputSequence) {
-    optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
-      locations,
-      roadMetricOptions
-    );
-    auditSource = optimizedWithRoadMetrics ? "road-sequential" : "geo-sequential";
-  } else {
-    optimizedWithRoadMetrics = await optimizeRouteWithRoadMetrics(
-      locations,
-      mode,
-      0,
-      roadMetricOptions
-    );
-    auditSource = optimizedWithRoadMetrics ? "road-default" : "geo-default";
+  async function buildOptimizationAttempt(attempt) {
+    const roadMetricOptions = {
+      startLocation,
+      endLocation,
+      localityMode: attempt.localityMode
+    };
+    let optimizedWithRoadMetrics = null;
+    let auditSource2 = "geo-default";
+    if (attempt.respectInputSequence) {
+      optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
+        locations,
+        roadMetricOptions
+      );
+      auditSource2 = optimizedWithRoadMetrics ? "road-sequential" : "geo-sequential";
+    } else {
+      optimizedWithRoadMetrics = await optimizeRouteWithRoadMetrics(
+        locations,
+        mode,
+        0,
+        roadMetricOptions
+      );
+      auditSource2 = optimizedWithRoadMetrics ? "road-default" : "geo-default";
+    }
+    const optimized2 = optimizedWithRoadMetrics ?? (attempt.respectInputSequence ? buildSequentialRoute(locations, roadMetricOptions) : optimizeRoute(locations, mode, 0, roadMetricOptions));
+    const audit2 = auditOptimizedRoute(optimized2, {
+      startLocation,
+      usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
+      respectInputSequence: Boolean(attempt.respectInputSequence)
+    });
+    return {
+      optimized: optimized2,
+      audit: audit2,
+      auditSource: attempt.auditSourceSuffix ? `${auditSource2}-${attempt.auditSourceSuffix}` : auditSource2,
+      usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
+      localityMode: attempt.localityMode,
+      respectInputSequence: Boolean(attempt.respectInputSequence)
+    };
   }
-  const optimized = optimizedWithRoadMetrics ?? (options?.respectInputSequence ? buildSequentialRoute(locations, roadMetricOptions) : optimizeRoute(locations, mode, 0, roadMetricOptions));
-  const audit = auditOptimizedRoute(optimized, {
-    startLocation,
-    usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
+  let optimizationAttempt = await buildOptimizationAttempt({
+    localityMode: options?.localityMode,
     respectInputSequence: Boolean(options?.respectInputSequence)
   });
-  const postOptimizationBlockingReason = getPostOptimizationBlockingReason(audit);
+  let postOptimizationBlockingReason = getPostOptimizationBlockingReason(
+    optimizationAttempt.audit
+  );
+  if (postOptimizationBlockingReason && isSequenceCoherenceIssue(postOptimizationBlockingReason.issue) && (optimizationAttempt.localityMode !== "strict" || optimizationAttempt.respectInputSequence)) {
+    const firstBlockingReason = postOptimizationBlockingReason;
+    optimizationAttempt = await buildOptimizationAttempt({
+      localityMode: "strict",
+      respectInputSequence: false,
+      auditSourceSuffix: "audit-corrected"
+    });
+    postOptimizationBlockingReason = getPostOptimizationBlockingReason(
+      optimizationAttempt.audit
+    );
+    await createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "route_audit_corrected_optimization",
+      severity: postOptimizationBlockingReason ? "warning" : "info",
+      source: "routes.audit",
+      title: postOptimizationBlockingReason ? "Auditor tentou corrigir a sequ\xEAncia" : "Auditor corrigiu a sequ\xEAncia",
+      message: postOptimizationBlockingReason ? `A segunda otimiza\xE7\xE3o ainda tem incoer\xEAncia. ${postOptimizationBlockingReason.message}` : `A rota foi reotimizada em modo r\xEDgido ap\xF3s o fiscal detectar incoer\xEAncia. ${firstBlockingReason.message}`,
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        firstBlockingIssue: firstBlockingReason.issue,
+        finalStatus: optimizationAttempt.audit.status,
+        finalScore: optimizationAttempt.audit.score,
+        finalIssueCount: optimizationAttempt.audit.issueCount,
+        finalIssues: optimizationAttempt.audit.issues.slice(0, 8),
+        localityMode: optimizationAttempt.localityMode,
+        respectInputSequence: optimizationAttempt.respectInputSequence,
+        auditSource: optimizationAttempt.auditSource
+      }
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record route audit correction event:", error);
+    });
+  }
+  const { optimized, audit, auditSource } = optimizationAttempt;
   if (postOptimizationBlockingReason) {
     await createOperationalEvent({
       userId,
@@ -6066,7 +6130,7 @@ export default function EconoRotasAssetRefresh() { return null; }
     const { database, fallbackStore, storageAvailable, mode } = await getStorageHealthSnapshot("api.health");
     res.status(storageAvailable ? 200 : 500).json({
       ok: storageAvailable,
-      app: "EconoRotas",
+      app: "EconoRota",
       environment: ENV.isProduction ? "production" : "development",
       mode,
       database,
@@ -6081,7 +6145,7 @@ export default function EconoRotasAssetRefresh() { return null; }
     res.status(storageAvailable ? 200 : 500).json({
       ok: storageAvailable,
       monitor: true,
-      app: "EconoRotas",
+      app: "EconoRota",
       environment: ENV.isProduction ? "production" : "development",
       mode,
       database,
@@ -6111,7 +6175,7 @@ export default function EconoRotasAssetRefresh() { return null; }
     const owner = await getAuthenticatedCaptureOwner(req);
     if (!owner) {
       res.status(401).json({
-        message: "Entre no EconoRotas para importar a captura iMile."
+        message: "Entre no EconoRota para importar a captura iMile."
       });
       return;
     }
@@ -6220,7 +6284,7 @@ async function handler(req, res) {
     res.end(
       JSON.stringify({
         ok: false,
-        app: "EconoRotas",
+        app: "EconoRota",
         error: message
       })
     );

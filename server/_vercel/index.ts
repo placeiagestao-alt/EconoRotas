@@ -38,7 +38,7 @@ export default async function handler(req: any, res: any) {
     res.end(
       JSON.stringify({
         ok: false,
-        app: "EconoRotas",
+        app: "EconoRota",
         error: message,
       })
     );

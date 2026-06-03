@@ -50,7 +50,7 @@ function normalizeError(error: unknown) {
 
 export function buildWhatsAppReport(anomaly: AppAnomaly) {
   const lines = [
-    "EconoRotas - alerta de erro",
+    "EconoRota - alerta de erro",
     `Severidade: ${anomaly.severity ?? "error"}`,
     `Origem: ${anomaly.source ?? "app"}`,
     `Ambiente: ${getRuntimeKind()}`,

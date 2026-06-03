@@ -128,7 +128,7 @@ export default function DownloadApk() {
 
             <div className="space-y-4">
               <h1 className="max-w-3xl text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">
-                Baixar aplicativo EconoRotas
+                Baixar aplicativo EconoRota
               </h1>
               <p className="max-w-2xl text-lg leading-8 text-slate-600">
                 Instale o app Android conectado ao ambiente oficial do Vercel para
@@ -177,7 +177,7 @@ export default function DownloadApk() {
                 <div>
                   <p className="text-sm font-medium text-slate-500">Aplicativo Android</p>
                   <h2 className="mt-1 text-2xl font-semibold text-slate-950">
-                    EconoRotas v{version}
+                    EconoRota v{version}
                   </h2>
                 </div>
                 <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700">
@@ -189,7 +189,7 @@ export default function DownloadApk() {
                 <div className="flex items-center justify-between gap-4 border-t border-slate-100 pt-3">
                   <dt className="text-slate-500">Arquivo</dt>
                   <dd className="font-medium text-slate-900">
-                    Aplicativo EconoRotas v{version}
+                    Aplicativo EconoRota v{version}
                   </dd>
                 </div>
                 <div className="flex items-center justify-between gap-4 border-t border-slate-100 pt-3">

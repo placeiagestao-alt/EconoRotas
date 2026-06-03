@@ -55,7 +55,7 @@ import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
 
-const APP_NAME = "EconoRotas";
+const APP_NAME = "EconoRota";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Painel", path: "/" },
@@ -237,7 +237,7 @@ function DashboardLayoutContent({
                   <BrandLogo variant="mark" className="h-10 w-10 shrink-0" />
                   <div className="min-w-0">
                     <span className="block truncate text-base font-semibold tracking-tight">
-                      Econo<span className="text-primary">Rotas</span>
+                      Econo<span className="text-primary">Rota</span>
                     </span>
                     <span className="block truncate text-[11px] text-muted-foreground">
                       Roteirização Inteligente

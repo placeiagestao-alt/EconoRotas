@@ -22,7 +22,7 @@ export function BrandLogo({
     >
       <img
         src={variant === "mark" ? markSrc : logoSrc}
-        alt="EconoRotas"
+        alt="EconoRota"
         className={cn("block h-full w-full object-contain", imageClassName)}
         draggable={false}
       />

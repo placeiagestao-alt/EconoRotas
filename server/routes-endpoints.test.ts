@@ -89,7 +89,7 @@ describe("Route endpoints", () => {
     expect(stops).toHaveLength(2);
   });
 
-  it("keeps route as draft when optimization finds blocking audit issues", async () => {
+  it("optimizes routeable generic labels instead of stopping at the audit warning", async () => {
     const caller = appRouter.createCaller(createAuthContext(8211));
 
     const result = await caller.routes.createAndOptimize({
@@ -113,12 +113,16 @@ describe("Route endpoints", () => {
 
     const route = await caller.routes.get({ id: result.route.id });
 
-    expect(result.optimization).toBeNull();
-    expect(result.warning).toContain("não foi possível otimizar");
-    expect(route?.status).toBe("draft");
+    expect(result.optimization).not.toBeNull();
+    expect(
+      result.optimization?.audit.issues.some(
+        (issue: any) => issue.type === "generic_address"
+      )
+    ).toBe(true);
+    expect(route?.status).toBe("optimized");
   });
 
-  it("keeps route as draft when the auditor blocks a poor optimized sequence", async () => {
+  it("reoptimizes automatically when the auditor finds a poor preserved sequence", async () => {
     const caller = appRouter.createCaller(createAuthContext(8212));
 
     const result = await caller.routes.createAndOptimize({
@@ -149,9 +153,14 @@ describe("Route endpoints", () => {
 
     const route = await caller.routes.get({ id: result.route.id });
 
-    expect(result.optimization).toBeNull();
-    expect(result.warning).toContain("Auditor bloqueou");
-    expect(route?.status).toBe("draft");
+    expect(result.optimization).not.toBeNull();
+    expect(result.optimization?.auditSource).toContain("audit-corrected");
+    expect(
+      result.optimization?.audit.issues.some(
+        (issue: any) => issue.type === "nearby_stop_skipped"
+      )
+    ).toBe(false);
+    expect(route?.status).toBe("optimized");
   });
 
   it("rejects reoptimization when too many addresses share approximate coordinates", async () => {
@@ -212,6 +221,44 @@ describe("Route endpoints", () => {
 
     expect(routeAfter?.status).toBe("draft");
     expect(stopsAfter).toHaveLength(6);
+  });
+
+  it("reoptimizes a route with duplicated sequence numbers by rebuilding the order", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8214));
+    const route = await caller.routes.create({
+      name: "Rota com sequencia duplicada corrigivel",
+      mode: "balanced",
+    });
+
+    await caller.stops.create({
+      routeId: route.id,
+      stops: [
+        {
+          address: "Rua Sequencia A, Presidente Prudente - SP",
+          latitude: -22.12,
+          longitude: -51.4,
+          sequence: 0,
+        },
+        {
+          address: "Rua Sequencia B, Presidente Prudente - SP",
+          latitude: -22.121,
+          longitude: -51.401,
+          sequence: 0,
+        },
+        {
+          address: "Rua Sequencia C, Presidente Prudente - SP",
+          latitude: -22.122,
+          longitude: -51.402,
+          sequence: 2,
+        },
+      ],
+    });
+
+    const optimized = await caller.routes.optimize({ id: route.id });
+    const stops = await caller.stops.list({ routeId: route.id });
+
+    expect(optimized.totalDistance).toBeGreaterThan(0);
+    expect(stops.map((stop: any) => Number(stop.sequence))).toEqual([0, 1, 2]);
   });
 
   it("respects input stop order when sequential routing is requested", async () => {

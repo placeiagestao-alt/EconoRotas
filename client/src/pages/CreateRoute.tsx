@@ -1188,7 +1188,7 @@ export default function CreateRoute() {
   const handleOpenImileAccessibilitySettings = async () => {
     try {
       await ImileCapture.openAccessibilitySettings();
-      toast.message("Ative EconoRotas na acessibilidade e volte para iniciar a captura.");
+      toast.message("Ative EconoRota na acessibilidade e volte para iniciar a captura.");
     } catch (error: any) {
       toast.error(error.message || "Nao foi possivel abrir a permissao de acessibilidade.");
     }
@@ -1199,7 +1199,7 @@ export default function CreateRoute() {
 
     try {
       await ImileCapture.startCapture();
-      toast.message("Rider Delivery aberto. Aguarde a rolagem terminar e volte ao EconoRotas.");
+      toast.message("Rider Delivery aberto. Espere a rolagem terminar e volte ao EconoRota.");
     } catch (error: any) {
       setIsRunningImileCapture(false);
       toast.error(error.message || "Nao foi possivel iniciar a captura do Rider Delivery.");
@@ -1330,7 +1330,7 @@ export default function CreateRoute() {
     e.preventDefault();
 
     if (isResolvingCoordinates) {
-      toast.message("Aguarde a localização de endereços terminar.");
+      toast.message("Espere a localização de endereços terminar.");
       return;
     }
 

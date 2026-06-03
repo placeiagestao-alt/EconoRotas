@@ -14,7 +14,7 @@ export default function PwaStatusMonitor() {
     };
 
     const handlePwaUpdate = () => {
-      toast.info("Nova versão do EconoRotas disponível.", {
+      toast.info("Nova versão do EconoRota disponível.", {
         action: {
           label: "Atualizar",
           onClick: () => window.location.reload(),

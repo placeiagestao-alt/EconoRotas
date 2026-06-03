@@ -1,6 +1,6 @@
 {
-  "name": "EconoRotas",
-  "short_name": "EconoRotas",
+  "name": "EconoRota",
+  "short_name": "EconoRota",
   "description": "Gestão e otimização de rotas para economizar tempo e distância nas entregas.",
   "start_url": "/",
   "scope": "/",

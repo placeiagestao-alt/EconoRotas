@@ -195,7 +195,7 @@ export default function Profile() {
                   />
                   <span>
                     Confirmo que os dados informados sao corretos e aceito o uso
-                    operacional do EconoRotas para roteirizacao e suporte.
+                    operacional do EconoRota para roteirizacao e suporte.
                   </span>
                 </label>
               )}

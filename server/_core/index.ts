@@ -269,7 +269,7 @@ export default function EconoRotasAssetRefresh() { return null; }
 
     res.status(storageAvailable ? 200 : 500).json({
       ok: storageAvailable,
-      app: "EconoRotas",
+      app: "EconoRota",
       environment: ENV.isProduction ? "production" : "development",
       mode,
       database,
@@ -288,7 +288,7 @@ export default function EconoRotasAssetRefresh() { return null; }
     res.status(storageAvailable ? 200 : 500).json({
       ok: storageAvailable,
       monitor: true,
-      app: "EconoRotas",
+      app: "EconoRota",
       environment: ENV.isProduction ? "production" : "development",
       mode,
       database,
@@ -321,7 +321,7 @@ export default function EconoRotasAssetRefresh() { return null; }
     const owner = await getAuthenticatedCaptureOwner(req);
     if (!owner) {
       res.status(401).json({
-        message: "Entre no EconoRotas para importar a captura iMile.",
+        message: "Entre no EconoRota para importar a captura iMile.",
       });
       return;
     }

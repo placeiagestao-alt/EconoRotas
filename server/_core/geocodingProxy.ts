@@ -171,7 +171,7 @@ export function registerGeocodingProxy(app: Express) {
     if (!rateLimit.allowed) {
       res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
       res.status(429).json({
-        error: "Limite de consultas excedido. Aguarde alguns segundos e tente novamente.",
+        error: "Limite de consultas excedido. Tente novamente em alguns segundos.",
       });
       return;
     }
@@ -202,7 +202,7 @@ export function registerGeocodingProxy(app: Express) {
           (error as Error & { retryAfter?: string }).retryAfter || "3"
         );
         res.status(429).json({
-          error: "Servico de enderecos ocupado. Aguarde alguns segundos e tente novamente.",
+          error: "Servico de enderecos ocupado. Tente novamente em alguns segundos.",
           details: error instanceof Error ? error.message : undefined,
         });
         return;
