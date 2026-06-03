@@ -93,6 +93,16 @@ const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",
   "invalid_coordinates",
   "empty_address",
+  "generic_address",
+  "duplicate_sequence",
+  "region_revisited",
+  "osrm_fallback",
+]);
+const STRUCTURAL_AUDIT_ISSUE_TYPES = new Set([
+  "missing_coordinates",
+  "invalid_coordinates",
+  "empty_address",
+  "generic_address",
 ]);
 const EMPTY_ROUTE_POINT: RoutePoint = { address: "", latitude: 0, longitude: 0 };
 const FAR_FROM_STOP_ALERT_KM = 0.5;
@@ -106,6 +116,20 @@ const PROXIMITY_WATCH_OPTIONS: PositionOptions = {
   maximumAge: 5_000,
   timeout: 15_000,
 };
+
+function isBlockingAuditIssue(issue: any) {
+  if (!issue?.type) return false;
+  if (BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type)) return true;
+
+  return (
+    issue.type === "nearby_stop_skipped" &&
+    (issue.severity === "critical" || issue.severity === "high")
+  );
+}
+
+function isStructuralAuditIssue(issue: any) {
+  return STRUCTURAL_AUDIT_ISSUE_TYPES.has(issue?.type);
+}
 
 function toNumber(value: unknown) {
   const number = Number(value);
@@ -800,12 +824,20 @@ export default function RouteDetail() {
   }, [stopSearch, stops]);
   const blockingAuditIssues = useMemo(
     () =>
+      (auditQuery.data?.issues || []).filter((issue: any) => isBlockingAuditIssue(issue)),
+    [auditQuery.data?.issues]
+  );
+  const structuralAuditIssues = useMemo(
+    () =>
       (auditQuery.data?.issues || []).filter((issue: any) =>
-        BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type)
+        isStructuralAuditIssue(issue)
       ),
     [auditQuery.data?.issues]
   );
   const hasBlockingAuditIssues = blockingAuditIssues.length > 0;
+  const hasStructuralAuditIssues = structuralAuditIssues.length > 0;
+  const hasReoptimizableAuditIssues =
+    hasBlockingAuditIssues && !hasStructuralAuditIssues;
 
   const completeRoute = async () => {
     await updateRouteMutation.mutateAsync({
@@ -815,12 +847,54 @@ export default function RouteDetail() {
     toast.success("Rota concluida.");
   };
 
-  const handleStartRoute = async () => {
-    if (hasBlockingAuditIssues) {
-      const firstIssue = blockingAuditIssues[0];
+  const reoptimizeAfterAuditBlock = async () => {
+    if (remainingStopsCount < 2) {
+      toast.error("A rota precisa ter pelo menos 2 paradas pendentes para refazer a sequência.");
+      return;
+    }
+
+    setIsLocatingForReoptimization(true);
+
+    try {
+      toast.message("Fiscal encontrou incoerência. Recalculando a rota para novo julgamento...");
+      const currentPosition = await getCurrentPosition();
+      const payload = {
+        id: routeId,
+        mode: routeQuery.data?.mode ?? "balanced",
+        localityMode: "strict" as const,
+        startLatitude: currentPosition.latitude,
+        startLongitude: currentPosition.longitude,
+      };
+
+      if (deliveryState.started || handledStopIds.length > 0) {
+        optimizeRemainingMutation.mutate({
+          ...payload,
+          excludeStopIds: handledStopIds,
+        });
+      } else {
+        optimizeRouteMutation.mutate(payload);
+      }
+    } catch (error: any) {
       toast.error(
-        `${firstIssue.title}: corrija as paradas com problema antes de iniciar a rota.`
+        error?.message ||
+          "Não foi possível obter sua localização para refazer a rota pelo fiscal."
       );
+    } finally {
+      setIsLocatingForReoptimization(false);
+    }
+  };
+
+  const handleStartRoute = async () => {
+    if (hasStructuralAuditIssues) {
+      const firstIssue = structuralAuditIssues[0];
+      toast.error(
+        `${firstIssue.title}: corrija as paradas com problema antes de iniciar.`
+      );
+      return;
+    }
+
+    if (hasReoptimizableAuditIssues) {
+      await reoptimizeAfterAuditBlock();
       return;
     }
 
@@ -1086,8 +1160,8 @@ export default function RouteDetail() {
   };
 
   const handleOptimizeRoute = async () => {
-    if (hasBlockingAuditIssues) {
-      const firstIssue = blockingAuditIssues[0];
+    if (hasStructuralAuditIssues) {
+      const firstIssue = structuralAuditIssues[0];
       toast.error(
         `${firstIssue.title}: corrija os problemas apontados pelo fiscal antes de otimizar.`
       );
@@ -1122,8 +1196,8 @@ export default function RouteDetail() {
   };
 
   const handleOptimizeRemainingRoute = async () => {
-    if (hasBlockingAuditIssues) {
-      const firstIssue = blockingAuditIssues[0];
+    if (hasStructuralAuditIssues) {
+      const firstIssue = structuralAuditIssues[0];
       toast.error(
         `${firstIssue.title}: corrija os problemas apontados pelo fiscal antes de reotimizar.`
       );
@@ -1159,8 +1233,8 @@ export default function RouteDetail() {
   };
 
   const handleImproveRoutePreference = async () => {
-    if (hasBlockingAuditIssues) {
-      const firstIssue = blockingAuditIssues[0];
+    if (hasStructuralAuditIssues) {
+      const firstIssue = structuralAuditIssues[0];
       toast.error(
         `${firstIssue.title}: corrija os problemas apontados pelo fiscal antes de ajustar a sequência.`
       );
@@ -1404,7 +1478,7 @@ export default function RouteDetail() {
                 optimizeRemainingMutation.isPending ||
                 isLocatingForReoptimization ||
                 auditQuery.isLoading ||
-                hasBlockingAuditIssues
+                hasStructuralAuditIssues
               }
             >
               <Zap className="mr-2 h-4 w-4" />
@@ -1420,7 +1494,7 @@ export default function RouteDetail() {
                 optimizeRemainingMutation.isPending ||
                 isLocatingForReoptimization ||
                 auditQuery.isLoading ||
-                hasBlockingAuditIssues
+                hasStructuralAuditIssues
               }
             >
               <Zap className="mr-2 h-4 w-4" />
@@ -1440,7 +1514,7 @@ export default function RouteDetail() {
                 optimizeRemainingMutation.isPending ||
                 isLocatingForReoptimization ||
                 auditQuery.isLoading ||
-                hasBlockingAuditIssues
+                hasStructuralAuditIssues
               }
             >
               <Navigation className="mr-2 h-4 w-4" />
@@ -1460,7 +1534,7 @@ export default function RouteDetail() {
                 isComplete ||
                 isLocatingForReoptimization ||
                 auditQuery.isLoading ||
-                hasBlockingAuditIssues
+                hasStructuralAuditIssues
               }
             >
               <Play className="mr-2 h-4 w-4" />
@@ -1501,7 +1575,9 @@ export default function RouteDetail() {
                 </div>
                 {hasBlockingAuditIssues ? (
                   <p className="text-sm font-semibold">
-                    Corrija os problemas de parada antes de otimizar ou iniciar a rota.
+                    {hasStructuralAuditIssues
+                      ? "Corrija os problemas de endereço ou coordenada antes de otimizar ou iniciar a rota."
+                      : "O fiscal encontrou incoerência de sequência. Ao iniciar, o sistema vai refazer a rota para novo julgamento; você também pode usar Reotimizar restantes ou Não gostei da sequência."}
                   </p>
                 ) : null}
                 {auditQuery.data.issues.length ? (
