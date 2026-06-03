@@ -235,6 +235,22 @@ function readStringMetadata(
   return typeof value === "string" ? value : undefined;
 }
 
+function isLatestOptimizationContextFresh(
+  route: { status?: string; updatedAt?: Date | string | null },
+  event: { createdAt?: Date | string | null } | null | undefined
+) {
+  if (!event || route.status !== "optimized") return false;
+
+  const routeUpdatedAt = route.updatedAt ? new Date(route.updatedAt).getTime() : 0;
+  const eventCreatedAt = event.createdAt ? new Date(event.createdAt).getTime() : 0;
+
+  if (!Number.isFinite(routeUpdatedAt) || !Number.isFinite(eventCreatedAt)) {
+    return false;
+  }
+
+  return routeUpdatedAt <= eventCreatedAt;
+}
+
 async function requireUserRoute(routeId: number, userId: number) {
   const route = await db.getRouteById(routeId, userId);
 
@@ -776,7 +792,13 @@ export const appRouter = router({
           input.id,
           ctx.user.id
         );
-        const latestMetadata = latestOptimizationEvent?.metadata;
+        const hasFreshOptimizationContext = isLatestOptimizationContextFresh(
+          route,
+          latestOptimizationEvent
+        );
+        const latestMetadata = hasFreshOptimizationContext
+          ? latestOptimizationEvent?.metadata
+          : undefined;
         const auditSource = readStringMetadata(latestMetadata, "auditSource");
         const usedRoadMetrics = readBooleanMetadata(
           latestMetadata,
@@ -822,6 +844,7 @@ export const appRouter = router({
             respectInputSequence: respectInputSequence ?? null,
             requireStartLocation,
             lastOptimizationEventId: latestOptimizationEvent?.id ?? null,
+            staleOptimizationContext: !hasFreshOptimizationContext && Boolean(latestOptimizationEvent),
           },
         };
       }),
