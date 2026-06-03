@@ -217,6 +217,24 @@ function auditOptimizedRoute(
   });
 }
 
+function readBooleanMetadata(
+  metadata: unknown,
+  key: string
+): boolean | undefined {
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readStringMetadata(
+  metadata: unknown,
+  key: string
+): string | undefined {
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : undefined;
+}
+
 async function requireUserRoute(routeId: number, userId: number) {
   const route = await db.getRouteById(routeId, userId);
 
@@ -754,13 +772,31 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         const route = await requireUserRoute(input.id, ctx.user.id);
         const routeStops = await db.getRouteStops(input.id);
+        const latestOptimizationEvent = await db.getLatestRouteOptimizationEvent(
+          input.id,
+          ctx.user.id
+        );
+        const latestMetadata = latestOptimizationEvent?.metadata;
+        const auditSource = readStringMetadata(latestMetadata, "auditSource");
+        const usedRoadMetrics = readBooleanMetadata(
+          latestMetadata,
+          "auditUsedRoadMetrics"
+        ) ?? (auditSource ? auditSource.startsWith("road-") : undefined);
+        const respectInputSequence = readBooleanMetadata(
+          latestMetadata,
+          "respectInputSequence"
+        );
+        const requireStartLocation = readBooleanMetadata(
+          latestMetadata,
+          "auditRequireStartLocation"
+        ) ?? false;
         const startLocation = toOptionalLocation(
           route.startLocation,
           route.startLatitude,
           route.startLongitude
         );
 
-        return auditRouteSequence(
+        const report = auditRouteSequence(
           routeStops.map((stop: any) => ({
             id: Number(stop.id),
             latitude: parseFloat(String(stop.latitude ?? 0)),
@@ -771,10 +807,23 @@ export const appRouter = router({
           })),
           {
             startLocation,
-            requireStartLocation: false,
+            requireStartLocation,
             actualTotalDistanceKm: Number(route.totalDistance ?? 0),
+            usedRoadMetrics,
+            respectInputSequence,
           }
         );
+
+        return {
+          ...report,
+          context: {
+            auditSource: auditSource ?? null,
+            usedRoadMetrics: usedRoadMetrics ?? null,
+            respectInputSequence: respectInputSequence ?? null,
+            requireStartLocation,
+            lastOptimizationEventId: latestOptimizationEvent?.id ?? null,
+          },
+        };
       }),
     create: protectedProcedure.input(routeCreateSchema)
       .mutation(async ({ ctx, input }) => {
@@ -830,6 +879,8 @@ export const appRouter = router({
               auditStatus: optimized.audit?.status,
               auditScore: optimized.audit?.score,
               auditIssueCount: optimized.audit?.issueCount,
+              auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
+              auditRequireStartLocation: true,
             },
           });
           await recordRouteAuditEvent(
@@ -933,6 +984,8 @@ export const appRouter = router({
             auditStatus: optimized.audit?.status,
             auditScore: optimized.audit?.score,
             auditIssueCount: optimized.audit?.issueCount,
+            auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
+            auditRequireStartLocation: true,
           },
         });
         await recordRouteAuditEvent(
@@ -992,6 +1045,8 @@ export const appRouter = router({
             auditStatus: optimized.audit?.status,
             auditScore: optimized.audit?.score,
             auditIssueCount: optimized.audit?.issueCount,
+            auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
+            auditRequireStartLocation: true,
           },
         });
         await recordRouteAuditEvent(

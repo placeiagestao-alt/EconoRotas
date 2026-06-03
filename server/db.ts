@@ -1744,6 +1744,49 @@ export async function getRecentOperationalEvents(limit = 100) {
     .limit(safeLimit);
 }
 
+export async function getLatestRouteOptimizationEvent(routeId: number, userId: number) {
+  const optimizationTypes = [
+    "route_optimized",
+    "route_reoptimized",
+    "route_remaining_reoptimized",
+    "route_user_requested_better_sequence",
+  ];
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return sortByDateDesc(
+        memory.operationalEvents.filter(
+          (event) =>
+            event.routeId === routeId &&
+            event.userId === userId &&
+            optimizationTypes.includes(event.type)
+        ),
+        "createdAt"
+      )[0] ?? null;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const result = await db
+    .select()
+    .from(operationalEvents)
+    .where(
+      and(
+        eq(operationalEvents.routeId, routeId),
+        eq(operationalEvents.userId, userId),
+        sql`${operationalEvents.type} IN (${sql.join(
+          optimizationTypes.map((type) => sql`${type}`),
+          sql`, `
+        )})`
+      )
+    )
+    .orderBy(desc(operationalEvents.createdAt))
+    .limit(1);
+
+  return result[0] ?? null;
+}
+
 export async function getAdminOperationalDashboard() {
   const db = await getDb();
   if (!db) {

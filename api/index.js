@@ -1471,6 +1471,37 @@ async function getRecentOperationalEvents(limit = 100) {
     routeName: routes.name
   }).from(operationalEvents).leftJoin(users, eq(operationalEvents.userId, users.id)).leftJoin(routes, eq(operationalEvents.routeId, routes.id)).orderBy(desc(operationalEvents.createdAt)).limit(safeLimit);
 }
+async function getLatestRouteOptimizationEvent(routeId, userId) {
+  const optimizationTypes = [
+    "route_optimized",
+    "route_reoptimized",
+    "route_remaining_reoptimized",
+    "route_user_requested_better_sequence"
+  ];
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return sortByDateDesc(
+        memory.operationalEvents.filter(
+          (event) => event.routeId === routeId && event.userId === userId && optimizationTypes.includes(event.type)
+        ),
+        "createdAt"
+      )[0] ?? null;
+    }
+    requireConfiguredDatabase();
+  }
+  const result = await db.select().from(operationalEvents).where(
+    and(
+      eq(operationalEvents.routeId, routeId),
+      eq(operationalEvents.userId, userId),
+      sql`${operationalEvents.type} IN (${sql.join(
+        optimizationTypes.map((type) => sql`${type}`),
+        sql`, `
+      )})`
+    )
+  ).orderBy(desc(operationalEvents.createdAt)).limit(1);
+  return result[0] ?? null;
+}
 async function getAdminOperationalDashboard() {
   const db = await getDb();
   if (!db) {
@@ -3772,11 +3803,11 @@ function auditRouteSequence(stops2, options = {}) {
   if (options.actualTotalDistanceKm && totalDistanceKm > 0 && options.actualTotalDistanceKm / totalDistanceKm >= ROAD_DETOUR_RATIO) {
     issues.push({
       type: "high_road_detour",
-      severity: "high",
-      title: "Distancia por rua muito maior que a estimada",
+      severity: "medium",
+      title: "Verificar desvio alto por rua",
       message: `A distancia por rua ficou ${roundKm(
         options.actualTotalDistanceKm / totalDistanceKm
-      )}x maior que a distancia em linha reta. Verifique sentidos de rua, acessos e retornos.`,
+      )}x maior que a distancia em linha reta. Pode ser normal por mao unica, avenidas ou acessos indiretos, mas merece conferencia.`,
       distanceKm: roundKm(options.actualTotalDistanceKm),
       nearestDistanceKm: roundKm(totalDistanceKm)
     });
@@ -4567,6 +4598,16 @@ function auditOptimizedRoute(route, options = {}) {
     respectInputSequence: options.respectInputSequence
   });
 }
+function readBooleanMetadata(metadata, key) {
+  if (!metadata || typeof metadata !== "object") return void 0;
+  const value = metadata[key];
+  return typeof value === "boolean" ? value : void 0;
+}
+function readStringMetadata(metadata, key) {
+  if (!metadata || typeof metadata !== "object") return void 0;
+  const value = metadata[key];
+  return typeof value === "string" ? value : void 0;
+}
 async function requireUserRoute(routeId, userId) {
   const route = await getRouteById(routeId, userId);
   if (!route) {
@@ -5019,12 +5060,30 @@ var appRouter = router({
     audit: protectedProcedure.input(z2.object({ id: z2.number() })).query(async ({ ctx, input }) => {
       const route = await requireUserRoute(input.id, ctx.user.id);
       const routeStops = await getRouteStops(input.id);
+      const latestOptimizationEvent = await getLatestRouteOptimizationEvent(
+        input.id,
+        ctx.user.id
+      );
+      const latestMetadata = latestOptimizationEvent?.metadata;
+      const auditSource = readStringMetadata(latestMetadata, "auditSource");
+      const usedRoadMetrics = readBooleanMetadata(
+        latestMetadata,
+        "auditUsedRoadMetrics"
+      ) ?? (auditSource ? auditSource.startsWith("road-") : void 0);
+      const respectInputSequence = readBooleanMetadata(
+        latestMetadata,
+        "respectInputSequence"
+      );
+      const requireStartLocation = readBooleanMetadata(
+        latestMetadata,
+        "auditRequireStartLocation"
+      ) ?? false;
       const startLocation = toOptionalLocation(
         route.startLocation,
         route.startLatitude,
         route.startLongitude
       );
-      return auditRouteSequence(
+      const report = auditRouteSequence(
         routeStops.map((stop) => ({
           id: Number(stop.id),
           latitude: parseFloat(String(stop.latitude ?? 0)),
@@ -5035,10 +5094,22 @@ var appRouter = router({
         })),
         {
           startLocation,
-          requireStartLocation: false,
-          actualTotalDistanceKm: Number(route.totalDistance ?? 0)
+          requireStartLocation,
+          actualTotalDistanceKm: Number(route.totalDistance ?? 0),
+          usedRoadMetrics,
+          respectInputSequence
         }
       );
+      return {
+        ...report,
+        context: {
+          auditSource: auditSource ?? null,
+          usedRoadMetrics: usedRoadMetrics ?? null,
+          respectInputSequence: respectInputSequence ?? null,
+          requireStartLocation,
+          lastOptimizationEventId: latestOptimizationEvent?.id ?? null
+        }
+      };
     }),
     create: protectedProcedure.input(routeCreateSchema).mutation(async ({ ctx, input }) => {
       const route = await createRoute(ctx.user.id, input);
@@ -5089,7 +5160,9 @@ var appRouter = router({
             auditSource: optimized.auditSource,
             auditStatus: optimized.audit?.status,
             auditScore: optimized.audit?.score,
-            auditIssueCount: optimized.audit?.issueCount
+            auditIssueCount: optimized.audit?.issueCount,
+            auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
+            auditRequireStartLocation: true
           }
         });
         await recordRouteAuditEvent(
@@ -5182,7 +5255,9 @@ var appRouter = router({
           auditSource: optimized.auditSource,
           auditStatus: optimized.audit?.status,
           auditScore: optimized.audit?.score,
-          auditIssueCount: optimized.audit?.issueCount
+          auditIssueCount: optimized.audit?.issueCount,
+          auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
+          auditRequireStartLocation: true
         }
       });
       await recordRouteAuditEvent(
@@ -5233,7 +5308,9 @@ var appRouter = router({
           auditSource: optimized.auditSource,
           auditStatus: optimized.audit?.status,
           auditScore: optimized.audit?.score,
-          auditIssueCount: optimized.audit?.issueCount
+          auditIssueCount: optimized.audit?.issueCount,
+          auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
+          auditRequireStartLocation: true
         }
       });
       await recordRouteAuditEvent(

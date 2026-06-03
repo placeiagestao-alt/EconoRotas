@@ -216,11 +216,11 @@ export function auditRouteSequence(
   ) {
     issues.push({
       type: "high_road_detour",
-      severity: "high",
-      title: "Distancia por rua muito maior que a estimada",
+      severity: "medium",
+      title: "Verificar desvio alto por rua",
       message: `A distancia por rua ficou ${roundKm(
         options.actualTotalDistanceKm / totalDistanceKm
-      )}x maior que a distancia em linha reta. Verifique sentidos de rua, acessos e retornos.`,
+      )}x maior que a distancia em linha reta. Pode ser normal por mao unica, avenidas ou acessos indiretos, mas merece conferencia.`,
       distanceKm: roundKm(options.actualTotalDistanceKm),
       nearestDistanceKm: roundKm(totalDistanceKm),
     });

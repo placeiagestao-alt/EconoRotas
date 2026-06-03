@@ -1440,12 +1440,23 @@ export default function RouteDetail() {
                   </Badge>
                 </div>
                 {auditQuery.data.issues.length ? (
-                  <div className="space-y-1 text-sm">
-                    {auditQuery.data.issues.slice(0, 3).map((issue: any, index: number) => (
-                      <p key={`${issue.type}-${index}`}>
-                        <span className="font-medium">{issue.title}:</span>{" "}
-                        {issue.message}
-                      </p>
+                  <div className="max-h-56 space-y-2 overflow-y-auto pr-1 text-sm">
+                    {auditQuery.data.issues.map((issue: any, index: number) => (
+                      <div key={`${issue.type}-${index}`} className="flex gap-2">
+                        <Badge variant="outline" className="h-6 shrink-0">
+                          {issue.severity === "critical"
+                            ? "crítico"
+                            : issue.severity === "high"
+                            ? "alto"
+                            : issue.severity === "medium"
+                            ? "médio"
+                            : "baixo"}
+                        </Badge>
+                        <p>
+                          <span className="font-medium">{issue.title}:</span>{" "}
+                          {issue.message}
+                        </p>
+                      </div>
                     ))}
                   </div>
                 ) : (

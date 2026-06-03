@@ -348,4 +348,39 @@ describe("Route endpoints", () => {
       "Stop pendente B",
     ]);
   });
+
+  it("uses last optimization metadata when recalculating the route audit panel", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8208));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Rota auditada com ordem preservada",
+      mode: "balanced",
+      respectInputSequence: true,
+      stops: [
+        {
+          address: "Parada distante",
+          latitude: -22.14,
+          longitude: -51.4,
+          sequence: 0,
+        },
+        {
+          address: "Parada proxima",
+          latitude: -22.12001,
+          longitude: -51.40001,
+          sequence: 1,
+        },
+      ],
+    });
+
+    const audit = await caller.routes.audit({ id: result.route.id });
+
+    expect(audit.context.respectInputSequence).toBe(true);
+    expect(audit.context.requireStartLocation).toBe(true);
+    expect(audit.issues.some((issue: any) => issue.type === "bad_preserved_sequence")).toBe(
+      true
+    );
+    expect(audit.issues.some((issue: any) => issue.type === "missing_driver_origin")).toBe(
+      true
+    );
+  });
 });
