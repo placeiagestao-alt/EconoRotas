@@ -3060,7 +3060,8 @@ function getLocalitySettings(localityMode = "local") {
       longJumpThresholdKm: 0.35,
       penaltyMultiplier: 4,
       clusterRadiusKm: 0.45,
-      clusterRevisitPenaltyKm: 8
+      clusterRevisitPenaltyKm: 8,
+      prematureClusterSwitchPenalty: 5e3
     };
   }
   if (localityMode === "balanced") {
@@ -3073,7 +3074,8 @@ function getLocalitySettings(localityMode = "local") {
       longJumpThresholdKm: 1.25,
       penaltyMultiplier: 2,
       clusterRadiusKm: 0.9,
-      clusterRevisitPenaltyKm: 4
+      clusterRevisitPenaltyKm: 4,
+      prematureClusterSwitchPenalty: 5e3
     };
   }
   return {
@@ -3085,7 +3087,8 @@ function getLocalitySettings(localityMode = "local") {
     longJumpThresholdKm: 0.7,
     penaltyMultiplier: 3,
     clusterRadiusKm: 0.65,
-    clusterRevisitPenaltyKm: 6
+    clusterRevisitPenaltyKm: 6,
+    prematureClusterSwitchPenalty: 5e3
   };
 }
 function isAvoidableLocalJump(nearestDistance, plannedDistance, settings) {
@@ -3414,13 +3417,18 @@ function calculateClusterRevisitPenalty(locations, sequence, options = {}) {
   const closedClusters = /* @__PURE__ */ new Set();
   let activeCluster;
   let penalty = 0;
-  for (const stopIndex of sequence) {
+  for (let sequenceIndex = 0; sequenceIndex < sequence.length; sequenceIndex += 1) {
+    const stopIndex = sequence[sequenceIndex];
     const clusterId = clusterByStopIndex.get(stopIndex);
     if (!clusterId) {
       activeCluster = void 0;
       continue;
     }
     if (activeCluster !== void 0 && activeCluster !== clusterId) {
+      const hasPendingInPreviousCluster = sequence.slice(sequenceIndex + 1).some((laterStopIndex) => clusterByStopIndex.get(laterStopIndex) === activeCluster);
+      if (hasPendingInPreviousCluster) {
+        penalty += settings.prematureClusterSwitchPenalty;
+      }
       closedClusters.add(activeCluster);
     }
     if (closedClusters.has(clusterId) && activeCluster !== clusterId) {
@@ -3514,7 +3522,8 @@ function getLocalitySettings2(localityMode = "local") {
       ratioThreshold: 1.12,
       extraThreshold: 0.08,
       longJumpThreshold: 0.35,
-      penaltyMultiplier: 4
+      penaltyMultiplier: 4,
+      prematureClusterSwitchPenalty: 5e3
     };
   }
   if (localityMode === "balanced") {
@@ -3525,7 +3534,8 @@ function getLocalitySettings2(localityMode = "local") {
       ratioThreshold: 1.55,
       extraThreshold: 0.35,
       longJumpThreshold: 1.25,
-      penaltyMultiplier: 2
+      penaltyMultiplier: 2,
+      prematureClusterSwitchPenalty: 5e3
     };
   }
   return {
@@ -3535,7 +3545,8 @@ function getLocalitySettings2(localityMode = "local") {
     ratioThreshold: 1.28,
     extraThreshold: 0.18,
     longJumpThreshold: 0.7,
-    penaltyMultiplier: 3
+    penaltyMultiplier: 3,
+    prematureClusterSwitchPenalty: 5e3
   };
 }
 function isAvoidableLocalJump2(nearestMetric, plannedMetric, settings) {
@@ -3753,8 +3764,8 @@ function calculateAvoidableJumpPenalty2(matrix, sequence, objective, startNodeIn
   }
   return penalty;
 }
-function chooseObjective(mode) {
-  return mode === "shortest_time" ? "duration" : "distance";
+function chooseObjective(_mode) {
+  return "duration";
 }
 function buildClusteredDeliveryNodeSequence(locations, deliveryNodeIndexes, options = {}) {
   const clusters = clusterStops(locations, options);
@@ -3767,6 +3778,37 @@ function buildClusteredDeliveryNodeSequence(locations, deliveryNodeIndexes, opti
     (cluster) => cluster.stops.map((stop) => nodeByDeliveryIndex.get(stop.originalIndex)).filter((nodeIndex) => nodeIndex !== void 0)
   );
   return sequence.length === deliveryNodeIndexes.length ? sequence : null;
+}
+function calculateClusterSwitchPenalty(matrix, locations, sequence, localityMode = "local") {
+  const settings = getLocalitySettings2(localityMode);
+  const clusters = clusterStops(locations, { localityMode });
+  if (clusters.length <= 1) return 0;
+  const clusterByDeliveryIndex = /* @__PURE__ */ new Map();
+  for (const cluster of clusters) {
+    if (cluster.stops.length < 2) continue;
+    for (const stop of cluster.stops) {
+      clusterByDeliveryIndex.set(stop.originalIndex, cluster.clusterId);
+    }
+  }
+  const clusterByNodeIndex = /* @__PURE__ */ new Map();
+  matrix.nodes.forEach((node, nodeIndex) => {
+    if (node.deliveryIndex === void 0) return;
+    const clusterId = clusterByDeliveryIndex.get(node.deliveryIndex);
+    if (clusterId) clusterByNodeIndex.set(nodeIndex, clusterId);
+  });
+  let penalty = 0;
+  for (let sequenceIndex = 1; sequenceIndex < sequence.length; sequenceIndex += 1) {
+    const previousCluster = clusterByNodeIndex.get(sequence[sequenceIndex - 1]);
+    const currentCluster = clusterByNodeIndex.get(sequence[sequenceIndex]);
+    if (!previousCluster || !currentCluster || previousCluster === currentCluster) {
+      continue;
+    }
+    const hasPendingInPreviousCluster = sequence.slice(sequenceIndex + 1).some((nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster);
+    if (hasPendingInPreviousCluster) {
+      penalty += settings.prematureClusterSwitchPenalty;
+    }
+  }
+  return penalty;
 }
 async function buildSequentialRouteWithRoadMetrics(locations, options = {}) {
   const result = await fetchRoadMatrix(locations, options);
@@ -3838,6 +3880,11 @@ async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startI
           candidateSequence,
           objective,
           result.startNodeIndex,
+          options.localityMode
+        ) + calculateClusterSwitchPenalty(
+          result.matrix,
+          locations,
+          candidateSequence,
           options.localityMode
         );
         const score = metric + penalty;

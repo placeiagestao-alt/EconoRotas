@@ -481,6 +481,22 @@ describe("Route Optimization", () => {
       expect(sequenceByRegion).toEqual(["Centro", "Centro", "Norte", "Norte"]);
     });
 
+    it("penalizes a premature region change before finishing the current cluster", () => {
+      const locations: Location[] = [
+        { latitude: -22.12, longitude: -51.4, address: "Centro 1" },
+        { latitude: -22.16, longitude: -51.45, address: "Norte 1" },
+        { latitude: -22.1201, longitude: -51.4001, address: "Centro 2" },
+        { latitude: -22.1601, longitude: -51.4501, address: "Norte 2" },
+      ];
+
+      const result = optimizeRoute(locations, "balanced", 0, {
+        localityMode: "strict",
+      });
+      const addresses = result.sequence.map((index) => locations[index].address);
+
+      expect(addresses).toEqual(["Centro 1", "Centro 2", "Norte 1", "Norte 2"]);
+    });
+
     it("optimizes São Paulo delivery route", () => {
       const locations: Location[] = [
         { latitude: -23.5505, longitude: -46.6333, address: "Av. Paulista" },

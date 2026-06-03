@@ -44,6 +44,7 @@ type LocalitySettings = {
   penaltyMultiplier: number;
   clusterRadiusKm: number;
   clusterRevisitPenaltyKm: number;
+  prematureClusterSwitchPenalty: number;
 };
 
 function getLocalitySettings(
@@ -60,6 +61,7 @@ function getLocalitySettings(
       penaltyMultiplier: 4,
       clusterRadiusKm: 0.45,
       clusterRevisitPenaltyKm: 8,
+      prematureClusterSwitchPenalty: 5000,
     };
   }
 
@@ -74,6 +76,7 @@ function getLocalitySettings(
       penaltyMultiplier: 2,
       clusterRadiusKm: 0.9,
       clusterRevisitPenaltyKm: 4,
+      prematureClusterSwitchPenalty: 5000,
     };
   }
 
@@ -87,6 +90,7 @@ function getLocalitySettings(
     penaltyMultiplier: 3,
     clusterRadiusKm: 0.65,
     clusterRevisitPenaltyKm: 6,
+    prematureClusterSwitchPenalty: 5000,
   };
 }
 
@@ -591,7 +595,8 @@ function calculateClusterRevisitPenalty(
   let activeCluster: number | undefined;
   let penalty = 0;
 
-  for (const stopIndex of sequence) {
+  for (let sequenceIndex = 0; sequenceIndex < sequence.length; sequenceIndex += 1) {
+    const stopIndex = sequence[sequenceIndex];
     const clusterId = clusterByStopIndex.get(stopIndex);
     if (!clusterId) {
       activeCluster = undefined;
@@ -599,6 +604,12 @@ function calculateClusterRevisitPenalty(
     }
 
     if (activeCluster !== undefined && activeCluster !== clusterId) {
+      const hasPendingInPreviousCluster = sequence
+        .slice(sequenceIndex + 1)
+        .some((laterStopIndex) => clusterByStopIndex.get(laterStopIndex) === activeCluster);
+      if (hasPendingInPreviousCluster) {
+        penalty += settings.prematureClusterSwitchPenalty;
+      }
       closedClusters.add(activeCluster);
     }
 

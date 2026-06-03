@@ -50,6 +50,36 @@ describe("OSRM route metrics", () => {
     expect(result?.totalTime).toBe(7);
   });
 
+  it("optimizes OSRM routes by duration instead of distance", async () => {
+    mockOsrmTable(
+      [
+        [0, 1, 1.5],
+        [1, 0, 1],
+        [1.5, 1, 0],
+      ],
+      [
+        [0, 8, 3],
+        [8, 0, 2],
+        [3, 2, 0],
+      ]
+    );
+
+    const locations: Location[] = [
+      { latitude: -22.12, longitude: -51.4, address: "A" },
+      { latitude: -22.121, longitude: -51.401, address: "B" },
+      { latitude: -22.122, longitude: -51.402, address: "C" },
+    ];
+
+    const result = await optimizeRouteWithRoadMetrics(
+      locations,
+      "shortest_distance"
+    );
+
+    expect(result?.sequence).toEqual([0, 2, 1]);
+    expect(result?.totalDistance).toBe(2.5);
+    expect(result?.totalTime).toBe(5);
+  });
+
   it("keeps spreadsheet order while replacing estimated metrics", async () => {
     mockOsrmTable([
       [0, 9, 3],
@@ -179,6 +209,33 @@ describe("OSRM route metrics", () => {
     expect(result?.waypoints.slice(0, 2).map((waypoint) => waypoint.address)).toEqual([
       "corner 1",
       "corner 2",
+    ]);
+  });
+
+  it("penalizes leaving a cluster before finishing its pending stops", async () => {
+    mockOsrmTable([
+      [0, 1, 0.1, 1],
+      [1, 0, 1, 0.1],
+      [0.1, 1, 0, 1],
+      [1, 0.1, 1, 0],
+    ]);
+
+    const locations: Location[] = [
+      { latitude: -22.12, longitude: -51.4, address: "Centro 1" },
+      { latitude: -22.16, longitude: -51.45, address: "Norte 1" },
+      { latitude: -22.1201, longitude: -51.4001, address: "Centro 2" },
+      { latitude: -22.1601, longitude: -51.4501, address: "Norte 2" },
+    ];
+
+    const result = await optimizeRouteWithRoadMetrics(locations, "balanced", 0, {
+      localityMode: "strict",
+    });
+
+    expect(result?.waypoints.map((waypoint) => waypoint.address)).toEqual([
+      "Centro 1",
+      "Centro 2",
+      "Norte 1",
+      "Norte 2",
     ]);
   });
 });
