@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import * as db from "./db";
 import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
+import { ENV } from "./_core/env";
 
 type AuthenticatedUser = NonNullable<TrpcContext["user"]>;
 
@@ -29,6 +30,10 @@ function createAuthContext(userId: number, role: "user" | "admin" = "user"): Trp
 }
 
 describe("Route endpoints", () => {
+  afterEach(() => {
+    ENV.osrmRequired = false;
+  });
+
   it("creates stops and optimizes route in one backend operation", async () => {
     const caller = appRouter.createCaller(createAuthContext(8201));
 
@@ -89,6 +94,40 @@ describe("Route endpoints", () => {
     expect(metrics.osrmFallbackCount + metrics.osrmUsedCount).toBe(
       metrics.routeMetricCount
     );
+  });
+
+  it("blocks route optimization when OSRM is required and road metrics are unavailable", async () => {
+    ENV.osrmRequired = true;
+    const caller = appRouter.createCaller(createAuthContext(8217));
+
+    const route = await caller.routes.create({
+      name: "Rota exige OSRM",
+      mode: "balanced",
+    });
+    await caller.stops.create({
+      routeId: route.id,
+      stops: [
+        {
+          address: "Rua OSRM A, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+        },
+        {
+          address: "Rua OSRM B, Presidente Prudente - SP",
+          latitude: -22.1217,
+          longitude: -51.3899,
+          sequence: 1,
+        },
+      ],
+    });
+
+    await expect(caller.routes.optimize({ id: route.id })).rejects.toThrow(
+      "OSRM obrigatorio indisponivel"
+    );
+
+    const storedRoute = await caller.routes.get({ id: route.id });
+    expect(storedRoute?.status).toBe("draft");
   });
 
   it("estimates commercial impact from corrected route metrics", async () => {

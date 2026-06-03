@@ -18,6 +18,7 @@ import { ENV } from "./env";
 import { sdk } from "./sdk";
 import { serveStatic } from "./static";
 import { recordHealthObservation } from "./monitoring";
+import { getOsrmHealth } from "../osrm";
 import {
   ensurePersistentFallbackDbLoaded,
   getDatabaseHealth,
@@ -169,6 +170,7 @@ function validateProductionEnvironment() {
 
 async function getStorageHealthSnapshot(source: string) {
   const database = await getDatabaseHealth();
+  const osrm = await getOsrmHealth();
   if (!database.connected) {
     try {
       await ensurePersistentFallbackDbLoaded();
@@ -184,6 +186,8 @@ async function getStorageHealthSnapshot(source: string) {
   const storageAvailable = ENV.requireManagedDatabase
     ? database.connected
     : database.connected || fallbackStore.loaded || canUseLocalFallback;
+  const osrmAvailable = !osrm.required || (osrm.enabled && osrm.reachable);
+  const systemAvailable = storageAvailable && osrmAvailable;
   const mode = database.connected
     ? "persistent"
     : fallbackStore.configured
@@ -194,14 +198,18 @@ async function getStorageHealthSnapshot(source: string) {
     database,
     fallbackStore,
     storageAvailable,
+    systemAvailable,
     mode,
     source,
+    osrm,
   });
 
   return {
     database,
     fallbackStore,
     storageAvailable,
+    systemAvailable,
+    osrm,
     mode,
   };
 }
@@ -264,16 +272,17 @@ export default function EconoRotasAssetRefresh() { return null; }
 `);
   });
   app.get("/api/health", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, mode } =
+    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, mode } =
       await getStorageHealthSnapshot("api.health");
 
-    res.status(storageAvailable ? 200 : 500).json({
-      ok: storageAvailable,
+    res.status(systemAvailable ? 200 : 500).json({
+      ok: systemAvailable,
       app: "EconoRota",
       environment: ENV.isProduction ? "production" : "development",
       mode,
       database,
       fallbackStore,
+      osrm,
       requiredManagedDatabase: ENV.requireManagedDatabase,
       warning: ENV.hasInvalidProductionDatabaseUrl
         ? "DATABASE_URL aponta para host local/Docker e não funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis."
@@ -282,17 +291,18 @@ export default function EconoRotasAssetRefresh() { return null; }
     });
   });
   app.get("/api/monitor/ping", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, mode } =
+    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, mode } =
       await getStorageHealthSnapshot("api.monitor.ping");
 
-    res.status(storageAvailable ? 200 : 500).json({
-      ok: storageAvailable,
+    res.status(systemAvailable ? 200 : 500).json({
+      ok: systemAvailable,
       monitor: true,
       app: "EconoRota",
       environment: ENV.isProduction ? "production" : "development",
       mode,
       database,
       fallbackStore,
+      osrm,
       requiredManagedDatabase: ENV.requireManagedDatabase,
       timestamp: new Date().toISOString(),
     });

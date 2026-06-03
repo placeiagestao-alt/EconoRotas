@@ -56,6 +56,21 @@ const optionalWarnings = [
     warn: (value) => !value,
     message: "configure um e-mail de contato para uso responsável do geocoding",
   },
+  {
+    name: "OSRM_BASE_URL",
+    warn: (value) =>
+      Number(process.env.CAPACITY_TARGET_USERS || 0) >= 50 &&
+      (!value || value.includes("router.project-osrm.org")),
+    message:
+      "para teste real com 50 usuarios, configure uma instancia OSRM propria e evite depender do router.project-osrm.org",
+  },
+  {
+    name: "OSRM_REQUIRED",
+    warn: (value) =>
+      Number(process.env.CAPACITY_TARGET_USERS || 0) >= 50 && value !== "true",
+    message:
+      "ative OSRM_REQUIRED=true depois de configurar OSRM proprio para impedir fallback geografico silencioso",
+  },
 ];
 
 function isPersistentDatabaseUrl(value) {

@@ -25,15 +25,25 @@ function buildIssueKey(input: {
   database: any;
   fallbackStore: any;
   storageAvailable: boolean;
+  osrm?: any;
+  systemAvailable?: boolean;
 }) {
   const databaseState = getDatabaseState(input.database);
   const dbError = input.database?.error || input.database?.schema?.error || "";
   const fallbackError = input.fallbackStore?.error || "";
+  const osrmState = input.osrm?.enabled
+    ? input.osrm.reachable
+      ? "osrm_connected"
+      : "osrm_unreachable"
+    : "osrm_disabled";
+  const osrmError = input.osrm?.error || "";
   return [
-    input.storageAvailable ? "ok" : "down",
+    (input.systemAvailable ?? input.storageAvailable) ? "ok" : "down",
     databaseState,
     dbError,
     fallbackError,
+    osrmState,
+    osrmError,
   ].join("|");
 }
 
@@ -42,6 +52,7 @@ function buildMetadata(input: {
   fallbackStore: any;
   storageAvailable: boolean;
   source: string;
+  osrm?: any;
 }) {
   return {
     source: input.source,
@@ -60,6 +71,17 @@ function buildMetadata(input: {
       loaded: Boolean(input.fallbackStore?.loaded),
       error: input.fallbackStore?.error ?? null,
     },
+    osrm: input.osrm
+      ? {
+          enabled: Boolean(input.osrm.enabled),
+          required: Boolean(input.osrm.required),
+          configured: Boolean(input.osrm.configured),
+          reachable: Boolean(input.osrm.reachable),
+          baseUrl: input.osrm.baseUrl ?? null,
+          timeoutMs: input.osrm.timeoutMs ?? null,
+          error: input.osrm.error ?? null,
+        }
+      : null,
   };
 }
 
@@ -92,8 +114,10 @@ export async function recordHealthObservation(input: {
   database: any;
   fallbackStore: any;
   storageAvailable: boolean;
+  systemAvailable?: boolean;
   mode: string;
   source: string;
+  osrm?: any;
 }) {
   const now = Date.now();
   const observedAt = new Date(now).toISOString();
@@ -103,8 +127,9 @@ export async function recordHealthObservation(input: {
     mode: input.mode,
     observedAt,
   };
+  const systemAvailable = input.systemAvailable ?? input.storageAvailable;
 
-  if (input.storageAvailable) {
+  if (systemAvailable) {
     if (!pendingOutage) {
       lastIssueKey = "";
       return;
@@ -117,8 +142,8 @@ export async function recordHealthObservation(input: {
     await persistMonitorEvent({
       type: "system_health_recovered",
       severity: "info",
-      title: "Armazenamento recuperado",
-      message: `O armazenamento voltou a responder. Falha anterior: ${outage.message}`,
+      title: "Sistema recuperado",
+      message: `O sistema voltou a responder. Falha anterior: ${outage.message}`,
       metadata: {
         ...metadata,
         previousOutage: outage,
@@ -132,7 +157,8 @@ export async function recordHealthObservation(input: {
     input.database?.error ||
     input.database?.schema?.error ||
     input.fallbackStore?.error ||
-    "Armazenamento indisponivel.";
+    input.osrm?.error ||
+    "Sistema indisponivel.";
 
   pendingOutage = pendingOutage
     ? {
@@ -149,7 +175,7 @@ export async function recordHealthObservation(input: {
         metadata,
       };
 
-  console.warn("[Monitor] Storage unavailable:", {
+  console.warn("[Monitor] System unavailable:", {
     mode: input.mode,
     source: input.source,
     message,
@@ -164,8 +190,10 @@ export async function recordHealthObservation(input: {
 
   await persistMonitorEvent({
     type: "system_health_failed",
-    severity: input.database?.reachable ? "error" : "fatal",
-    title: "Armazenamento indisponivel",
+    severity: input.storageAvailable ? "error" : input.database?.reachable ? "error" : "fatal",
+    title: input.storageAvailable
+      ? "OSRM indisponivel"
+      : "Armazenamento indisponivel",
     message,
     metadata,
   });

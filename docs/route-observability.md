@@ -131,6 +131,21 @@ corrigida pelo fiscal e o problema original informava `distanceKm` maior que
 - Score Medio de Qualidade: media de `qualityScore`.
 - Tempo Medio de Otimizacao: media de `optimizationRuntimeMs`.
 
+## OSRM proprio
+
+O sistema expoe saude do OSRM em `/api/health` e `/api/monitor/ping`.
+Enquanto `OSRM_REQUIRED=false`, a aplicacao continua operando com fallback
+geografico quando o OSRM falha. Para operacao em escala, configure
+`OSRM_BASE_URL` com uma instancia propria e ligue `OSRM_REQUIRED=true`.
+
+Com `OSRM_REQUIRED=true`:
+
+- health/monitor retornam falha quando o OSRM nao responde;
+- otimizacao de rota e bloqueada quando nao houver matriz real por ruas;
+- o painel Operacao continua medindo `osrmFallbackRate`.
+
+Runbook de infraestrutura: `ops/osrm/README.md`.
+
 ## Consultas SQL
 
 ```sql

@@ -70,6 +70,8 @@ export const ENV = {
     process.env.VITEST === "true" ? false : process.env.OSRM_ENABLED !== "false",
   osrmBaseUrl: process.env.OSRM_BASE_URL ?? "https://router.project-osrm.org",
   osrmRequestTimeoutMs: Number(process.env.OSRM_REQUEST_TIMEOUT_MS || 8000),
+  osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3000),
+  osrmRequired: process.env.OSRM_REQUIRED === "true",
   integrationCredentialsSecret:
     process.env.INTEGRATION_CREDENTIALS_SECRET ?? process.env.JWT_SECRET ?? "",
 };

@@ -21,6 +21,20 @@ type OsrmTableResponse = {
   durations?: Array<Array<number | null>>;
 };
 
+type OsrmRouteResponse = {
+  code?: string;
+};
+
+export type OsrmHealth = {
+  enabled: boolean;
+  required: boolean;
+  configured: boolean;
+  reachable: boolean;
+  baseUrl: string | null;
+  timeoutMs: number;
+  error: string | null;
+};
+
 type MatrixNode = {
   location: Location;
   deliveryIndex?: number;
@@ -148,6 +162,12 @@ function buildOsrmTableUrl(nodes: MatrixNode[]) {
   return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
 }
 
+function buildOsrmHealthUrl() {
+  const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const coordinates = "-51.407,-22.121;-51.406,-22.122";
+  return `${baseUrl}/route/v1/driving/${coordinates}?overview=false&alternatives=false&steps=false`;
+}
+
 function normalizeMatrix(
   values: Array<Array<number | null>> | undefined,
   factor: number
@@ -205,6 +225,73 @@ async function fetchRoadMatrix(
     };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function getOsrmHealth(): Promise<OsrmHealth> {
+  const baseUrl = ENV.osrmBaseUrl.trim().replace(/\/+$/, "");
+  const configured = Boolean(baseUrl);
+  const baseHealth = {
+    enabled: ENV.osrmEnabled,
+    required: ENV.osrmRequired,
+    configured,
+    reachable: false,
+    baseUrl: configured ? baseUrl : null,
+    timeoutMs: ENV.osrmHealthTimeoutMs,
+    error: null,
+  };
+
+  if (!ENV.osrmEnabled) {
+    return {
+      ...baseHealth,
+      error: ENV.osrmRequired ? "OSRM_REQUIRED=true, mas OSRM_ENABLED=false." : null,
+    };
+  }
+
+  if (!configured) {
+    return {
+      ...baseHealth,
+      error: "OSRM_BASE_URL nao configurado.",
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ENV.osrmHealthTimeoutMs);
+
+  try {
+    const response = await fetch(buildOsrmHealthUrl(), {
+      signal: controller.signal,
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      return {
+        ...baseHealth,
+        error: `OSRM respondeu HTTP ${response.status}.`,
+      };
+    }
+
+    const data = (await response.json()) as OsrmRouteResponse;
+    if (data.code !== "Ok") {
+      return {
+        ...baseHealth,
+        error: `OSRM respondeu code=${data.code ?? "indefinido"}.`,
+      };
+    }
+
+    return {
+      ...baseHealth,
+      reachable: true,
+    };
+  } catch (error) {
+    return {
+      ...baseHealth,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Falha ao consultar OSRM.",
+    };
   } finally {
     clearTimeout(timeout);
   }

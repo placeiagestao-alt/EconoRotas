@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildSequentialRouteWithRoadMetrics,
+  getOsrmHealth,
   optimizeRouteWithRoadMetrics,
 } from "./osrm";
 import { ENV } from "./_core/env";
@@ -29,7 +30,39 @@ describe("OSRM route metrics", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     ENV.osrmEnabled = false;
+    ENV.osrmRequired = false;
+    ENV.osrmBaseUrl = "https://router.project-osrm.org";
     vi.restoreAllMocks();
+  });
+
+  it("reports OSRM health when route endpoint responds", async () => {
+    ENV.osrmEnabled = true;
+    ENV.osrmBaseUrl = "https://osrm.econorota.local";
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ code: "Ok" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    ) as any;
+
+    const health = await getOsrmHealth();
+
+    expect(health.enabled).toBe(true);
+    expect(health.configured).toBe(true);
+    expect(health.reachable).toBe(true);
+    expect(health.baseUrl).toBe("https://osrm.econorota.local");
+  });
+
+  it("reports OSRM health failure when required service is unavailable", async () => {
+    ENV.osrmEnabled = true;
+    ENV.osrmRequired = true;
+    globalThis.fetch = vi.fn(async () => new Response("erro", { status: 503 })) as any;
+
+    const health = await getOsrmHealth();
+
+    expect(health.required).toBe(true);
+    expect(health.reachable).toBe(false);
+    expect(health.error).toContain("HTTP 503");
   });
 
   it("uses road distance and time from the OSRM table", async () => {

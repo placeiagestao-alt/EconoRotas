@@ -757,6 +757,48 @@ async function optimizeUserRoute(
   }
 
   const { optimized, audit, auditSource } = optimizationAttempt;
+  if (ENV.osrmRequired && !optimizationAttempt.usedRoadMetrics) {
+    const osrmBlockingReason = {
+      issue: audit.issues.find((issue) => issue.type === "osrm_fallback") ?? null,
+      message:
+        "OSRM obrigatorio indisponivel. A rota nao foi salva para evitar roteirizacao por estimativa geografica.",
+    };
+
+    await db.createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "route_osrm_required_unavailable",
+      severity: "error",
+      source: "routes.optimize",
+      title: "OSRM obrigatorio indisponivel",
+      message: osrmBlockingReason.message,
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        auditSource,
+        status: audit.status,
+        score: audit.score,
+        issueCount: audit.issueCount,
+        totalDistanceKm: audit.totalDistanceKm,
+        osrmRequired: ENV.osrmRequired,
+        osrmBaseUrl: ENV.osrmBaseUrl,
+        blockingIssue: osrmBlockingReason.issue,
+      },
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record required OSRM event:", error);
+    });
+
+    await recordRouteMetricForAttempt(osrmBlockingReason as any);
+
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: osrmBlockingReason.message,
+    });
+  }
+
   if (postOptimizationBlockingReason) {
     await db.createOperationalEvent({
       userId,

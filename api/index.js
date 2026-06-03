@@ -323,6 +323,8 @@ var init_env = __esm({
       osrmEnabled: process.env.VITEST === "true" ? false : process.env.OSRM_ENABLED !== "false",
       osrmBaseUrl: process.env.OSRM_BASE_URL ?? "https://router.project-osrm.org",
       osrmRequestTimeoutMs: Number(process.env.OSRM_REQUEST_TIMEOUT_MS || 8e3),
+      osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3e3),
+      osrmRequired: process.env.OSRM_REQUIRED === "true",
       integrationCredentialsSecret: process.env.INTEGRATION_CREDENTIALS_SECRET ?? process.env.JWT_SECRET ?? ""
     };
   }
@@ -4093,6 +4095,11 @@ function buildOsrmTableUrl(nodes) {
   const coordinates = nodes.map(({ location }) => `${location.longitude},${location.latitude}`).join(";");
   return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
 }
+function buildOsrmHealthUrl() {
+  const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const coordinates = "-51.407,-22.121;-51.406,-22.122";
+  return `${baseUrl}/route/v1/driving/${coordinates}?overview=false&alternatives=false&steps=false`;
+}
 function normalizeMatrix(values, factor) {
   if (!values?.length) return null;
   const normalized = values.map(
@@ -4128,6 +4135,63 @@ async function fetchRoadMatrix(locations, options = {}) {
     };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+async function getOsrmHealth() {
+  const baseUrl = ENV.osrmBaseUrl.trim().replace(/\/+$/, "");
+  const configured = Boolean(baseUrl);
+  const baseHealth = {
+    enabled: ENV.osrmEnabled,
+    required: ENV.osrmRequired,
+    configured,
+    reachable: false,
+    baseUrl: configured ? baseUrl : null,
+    timeoutMs: ENV.osrmHealthTimeoutMs,
+    error: null
+  };
+  if (!ENV.osrmEnabled) {
+    return {
+      ...baseHealth,
+      error: ENV.osrmRequired ? "OSRM_REQUIRED=true, mas OSRM_ENABLED=false." : null
+    };
+  }
+  if (!configured) {
+    return {
+      ...baseHealth,
+      error: "OSRM_BASE_URL nao configurado."
+    };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ENV.osrmHealthTimeoutMs);
+  try {
+    const response = await fetch(buildOsrmHealthUrl(), {
+      signal: controller.signal,
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) {
+      return {
+        ...baseHealth,
+        error: `OSRM respondeu HTTP ${response.status}.`
+      };
+    }
+    const data = await response.json();
+    if (data.code !== "Ok") {
+      return {
+        ...baseHealth,
+        error: `OSRM respondeu code=${data.code ?? "indefinido"}.`
+      };
+    }
+    return {
+      ...baseHealth,
+      reachable: true
+    };
+  } catch (error) {
+    return {
+      ...baseHealth,
+      error: error instanceof Error ? error.message : "Falha ao consultar OSRM."
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -6077,6 +6141,43 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     });
   }
   const { optimized, audit, auditSource } = optimizationAttempt;
+  if (ENV.osrmRequired && !optimizationAttempt.usedRoadMetrics) {
+    const osrmBlockingReason = {
+      issue: audit.issues.find((issue) => issue.type === "osrm_fallback") ?? null,
+      message: "OSRM obrigatorio indisponivel. A rota nao foi salva para evitar roteirizacao por estimativa geografica."
+    };
+    await createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "route_osrm_required_unavailable",
+      severity: "error",
+      source: "routes.optimize",
+      title: "OSRM obrigatorio indisponivel",
+      message: osrmBlockingReason.message,
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        auditSource,
+        status: audit.status,
+        score: audit.score,
+        issueCount: audit.issueCount,
+        totalDistanceKm: audit.totalDistanceKm,
+        osrmRequired: ENV.osrmRequired,
+        osrmBaseUrl: ENV.osrmBaseUrl,
+        blockingIssue: osrmBlockingReason.issue
+      }
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record required OSRM event:", error);
+    });
+    await recordRouteMetricForAttempt(osrmBlockingReason);
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: osrmBlockingReason.message
+    });
+  }
   if (postOptimizationBlockingReason) {
     await createOperationalEvent({
       userId,
@@ -7019,11 +7120,15 @@ function buildIssueKey(input) {
   const databaseState = getDatabaseState(input.database);
   const dbError = input.database?.error || input.database?.schema?.error || "";
   const fallbackError = input.fallbackStore?.error || "";
+  const osrmState = input.osrm?.enabled ? input.osrm.reachable ? "osrm_connected" : "osrm_unreachable" : "osrm_disabled";
+  const osrmError = input.osrm?.error || "";
   return [
-    input.storageAvailable ? "ok" : "down",
+    input.systemAvailable ?? input.storageAvailable ? "ok" : "down",
     databaseState,
     dbError,
-    fallbackError
+    fallbackError,
+    osrmState,
+    osrmError
   ].join("|");
 }
 function buildMetadata(input) {
@@ -7043,7 +7148,16 @@ function buildMetadata(input) {
       configured: Boolean(input.fallbackStore?.configured),
       loaded: Boolean(input.fallbackStore?.loaded),
       error: input.fallbackStore?.error ?? null
-    }
+    },
+    osrm: input.osrm ? {
+      enabled: Boolean(input.osrm.enabled),
+      required: Boolean(input.osrm.required),
+      configured: Boolean(input.osrm.configured),
+      reachable: Boolean(input.osrm.reachable),
+      baseUrl: input.osrm.baseUrl ?? null,
+      timeoutMs: input.osrm.timeoutMs ?? null,
+      error: input.osrm.error ?? null
+    } : null
   };
 }
 async function persistMonitorEvent(input) {
@@ -7073,7 +7187,8 @@ async function recordHealthObservation(input) {
     mode: input.mode,
     observedAt
   };
-  if (input.storageAvailable) {
+  const systemAvailable = input.systemAvailable ?? input.storageAvailable;
+  if (systemAvailable) {
     if (!pendingOutage) {
       lastIssueKey = "";
       return;
@@ -7084,8 +7199,8 @@ async function recordHealthObservation(input) {
     await persistMonitorEvent({
       type: "system_health_recovered",
       severity: "info",
-      title: "Armazenamento recuperado",
-      message: `O armazenamento voltou a responder. Falha anterior: ${outage.message}`,
+      title: "Sistema recuperado",
+      message: `O sistema voltou a responder. Falha anterior: ${outage.message}`,
       metadata: {
         ...metadata,
         previousOutage: outage,
@@ -7094,7 +7209,7 @@ async function recordHealthObservation(input) {
     });
     return;
   }
-  const message = input.database?.error || input.database?.schema?.error || input.fallbackStore?.error || "Armazenamento indisponivel.";
+  const message = input.database?.error || input.database?.schema?.error || input.fallbackStore?.error || input.osrm?.error || "Sistema indisponivel.";
   pendingOutage = pendingOutage ? {
     ...pendingOutage,
     lastSeenAt: observedAt,
@@ -7107,7 +7222,7 @@ async function recordHealthObservation(input) {
     message,
     metadata
   };
-  console.warn("[Monitor] Storage unavailable:", {
+  console.warn("[Monitor] System unavailable:", {
     mode: input.mode,
     source: input.source,
     message
@@ -7119,8 +7234,8 @@ async function recordHealthObservation(input) {
   lastIssueAt = now;
   await persistMonitorEvent({
     type: "system_health_failed",
-    severity: input.database?.reachable ? "error" : "fatal",
-    title: "Armazenamento indisponivel",
+    severity: input.storageAvailable ? "error" : input.database?.reachable ? "error" : "fatal",
+    title: input.storageAvailable ? "OSRM indisponivel" : "Armazenamento indisponivel",
     message,
     metadata
   });
@@ -7225,6 +7340,7 @@ function validateProductionEnvironment() {
 }
 async function getStorageHealthSnapshot(source) {
   const database = await getDatabaseHealth();
+  const osrm = await getOsrmHealth();
   if (!database.connected) {
     try {
       await ensurePersistentFallbackDbLoaded();
@@ -7234,18 +7350,24 @@ async function getStorageHealthSnapshot(source) {
   const fallbackStore = getPersistentFallbackDbHealth();
   const canUseLocalFallback = !ENV.isProduction || ENV.allowEphemeralDb && !ENV.hasInvalidProductionDatabaseUrl;
   const storageAvailable = ENV.requireManagedDatabase ? database.connected : database.connected || fallbackStore.loaded || canUseLocalFallback;
+  const osrmAvailable = !osrm.required || osrm.enabled && osrm.reachable;
+  const systemAvailable = storageAvailable && osrmAvailable;
   const mode = database.connected ? "persistent" : fallbackStore.configured ? "redis-fallback" : "local-fallback";
   await recordHealthObservation({
     database,
     fallbackStore,
     storageAvailable,
+    systemAvailable,
     mode,
-    source
+    source,
+    osrm
   });
   return {
     database,
     fallbackStore,
     storageAvailable,
+    systemAvailable,
+    osrm,
     mode
   };
 }
@@ -7294,29 +7416,31 @@ export default function EconoRotasAssetRefresh() { return null; }
 `);
   });
   app2.get("/api/health", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, mode } = await getStorageHealthSnapshot("api.health");
-    res.status(storageAvailable ? 200 : 500).json({
-      ok: storageAvailable,
+    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, mode } = await getStorageHealthSnapshot("api.health");
+    res.status(systemAvailable ? 200 : 500).json({
+      ok: systemAvailable,
       app: "EconoRota",
       environment: ENV.isProduction ? "production" : "development",
       mode,
       database,
       fallbackStore,
+      osrm,
       requiredManagedDatabase: ENV.requireManagedDatabase,
       warning: ENV.hasInvalidProductionDatabaseUrl ? "DATABASE_URL aponta para host local/Docker e n\xE3o funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis." : void 0,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
   });
   app2.get("/api/monitor/ping", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, mode } = await getStorageHealthSnapshot("api.monitor.ping");
-    res.status(storageAvailable ? 200 : 500).json({
-      ok: storageAvailable,
+    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, mode } = await getStorageHealthSnapshot("api.monitor.ping");
+    res.status(systemAvailable ? 200 : 500).json({
+      ok: systemAvailable,
       monitor: true,
       app: "EconoRota",
       environment: ENV.isProduction ? "production" : "development",
       mode,
       database,
       fallbackStore,
+      osrm,
       requiredManagedDatabase: ENV.requireManagedDatabase,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
