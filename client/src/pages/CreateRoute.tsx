@@ -1,4 +1,4 @@
-﻿import { useState, type ChangeEvent } from "react";
+﻿import { useRef, useState, type ChangeEvent } from "react";
 import { useLocation } from "wouter";
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -311,6 +311,7 @@ export default function CreateRoute() {
   const [isListeningVoiceStops, setIsListeningVoiceStops] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const [pendingVoiceStopIndex, setPendingVoiceStopIndex] = useState<number | null>(null);
+  const pendingVoiceStopIndexRef = useRef<number | null>(null);
   const [voiceAddressSuggestions, setVoiceAddressSuggestions] = useState<AddressSuggestion[]>([]);
   const [isLoadingVoiceSuggestions, setIsLoadingVoiceSuggestions] = useState(false);
   const [voiceSuggestionError, setVoiceSuggestionError] = useState<string | null>(null);
@@ -354,6 +355,19 @@ export default function CreateRoute() {
         ? "Criando rota..."
         : "Criando e otimizando..."
       : routeActionLabel;
+
+  const updatePendingVoiceStopIndex = (
+    next:
+      | number
+      | null
+      | ((current: number | null) => number | null)
+  ) => {
+    const resolved =
+      typeof next === "function" ? next(pendingVoiceStopIndexRef.current) : next;
+    pendingVoiceStopIndexRef.current = resolved;
+    setPendingVoiceStopIndex(resolved);
+    return resolved;
+  };
 
   const createAndOptimizeWithNetworkRetry = async (
     payload: Parameters<typeof createAndOptimizeMutation.mutateAsync>[0]
@@ -816,7 +830,7 @@ export default function CreateRoute() {
     setInvalidStopIndexes([]);
     setRespectImportedStopSequence(false);
     setStops((currentStops) => {
-      const replacementIndex = pendingVoiceStopIndex;
+      const replacementIndex = pendingVoiceStopIndexRef.current;
       const nextStop: RouteStop = {
         address: parsed.address,
         latitude: 0,
@@ -830,7 +844,7 @@ export default function CreateRoute() {
         replacementIndex >= 0 &&
         replacementIndex < currentStops.length
       ) {
-        setPendingVoiceStopIndex(replacementIndex);
+        updatePendingVoiceStopIndex(replacementIndex);
         return currentStops.map((stop, index) =>
           index === replacementIndex ? { ...stop, ...nextStop } : stop
         );
@@ -839,11 +853,11 @@ export default function CreateRoute() {
       const emptyIndex = currentStops.findIndex((stop) => !stop.address.trim());
 
       if (emptyIndex >= 0) {
-        setPendingVoiceStopIndex(emptyIndex);
+        updatePendingVoiceStopIndex(emptyIndex);
         return currentStops.map((stop, index) => (index === emptyIndex ? nextStop : stop));
       }
 
-      setPendingVoiceStopIndex(currentStops.length);
+      updatePendingVoiceStopIndex(currentStops.length);
       return [...currentStops, nextStop];
     });
     setVoiceTranscript(parsed.address);
@@ -856,20 +870,21 @@ export default function CreateRoute() {
     setVoiceAddressSuggestions([]);
     setVoiceSuggestionError(null);
 
-    if (pendingVoiceStopIndex === null) return;
+    const voiceStopIndex = pendingVoiceStopIndexRef.current;
+    if (voiceStopIndex === null) return;
 
     setInvalidStopIndexes((current) =>
-      current.filter((item) => item !== pendingVoiceStopIndex)
+      current.filter((item) => item !== voiceStopIndex)
     );
     setStops((currentStops) =>
       currentStops.map((stop, index) =>
-        index === pendingVoiceStopIndex
+        index === voiceStopIndex
           ? {
               ...stop,
               address,
               latitude: 0,
               longitude: 0,
-              notes: stop.notes || "Inserido por voz com edição manual",
+              notes: stop.notes || "Inserido por voz com edicao manual",
             }
           : stop
       )
@@ -946,7 +961,7 @@ export default function CreateRoute() {
     voiceRecognition?.stop();
     setVoiceRecognition(null);
     setIsListeningVoiceStops(false);
-    setPendingVoiceStopIndex(null);
+    updatePendingVoiceStopIndex(null);
     setVoiceAddressSuggestions([]);
     setVoiceSuggestionError(null);
   };
@@ -968,7 +983,7 @@ export default function CreateRoute() {
           : stop
       )
     );
-    setPendingVoiceStopIndex(null);
+    updatePendingVoiceStopIndex(null);
     setVoiceTranscript("");
     setVoiceAddressSuggestions([]);
     setVoiceSuggestionError(null);
@@ -979,7 +994,7 @@ export default function CreateRoute() {
   const handleRemoveStop = (index: number) => {
     setInvalidStopIndexes([]);
     setRespectImportedStopSequence(false);
-    setPendingVoiceStopIndex((current) => {
+    updatePendingVoiceStopIndex((current) => {
       if (current === null) return null;
       if (current === index) return null;
       return current > index ? current - 1 : current;
@@ -1007,13 +1022,13 @@ export default function CreateRoute() {
     );
 
     if (
-      pendingVoiceStopIndex === index &&
+      pendingVoiceStopIndexRef.current === index &&
       Number.isFinite(latitude) &&
       Number.isFinite(longitude) &&
       latitude !== 0 &&
       longitude !== 0
     ) {
-      setPendingVoiceStopIndex(null);
+      updatePendingVoiceStopIndex(null);
       setVoiceTranscript("");
       setVoiceAddressSuggestions([]);
       setVoiceSuggestionError(null);
