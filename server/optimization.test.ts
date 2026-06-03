@@ -6,6 +6,7 @@ import {
   optimizeRoute,
   calculateTotalDistance,
   calculateTotalTime,
+  clusterStops,
   validateLocations,
   type Location,
 } from "./optimization";
@@ -447,6 +448,39 @@ describe("Route Optimization", () => {
   });
 
   describe("Real-world scenarios", () => {
+    it("clusters nearby stops into operational regions", () => {
+      const locations: Location[] = [
+        { latitude: -22.12, longitude: -51.4, address: "Centro A" },
+        { latitude: -22.1202, longitude: -51.4002, address: "Centro B" },
+        { latitude: -22.121, longitude: -51.401, address: "Centro C" },
+        { latitude: -22.16, longitude: -51.45, address: "Zona Norte A" },
+        { latitude: -22.1602, longitude: -51.4502, address: "Zona Norte B" },
+      ];
+
+      const clusters = clusterStops(locations, { localityMode: "strict" });
+
+      expect(clusters).toHaveLength(2);
+      expect(clusters.map((cluster) => cluster.stops.length)).toEqual([3, 2]);
+    });
+
+    it("prefers finishing a cluster before moving to another region", () => {
+      const locations: Location[] = [
+        { latitude: -22.12, longitude: -51.4, address: "Centro 1" },
+        { latitude: -22.1601, longitude: -51.4501, address: "Norte 1" },
+        { latitude: -22.1201, longitude: -51.4001, address: "Centro 2" },
+        { latitude: -22.1602, longitude: -51.4502, address: "Norte 2" },
+      ];
+
+      const result = optimizeRoute(locations, "balanced", 0, {
+        localityMode: "strict",
+      });
+      const sequenceByRegion = result.sequence.map((index) =>
+        locations[index].address?.startsWith("Centro") ? "Centro" : "Norte"
+      );
+
+      expect(sequenceByRegion).toEqual(["Centro", "Centro", "Norte", "Norte"]);
+    });
+
     it("optimizes São Paulo delivery route", () => {
       const locations: Location[] = [
         { latitude: -23.5505, longitude: -46.6333, address: "Av. Paulista" },

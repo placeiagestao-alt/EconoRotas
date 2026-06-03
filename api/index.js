@@ -3058,7 +3058,9 @@ function getLocalitySettings(localityMode = "local") {
       ratioThreshold: 1.12,
       extraKmThreshold: 0.08,
       longJumpThresholdKm: 0.35,
-      penaltyMultiplier: 4
+      penaltyMultiplier: 4,
+      clusterRadiusKm: 0.45,
+      clusterRevisitPenaltyKm: 8
     };
   }
   if (localityMode === "balanced") {
@@ -3069,7 +3071,9 @@ function getLocalitySettings(localityMode = "local") {
       ratioThreshold: 1.55,
       extraKmThreshold: 0.35,
       longJumpThresholdKm: 1.25,
-      penaltyMultiplier: 2
+      penaltyMultiplier: 2,
+      clusterRadiusKm: 0.9,
+      clusterRevisitPenaltyKm: 4
     };
   }
   return {
@@ -3079,7 +3083,9 @@ function getLocalitySettings(localityMode = "local") {
     ratioThreshold: 1.28,
     extraKmThreshold: 0.18,
     longJumpThresholdKm: 0.7,
-    penaltyMultiplier: 3
+    penaltyMultiplier: 3,
+    clusterRadiusKm: 0.65,
+    clusterRevisitPenaltyKm: 6
   };
 }
 function isAvoidableLocalJump(nearestDistance, plannedDistance, settings) {
@@ -3158,6 +3164,69 @@ function buildOptimizedRoute(locations, sequence, options = {}) {
     }))
   };
 }
+function centroidForIndexes(locations, indexes) {
+  const latitude = indexes.reduce((total, index2) => total + locations[index2].latitude, 0) / indexes.length;
+  const longitude = indexes.reduce((total, index2) => total + locations[index2].longitude, 0) / indexes.length;
+  return { latitude, longitude };
+}
+function regionQuery(locations, originIndex, radiusKm) {
+  return locations.map((_, index2) => index2).filter((index2) => calculateDistance(locations[originIndex], locations[index2]) <= radiusKm);
+}
+function dbscanLocationIndexes(locations, radiusKm, minPoints) {
+  const labels = new Array(locations.length);
+  const visited = new Array(locations.length).fill(false);
+  let clusterId = 0;
+  for (let pointIndex = 0; pointIndex < locations.length; pointIndex += 1) {
+    if (visited[pointIndex]) continue;
+    visited[pointIndex] = true;
+    const neighbors = regionQuery(locations, pointIndex, radiusKm);
+    if (neighbors.length < minPoints) {
+      labels[pointIndex] = -1;
+      continue;
+    }
+    labels[pointIndex] = clusterId;
+    const seeds = [...neighbors.filter((index2) => index2 !== pointIndex)];
+    while (seeds.length > 0) {
+      const candidateIndex = seeds.shift();
+      if (!visited[candidateIndex]) {
+        visited[candidateIndex] = true;
+        const candidateNeighbors = regionQuery(locations, candidateIndex, radiusKm);
+        if (candidateNeighbors.length >= minPoints) {
+          for (const neighborIndex of candidateNeighbors) {
+            if (!seeds.includes(neighborIndex)) {
+              seeds.push(neighborIndex);
+            }
+          }
+        }
+      }
+      if (labels[candidateIndex] === void 0 || labels[candidateIndex] === -1) {
+        labels[candidateIndex] = clusterId;
+      }
+    }
+    clusterId += 1;
+  }
+  return labels.map((label, index2) => label === void 0 ? -1e3 - index2 : label);
+}
+function clusterStops(stops2, options = {}) {
+  if (stops2.length === 0) return [];
+  const settings = getLocalitySettings(options.localityMode);
+  const labels = dbscanLocationIndexes(stops2, settings.clusterRadiusKm, 2);
+  const grouped = /* @__PURE__ */ new Map();
+  labels.forEach((label, index2) => {
+    const normalizedLabel = label < 0 ? Number.MIN_SAFE_INTEGER + index2 : label;
+    const group = grouped.get(normalizedLabel) ?? [];
+    group.push(index2);
+    grouped.set(normalizedLabel, group);
+  });
+  return Array.from(grouped.values()).sort((a, b) => Math.min(...a) - Math.min(...b)).map((indexes, clusterIndex) => ({
+    clusterId: clusterIndex + 1,
+    centroid: centroidForIndexes(stops2, indexes),
+    stops: indexes.map((index2) => ({
+      ...stops2[index2],
+      originalIndex: index2
+    }))
+  }));
+}
 function buildNearestNeighborSequence(locations, startIndex, options = {}) {
   const n = locations.length;
   const visited = new Array(n).fill(false);
@@ -3216,6 +3285,73 @@ function improveSequenceWithTwoOpt(locations, initialSequence, options = {}) {
   }
   return sequence;
 }
+function buildNearestSequenceForIndexes(locations, indexes, startLocation) {
+  const remaining = new Set(indexes);
+  const sequence = [];
+  let currentLocation = startLocation ?? locations[indexes[0]];
+  if (!startLocation && indexes.length > 0) {
+    remaining.delete(indexes[0]);
+    sequence.push(indexes[0]);
+  }
+  while (remaining.size > 0) {
+    let nearestIndex = -1;
+    let nearestDistance = Infinity;
+    for (const candidateIndex of Array.from(remaining)) {
+      const distance = calculateDistance(currentLocation, locations[candidateIndex]);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = candidateIndex;
+      }
+    }
+    if (nearestIndex === -1) break;
+    remaining.delete(nearestIndex);
+    sequence.push(nearestIndex);
+    currentLocation = locations[nearestIndex];
+  }
+  return sequence;
+}
+function optimizeClusterStops(locations, clusterIndexes, startLocation) {
+  if (clusterIndexes.length <= 2) {
+    return buildNearestSequenceForIndexes(locations, clusterIndexes, startLocation);
+  }
+  const nearest = buildNearestSequenceForIndexes(
+    locations,
+    clusterIndexes,
+    startLocation
+  );
+  const improved = improveSequenceWithTwoOpt(locations, nearest);
+  return improved.filter((index2) => clusterIndexes.includes(index2));
+}
+function buildClusteredSequence(locations, options = {}) {
+  const clusters = clusterStops(locations, options);
+  if (clusters.length <= 1) return null;
+  const remainingClusters = new Set(clusters.map((cluster) => cluster.clusterId));
+  const sequence = [];
+  let currentLocation = options.startLocation ?? clusters[0].centroid;
+  while (remainingClusters.size > 0) {
+    let nearestCluster;
+    let nearestDistance = Infinity;
+    for (const cluster of clusters) {
+      if (!remainingClusters.has(cluster.clusterId)) continue;
+      const distance = calculateDistance(currentLocation, cluster.centroid);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestCluster = cluster;
+      }
+    }
+    if (!nearestCluster) break;
+    const clusterIndexes = nearestCluster.stops.map((stop) => stop.originalIndex);
+    const clusterSequence = optimizeClusterStops(
+      locations,
+      clusterIndexes,
+      currentLocation
+    );
+    sequence.push(...clusterSequence);
+    remainingClusters.delete(nearestCluster.clusterId);
+    currentLocation = locations[clusterSequence[clusterSequence.length - 1]] ?? nearestCluster.centroid;
+  }
+  return sequence.length === locations.length ? sequence : null;
+}
 function enforceLocalNearestSequence(locations, initialSequence, options = {}) {
   const remaining = new Set(initialSequence);
   const sequence = [];
@@ -3264,8 +3400,38 @@ function calculateAvoidableJumpPenalty(locations, sequence, options = {}) {
   }
   return penalty;
 }
+function calculateClusterRevisitPenalty(locations, sequence, options = {}) {
+  const settings = getLocalitySettings(options.localityMode);
+  const clusters = clusterStops(locations, options);
+  if (clusters.length <= 1) return 0;
+  const clusterByStopIndex = /* @__PURE__ */ new Map();
+  for (const cluster of clusters) {
+    if (cluster.stops.length < 2) continue;
+    for (const stop of cluster.stops) {
+      clusterByStopIndex.set(stop.originalIndex, cluster.clusterId);
+    }
+  }
+  const closedClusters = /* @__PURE__ */ new Set();
+  let activeCluster;
+  let penalty = 0;
+  for (const stopIndex of sequence) {
+    const clusterId = clusterByStopIndex.get(stopIndex);
+    if (!clusterId) {
+      activeCluster = void 0;
+      continue;
+    }
+    if (activeCluster !== void 0 && activeCluster !== clusterId) {
+      closedClusters.add(activeCluster);
+    }
+    if (closedClusters.has(clusterId) && activeCluster !== clusterId) {
+      penalty += settings.clusterRevisitPenaltyKm;
+    }
+    activeCluster = clusterId;
+  }
+  return penalty;
+}
 function calculateDriverFriendlyScore(locations, sequence, options = {}) {
-  return calculateSequenceDistance(locations, sequence, options) + calculateAvoidableJumpPenalty(locations, sequence, options);
+  return calculateSequenceDistance(locations, sequence, options) + calculateAvoidableJumpPenalty(locations, sequence, options) + calculateClusterRevisitPenalty(locations, sequence, options);
 }
 function optimizeOpenRoute(locations, startIndex = 0, options = {}) {
   if (locations.length === 0) {
@@ -3282,8 +3448,10 @@ function optimizeOpenRoute(locations, startIndex = 0, options = {}) {
       options
     );
     const inputSequence = locations.map((_, index2) => index2);
+    const clusteredSequence = buildClusteredSequence(locations, options);
     const seedSequences = [
       nearestSequence,
+      ...clusteredSequence ? [clusteredSequence] : [],
       inputSequence,
       [...inputSequence].reverse()
     ];
@@ -3588,6 +3756,18 @@ function calculateAvoidableJumpPenalty2(matrix, sequence, objective, startNodeIn
 function chooseObjective(mode) {
   return mode === "shortest_time" ? "duration" : "distance";
 }
+function buildClusteredDeliveryNodeSequence(locations, deliveryNodeIndexes, options = {}) {
+  const clusters = clusterStops(locations, options);
+  if (clusters.length <= 1) return null;
+  const nodeByDeliveryIndex = /* @__PURE__ */ new Map();
+  deliveryNodeIndexes.forEach((nodeIndex, deliveryIndex) => {
+    nodeByDeliveryIndex.set(deliveryIndex, nodeIndex);
+  });
+  const sequence = clusters.flatMap(
+    (cluster) => cluster.stops.map((stop) => nodeByDeliveryIndex.get(stop.originalIndex)).filter((nodeIndex) => nodeIndex !== void 0)
+  );
+  return sequence.length === deliveryNodeIndexes.length ? sequence : null;
+}
 async function buildSequentialRouteWithRoadMetrics(locations, options = {}) {
   const result = await fetchRoadMatrix(locations, options);
   if (!result) return null;
@@ -3604,6 +3784,11 @@ async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startI
   if (!result) return null;
   const deliveryNodeIndexes = result.matrix.nodes.map((node, nodeIndex) => node.role === "delivery" ? nodeIndex : -1).filter((nodeIndex) => nodeIndex >= 0);
   const objective = chooseObjective(mode);
+  const clusteredSequence = buildClusteredDeliveryNodeSequence(
+    locations,
+    deliveryNodeIndexes,
+    options
+  );
   const startCandidates = result.startNodeIndex !== void 0 || deliveryNodeIndexes.length > 40 ? [Math.min(Math.max(startIndex, 0), Math.max(deliveryNodeIndexes.length - 1, 0))] : deliveryNodeIndexes.map((_, index2) => index2);
   let bestSequence = null;
   let bestScore = Infinity;
@@ -3617,6 +3802,7 @@ async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startI
     );
     const seedSequences = [
       nearestSequence,
+      ...clusteredSequence ? [clusteredSequence] : [],
       deliveryNodeIndexes,
       [...deliveryNodeIndexes].reverse()
     ];

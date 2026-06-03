@@ -1,5 +1,10 @@
 import { ENV } from "./_core/env";
-import type { Location, OptimizedRoute, RouteOptimizationOptions } from "./optimization";
+import {
+  clusterStops,
+  type Location,
+  type OptimizedRoute,
+  type RouteOptimizationOptions,
+} from "./optimization";
 
 type MatrixValue = number[][];
 type MatrixMode = "distance" | "duration";
@@ -421,6 +426,28 @@ function chooseObjective(mode: "shortest_distance" | "shortest_time" | "balanced
   return mode === "shortest_time" ? "duration" : "distance";
 }
 
+function buildClusteredDeliveryNodeSequence(
+  locations: Location[],
+  deliveryNodeIndexes: number[],
+  options: RouteOptimizationOptions = {}
+) {
+  const clusters = clusterStops(locations, options);
+  if (clusters.length <= 1) return null;
+
+  const nodeByDeliveryIndex = new Map<number, number>();
+  deliveryNodeIndexes.forEach((nodeIndex, deliveryIndex) => {
+    nodeByDeliveryIndex.set(deliveryIndex, nodeIndex);
+  });
+
+  const sequence = clusters.flatMap((cluster) =>
+    cluster.stops
+      .map((stop) => nodeByDeliveryIndex.get(stop.originalIndex))
+      .filter((nodeIndex): nodeIndex is number => nodeIndex !== undefined)
+  );
+
+  return sequence.length === deliveryNodeIndexes.length ? sequence : null;
+}
+
 export async function buildSequentialRouteWithRoadMetrics(
   locations: Location[],
   options: RouteOptimizationOptions = {}
@@ -453,6 +480,11 @@ export async function optimizeRouteWithRoadMetrics(
     .map((node, nodeIndex) => (node.role === "delivery" ? nodeIndex : -1))
     .filter((nodeIndex) => nodeIndex >= 0);
   const objective = chooseObjective(mode);
+  const clusteredSequence = buildClusteredDeliveryNodeSequence(
+    locations,
+    deliveryNodeIndexes,
+    options
+  );
   const startCandidates =
     result.startNodeIndex !== undefined || deliveryNodeIndexes.length > 40
       ? [Math.min(Math.max(startIndex, 0), Math.max(deliveryNodeIndexes.length - 1, 0))]
@@ -471,6 +503,7 @@ export async function optimizeRouteWithRoadMetrics(
     );
     const seedSequences = [
       nearestSequence,
+      ...(clusteredSequence ? [clusteredSequence] : []),
       deliveryNodeIndexes,
       [...deliveryNodeIndexes].reverse(),
     ];
