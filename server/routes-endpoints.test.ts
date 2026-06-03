@@ -91,6 +91,48 @@ describe("Route endpoints", () => {
     );
   });
 
+  it("estimates commercial impact from corrected route metrics", async () => {
+    await db.createRouteMetric({
+      userId: 8220,
+      routeId: 8220,
+      qualityScore: 82,
+      optimizationRuntimeMs: 120,
+      osrmUsed: true,
+      osrmFallback: false,
+      clusterCount: 2,
+      averageClusterRadius: 0.4,
+      maxClusterRadius: 0.8,
+      regionRevisitedCount: 1,
+      prematureRegionExitCount: 0,
+      nearbyStopSkippedCount: 1,
+      routeCrossingCount: 0,
+      issuesDetectedCount: 2,
+      issuesCorrectedCount: 1,
+      issuesBlockedCount: 0,
+      auditStatus: "attention",
+      auditQuality: "good",
+      auditSource: "test",
+      routeMode: "balanced",
+      localityMode: "strict",
+      stopCount: 4,
+      totalDistanceKm: 10,
+      totalTimeMinutes: 20,
+      metadata: {
+        firstBlockingIssue: {
+          type: "nearby_stop_skipped",
+          distanceKm: 3,
+          nearestDistanceKm: 1,
+        },
+      },
+    });
+
+    const metrics = await db.getRouteMetricsDashboard(30);
+    expect(metrics.commercialImpact.estimatedKmSaved).toBeGreaterThanOrEqual(2);
+    expect(metrics.commercialImpact.estimatedMinutesSaved).toBeGreaterThanOrEqual(5);
+    expect(metrics.commercialImpact.estimatedFuelLitersSaved).toBeGreaterThan(0);
+    expect(metrics.commercialImpact.estimatedCo2KgAvoided).toBeGreaterThan(0);
+  });
+
   it("keeps route as draft when optimization rejects invalid stops", async () => {
     const caller = appRouter.createCaller(createAuthContext(8202));
 

@@ -129,7 +129,7 @@ export default function Operations() {
             <CardContent>
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <StatCard
-                  title="Taxa correcao fiscal"
+                  title="Taxa correção fiscal"
                   value={Math.round(routeMetrics?.auditorCorrectionRate ?? 0)}
                   suffix="%"
                   icon={ShieldCheck}
@@ -147,23 +147,23 @@ export default function Operations() {
                   icon={MapPinned}
                 />
                 <StatCard
-                  title="Eficiencia cluster"
+                  title="Eficiência cluster"
                   value={Math.round(routeMetrics?.clusterEfficiencyIndex ?? 0)}
                   suffix="%"
                   icon={MapPinned}
                 />
                 <StatCard
-                  title="Score medio"
+                  title="Score médio"
                   value={Math.round(routeMetrics?.averageQualityScore ?? 0)}
                   icon={Gauge}
                 />
                 <StatCard
-                  title="Metricas gravadas"
+                  title="Métricas gravadas"
                   value={routeMetrics?.routeMetricCount ?? 0}
                   icon={Route}
                 />
                 <StatCard
-                  title="Correcoes do fiscal"
+                  title="Correções do fiscal"
                   value={routeMetrics?.routeOutcomes?.correctedCount ?? 0}
                   icon={ShieldCheck}
                 />
@@ -178,7 +178,7 @@ export default function Operations() {
                   icon={MapPinned}
                 />
                 <StatCard
-                  title="Saidas prematuras"
+                  title="Saídas prematuras"
                   value={routeMetrics?.issues?.prematureRegionExit ?? 0}
                   icon={AlertTriangle}
                 />
@@ -193,20 +193,43 @@ export default function Operations() {
                   icon={MapPinned}
                 />
                 <StatCard
-                  title="Clusters medio"
+                  title="Clusters médio"
                   value={Math.round(routeMetrics?.averageClusterCount ?? 0)}
                   icon={MapPinned}
                 />
                 <StatCard
-                  title="Runtime medio"
+                  title="Runtime médio"
                   value={Math.round(routeMetrics?.averageOptimizationRuntimeSeconds ?? 0)}
                   suffix="s"
                   icon={Activity}
                 />
+                <StatCard
+                  title="KM economizados"
+                  value={Math.round(routeMetrics?.commercialImpact?.estimatedKmSaved ?? 0)}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Tempo economizado"
+                  value={Math.round(routeMetrics?.commercialImpact?.estimatedMinutesSaved ?? 0)}
+                  suffix="min"
+                  icon={Activity}
+                />
+                <StatCard
+                  title="Combustível"
+                  value={Math.round(routeMetrics?.commercialImpact?.estimatedFuelLitersSaved ?? 0)}
+                  suffix="L"
+                  icon={Gauge}
+                />
+                <StatCard
+                  title="CO2 evitado"
+                  value={Math.round(routeMetrics?.commercialImpact?.estimatedCo2KgAvoided ?? 0)}
+                  suffix="kg"
+                  icon={ShieldCheck}
+                />
               </div>
               <p className="mt-3 text-xs text-muted-foreground">
-                Metricas dos ultimos 30 dias gravadas em route_metrics a cada
-                otimizacao, reotimizacao ou bloqueio do fiscal.
+                Métricas dos últimos 30 dias gravadas em route_metrics a cada
+                otimização, reotimização ou bloqueio do fiscal.
               </p>
               <div className="mt-5 overflow-x-auto rounded-lg border border-border/80">
                 <table className="w-full min-w-[720px] text-left text-sm">

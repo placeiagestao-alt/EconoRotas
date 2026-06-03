@@ -1845,6 +1845,46 @@ function roundMetric(value: number, digits = 1) {
   return Math.round(value * factor) / factor;
 }
 
+function parseMetricMetadata(metadata: unknown): Record<string, any> {
+  if (!metadata) return {};
+  if (typeof metadata === "string") {
+    try {
+      const parsed = JSON.parse(metadata);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  return typeof metadata === "object" ? metadata as Record<string, any> : {};
+}
+
+function estimateCorrectedKmSaved(metric: any) {
+  if (Number(metric.issuesCorrectedCount || 0) <= 0) return 0;
+
+  const metadata = parseMetricMetadata(metric.metadata);
+  const candidates = [
+    metadata.firstBlockingIssue,
+    metadata.blockingIssue,
+    ...(Array.isArray(metadata.finalIssues) ? metadata.finalIssues : []),
+  ].filter((issue) => issue && typeof issue === "object");
+
+  const bestSaving = candidates.reduce((best, issue) => {
+    const distanceKm = Number(issue.distanceKm);
+    const nearestDistanceKm = Number(issue.nearestDistanceKm);
+    if (
+      Number.isFinite(distanceKm) &&
+      Number.isFinite(nearestDistanceKm) &&
+      distanceKm > nearestDistanceKm
+    ) {
+      return Math.max(best, distanceKm - nearestDistanceKm);
+    }
+    return best;
+  }, 0);
+
+  return bestSaving;
+}
+
 export async function createRouteMetric(data: CreateRouteMetricInput) {
   const metric = {
     userId: data.userId ?? null,
@@ -1979,6 +2019,13 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
       Number(metric.regionRevisitedCount || 0) > 0 ||
       Number(metric.prematureRegionExitCount || 0) > 0
   ).length;
+  const estimatedKmSaved = metrics.reduce(
+    (totalSaved, metric) => totalSaved + estimateCorrectedKmSaved(metric),
+    0
+  );
+  const estimatedMinutesSaved = estimatedKmSaved * 2.5;
+  const estimatedFuelLitersSaved = estimatedKmSaved / 10;
+  const estimatedCo2KgAvoided = estimatedFuelLitersSaved * 2.31;
   const routeModes = ["shortest_distance", "shortest_time", "balanced"] as const;
   const modePerformance = routeModes.map((mode) => {
     const modeMetrics = metrics.filter((metric) => metric.routeMode === mode);
@@ -2081,6 +2128,12 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
       detected: detectedIssues,
       corrected: correctedIssues,
       blocked: blockedIssues,
+    },
+    commercialImpact: {
+      estimatedKmSaved: roundMetric(estimatedKmSaved, 1),
+      estimatedMinutesSaved: Math.round(estimatedMinutesSaved),
+      estimatedFuelLitersSaved: roundMetric(estimatedFuelLitersSaved, 1),
+      estimatedCo2KgAvoided: roundMetric(estimatedCo2KgAvoided, 1),
     },
     modePerformance,
   };

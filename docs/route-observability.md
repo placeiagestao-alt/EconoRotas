@@ -101,6 +101,24 @@ O painel administrativo agrega `route_metrics` por modo e compara:
 - taxa de correcao do fiscal;
 - taxa de fallback OSRM.
 
+## Indicadores comerciais
+
+O painel tambem mostra impacto comercial estimado:
+
+- KM economizados;
+- tempo economizado;
+- combustivel economizado;
+- emissoes evitadas.
+
+A estimativa e conservadora. O sistema so conta economia quando uma rota foi
+corrigida pelo fiscal e o problema original informava `distanceKm` maior que
+`nearestDistanceKm`. O calculo atual usa:
+
+- `kmEconomizados = distanceKm - nearestDistanceKm`
+- `minutosEconomizados = kmEconomizados * 2.5`
+- `litrosEconomizados = kmEconomizados / 10`
+- `co2EvitadoKg = litrosEconomizados * 2.31`
+
 - `admin.dashboard`: inclui `routeMetrics` com resumo dos ultimos 30 dias.
 - `admin.routeMetrics({ days })`: retorna indicadores agregados de 1 a 365 dias.
 
