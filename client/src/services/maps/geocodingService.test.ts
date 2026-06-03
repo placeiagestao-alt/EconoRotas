@@ -1,0 +1,99 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  rememberAddressCoordinates,
+  searchAddress,
+} from "./geocodingService";
+
+const memory = new Map<string, string>();
+
+beforeEach(() => {
+  memory.clear();
+  vi.restoreAllMocks();
+
+  Object.defineProperty(globalThis, "window", {
+    value: {
+      setTimeout,
+      clearTimeout,
+      localStorage: {
+        getItem: (key: string) => memory.get(key) ?? null,
+        setItem: (key: string, value: string) => memory.set(key, value),
+      },
+    },
+    configurable: true,
+  });
+});
+
+describe("geocodingService", () => {
+  it("returns a remembered coordinate before external search results", async () => {
+    rememberAddressCoordinates(
+      "Rua Teste, 123, Centro, Presidente Prudente, SP",
+      -22.12,
+      -51.4
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      )
+    );
+
+    const results = await searchAddress(
+      "Rua Teste, 123, Centro, Presidente Prudente, SP"
+    );
+
+    expect(results[0]).toMatchObject({
+      latitude: -22.12,
+      longitude: -51.4,
+      type: "saved",
+    });
+  });
+
+  it("tries cleaned fallback queries when the first query has no result", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const requestUrl = new URL(String(url), "https://econo-rotas.test");
+      const q = requestUrl.searchParams.get("q") || "";
+      const hasApartmentComplement = /ap\s*12/i.test(q);
+
+      return new Response(
+        JSON.stringify(
+          hasApartmentComplement
+            ? []
+            : [
+                {
+                  place_id: 10,
+                  lat: "-22.12",
+                  lon: "-51.4",
+                  display_name:
+                    "Rua Teste, 123, Centro, Presidente Prudente, São Paulo",
+                  address: {
+                    road: "Rua Teste",
+                    house_number: "123",
+                    suburb: "Centro",
+                    city: "Presidente Prudente",
+                    state: "São Paulo",
+                  },
+                },
+              ]
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const results = await searchAddress(
+      "Rua Teste, 123, Centro, Presidente Prudente, SP, ap 12"
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.label).toContain("Rua Teste");
+    const searchedQueries = fetchMock.mock.calls.map(([url]) =>
+      new URL(String(url), "https://econo-rotas.test").searchParams.get("q") || ""
+    );
+    expect(searchedQueries[0]).toMatch(/ap\s*12/i);
+    expect(searchedQueries.slice(1).some((q) => !/ap\s*12/i.test(q))).toBe(true);
+  });
+});

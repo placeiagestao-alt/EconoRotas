@@ -4,6 +4,8 @@ import type { Coordinate } from "./locationService";
 const GEOCODING_SEARCH_URL = buildApiUrl("/api/geocode/search");
 const DEFAULT_LIMIT = 6;
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
+const ADDRESS_MEMORY_KEY = "econorotas:address-coordinate-memory:v1";
+const MAX_MEMORY_ENTRIES = 1500;
 const requestCache = new Map<string, Promise<AddressSuggestion[]>>();
 
 export type AddressSuggestion = Coordinate & {
@@ -12,6 +14,11 @@ export type AddressSuggestion = Coordinate & {
   shortLabel: string;
   type?: string;
   importance?: number;
+};
+
+type RememberedAddress = Coordinate & {
+  address: string;
+  savedAt: number;
 };
 
 type NominatimAddress = {
@@ -43,7 +50,81 @@ type NominatimResult = {
 export type SearchAddressOptions = {
   signal?: AbortSignal;
   limit?: number;
+  useFallbackQueries?: boolean;
 };
+
+function normalizeAddressKey(query: string) {
+  return query
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function readAddressMemory(): Record<string, RememberedAddress> {
+  if (typeof window === "undefined") return {};
+
+  try {
+    const raw = window.localStorage.getItem(ADDRESS_MEMORY_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAddressMemory(memory: Record<string, RememberedAddress>) {
+  if (typeof window === "undefined") return;
+
+  const entries = Object.entries(memory)
+    .sort(([, a], [, b]) => Number(b.savedAt || 0) - Number(a.savedAt || 0))
+    .slice(0, MAX_MEMORY_ENTRIES);
+
+  try {
+    window.localStorage.setItem(ADDRESS_MEMORY_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // Storage can be unavailable on restricted browsers. Keep the app usable.
+  }
+}
+
+export function rememberAddressCoordinates(
+  address: string,
+  latitude: number,
+  longitude: number
+) {
+  const normalizedAddress = normalizeAddressQuery(address);
+  const key = normalizeAddressKey(normalizedAddress);
+
+  if (!key || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+  if (latitude === 0 && longitude === 0) return;
+
+  const memory = readAddressMemory();
+  memory[key] = {
+    address: normalizedAddress,
+    latitude,
+    longitude,
+    savedAt: Date.now(),
+  };
+  writeAddressMemory(memory);
+}
+
+function getRememberedAddressSuggestion(query: string): AddressSuggestion | undefined {
+  const remembered = readAddressMemory()[normalizeAddressKey(query)];
+  if (!remembered) return undefined;
+
+  return {
+    id: `memory:${normalizeAddressKey(query)}`,
+    label: remembered.address,
+    shortLabel: "Coordenada usada anteriormente neste aparelho",
+    latitude: remembered.latitude,
+    longitude: remembered.longitude,
+    type: "saved",
+    importance: 1,
+  };
+}
 
 function extractHouseNumber(query: string) {
   const commaNumberMatch = query.match(
@@ -101,7 +182,84 @@ function formatAddressLabel(result: NominatimResult, queryHouseNumber?: string) 
 }
 
 export function normalizeAddressQuery(query: string) {
-  return query.replace(/\s+/g, " ").trim();
+  return query
+    .replace(/\bR\.\s+/gi, "Rua ")
+    .replace(/\bAv\.\s+/gi, "Avenida ")
+    .replace(/\bPres\.\s+Prudente\b/gi, "Presidente Prudente")
+    .replace(/\bPte\.\s+Prudente\b/gi, "Presidente Prudente")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stripAddressComplement(query: string) {
+  return (
+    query
+      .replace(
+        /\s*,?\s*\b(?:apto?|apartamento|ap|bloco|torre|casa|fundos|sala|loja|quadra|lote|andar|condominio|condomínio)\b.*$/i,
+        ""
+      )
+      .trim() || query
+  );
+}
+
+function hasBrazilContext(query: string) {
+  const normalized = normalizeAddressKey(query);
+  return (
+    /\bbrasil\b/.test(normalized) ||
+    /\bsp\b/.test(normalized) ||
+    /\bsao paulo\b/.test(normalized)
+  );
+}
+
+function moveLeadingHouseNumber(query: string) {
+  const parts = query
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (parts.length < 2) return query;
+  if (!/^\d+[a-zA-Z]?$/.test(parts[0]) || !/[a-zA-ZÀ-ÿ]/.test(parts[1])) {
+    return query;
+  }
+
+  return [parts[1], parts[0], ...parts.slice(2)].join(", ");
+}
+
+function buildFallbackQueries(query: string) {
+  const normalized = normalizeAddressQuery(moveLeadingHouseNumber(query));
+  const withoutComplement = stripAddressComplement(normalized);
+  const parts = withoutComplement
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const candidates = [
+    normalized,
+    withoutComplement,
+    hasBrazilContext(withoutComplement) ? withoutComplement : `${withoutComplement}, Brasil`,
+  ];
+
+  if (parts.length >= 4) {
+    const [street, number, ...rest] = parts;
+    const restWithoutCep = rest.filter((part) => !/\b\d{5}-?\d{3}\b/.test(part));
+    const state =
+      restWithoutCep.find((part) => /^(sp|s[aã]o paulo)$/i.test(part)) || "SP";
+    const city =
+      restWithoutCep.find((part) => /presidente prudente/i.test(part)) ||
+      restWithoutCep.at(-2) ||
+      restWithoutCep.at(-1);
+    const district = restWithoutCep.find((part) => part !== city && part !== state);
+
+    candidates.push(
+      [street, number, city, state, "Brasil"].filter(Boolean).join(", "),
+      [street, number, district, city, state, "Brasil"].filter(Boolean).join(", "),
+      [street, district, city, state, "Brasil"].filter(Boolean).join(", "),
+      [street, city, state, "Brasil"].filter(Boolean).join(", ")
+    );
+  }
+
+  return Array.from(
+    new Set(candidates.map(normalizeAddressQuery).filter((item) => item.length >= 4))
+  );
 }
 
 function wait(ms: number, signal?: AbortSignal) {
@@ -126,7 +284,7 @@ export async function searchAddress(
 
   if (normalizedQuery.length < 4) return [];
 
-  const cacheKey = `${normalizedQuery.toLowerCase()}|${options.limit ?? DEFAULT_LIMIT}`;
+  const cacheKey = `${normalizedQuery.toLowerCase()}|${options.limit ?? DEFAULT_LIMIT}|${options.useFallbackQueries !== false ? "fallback" : "single"}`;
   if (!options.signal) {
     const cachedRequest = requestCache.get(cacheKey);
     if (cachedRequest) return cachedRequest;
@@ -142,6 +300,39 @@ export async function searchAddress(
 }
 
 async function searchAddressUncached(
+  normalizedQuery: string,
+  options: SearchAddressOptions
+): Promise<AddressSuggestion[]> {
+  const limit = options.limit ?? DEFAULT_LIMIT;
+  const remembered = getRememberedAddressSuggestion(normalizedQuery);
+  const queries =
+    options.useFallbackQueries === false
+      ? [normalizedQuery]
+      : buildFallbackQueries(normalizedQuery).slice(0, 5);
+  const suggestions: AddressSuggestion[] = remembered ? [remembered] : [];
+  const seen = new Set(suggestions.map((suggestion) => suggestion.id));
+
+  for (const query of queries) {
+    const results = await fetchAddressQuery(query, { ...options, limit });
+
+    for (const suggestion of results) {
+      const coordinateKey = `${suggestion.latitude.toFixed(6)},${suggestion.longitude.toFixed(6)}`;
+      const labelKey = normalizeAddressKey(suggestion.label);
+      const key = `${coordinateKey}|${labelKey}`;
+
+      if (seen.has(suggestion.id) || seen.has(key)) continue;
+      seen.add(suggestion.id);
+      seen.add(key);
+      suggestions.push(suggestion);
+
+      if (suggestions.length >= limit) return suggestions;
+    }
+  }
+
+  return suggestions;
+}
+
+async function fetchAddressQuery(
   normalizedQuery: string,
   options: SearchAddressOptions
 ): Promise<AddressSuggestion[]> {

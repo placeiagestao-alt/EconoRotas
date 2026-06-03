@@ -38,7 +38,10 @@ import {
   type DeliveryProgressState,
 } from "@/lib/routeProgress";
 import { trpc } from "@/lib/trpc";
-import { searchAddress } from "@/services/maps/geocodingService";
+import {
+  rememberAddressCoordinates,
+  searchAddress,
+} from "@/services/maps/geocodingService";
 import {
   calculateDistanceKm,
   getCurrentPosition,
@@ -1337,6 +1340,8 @@ export default function RouteDetail() {
     if (!suggestion) {
       throw new Error(`Confira o endereço e as coordenadas de ${label}.`);
     }
+
+    rememberAddressCoordinates(address, suggestion.latitude, suggestion.longitude);
 
     return {
       location: address,

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  rememberAddressCoordinates,
   type AddressSuggestion,
   searchAddress,
 } from "@/services/maps/geocodingService";
@@ -123,6 +124,7 @@ export default function AddressInputSimple({
   const handleSelectSuggestion = (suggestion: AddressSuggestion) => {
     onAddressChange(suggestion.label);
     onCoordinatesChange(suggestion.latitude, suggestion.longitude);
+    rememberAddressCoordinates(suggestion.label, suggestion.latitude, suggestion.longitude);
     setSuggestions([]);
     setError(null);
     setHasSearched(true);
@@ -149,6 +151,7 @@ export default function AddressInputSimple({
     }
 
     onCoordinatesChange(lat, lng);
+    rememberAddressCoordinates(value, lat, lng);
     setError(null);
     setShowManual(false);
     setSuggestions([]);

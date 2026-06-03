@@ -23,7 +23,11 @@ import {
   type ImportedRoute,
   type ImportedStop,
 } from "@/services/routeImportService";
-import { searchAddress, type AddressSuggestion } from "@/services/maps/geocodingService";
+import {
+  rememberAddressCoordinates,
+  searchAddress,
+  type AddressSuggestion,
+} from "@/services/maps/geocodingService";
 import { getCurrentPosition } from "@/services/maps/locationService";
 import { cn } from "@/lib/utils";
 import { buildApiUrl } from "@/lib/apiBase";
@@ -655,7 +659,10 @@ export default function CreateRoute() {
       let suggestions;
 
       try {
-        suggestions = await searchAddressWithTimeout(candidate, { limit: 1 });
+        suggestions = await searchAddressWithTimeout(candidate, {
+          limit: 1,
+          useFallbackQueries: false,
+        });
       } catch (error) {
         if (isAddressServiceBusyError(error)) {
           await wait(1800);
@@ -870,8 +877,35 @@ export default function CreateRoute() {
     setVoiceAddressSuggestions([]);
     setVoiceSuggestionError(null);
 
+    const normalizedAddress = address.trim();
+    if (normalizedAddress.length < 6) return;
+
     const voiceStopIndex = pendingVoiceStopIndexRef.current;
-    if (voiceStopIndex === null) return;
+    if (voiceStopIndex === null) {
+      setInvalidStopIndexes([]);
+      setRespectImportedStopSequence(false);
+      setStops((currentStops) => {
+        const emptyIndex = currentStops.findIndex((stop) => !stop.address.trim());
+        const targetIndex = emptyIndex >= 0 ? emptyIndex : currentStops.length;
+        updatePendingVoiceStopIndex(targetIndex);
+
+        const nextStop: RouteStop = {
+          address: normalizedAddress,
+          latitude: 0,
+          longitude: 0,
+          notes: "Inserido por voz com edicao manual",
+        };
+
+        if (emptyIndex >= 0) {
+          return currentStops.map((stop, index) =>
+            index === emptyIndex ? { ...stop, ...nextStop } : stop
+          );
+        }
+
+        return [...currentStops, nextStop];
+      });
+      return;
+    }
 
     setInvalidStopIndexes((current) =>
       current.filter((item) => item !== voiceStopIndex)
@@ -881,7 +915,7 @@ export default function CreateRoute() {
         index === voiceStopIndex
           ? {
               ...stop,
-              address,
+              address: normalizedAddress,
               latitude: 0,
               longitude: 0,
               notes: stop.notes || "Inserido por voz com edicao manual",
@@ -930,7 +964,7 @@ export default function CreateRoute() {
       }
 
       if (interimTranscript) {
-        setVoiceTranscript(interimTranscript);
+        handleVoiceTranscriptChange(interimTranscript);
       }
     };
     recognition.onerror = (event) => {
@@ -983,6 +1017,7 @@ export default function CreateRoute() {
           : stop
       )
     );
+    rememberAddressCoordinates(suggestion.label, suggestion.latitude, suggestion.longitude);
     updatePendingVoiceStopIndex(null);
     setVoiceTranscript("");
     setVoiceAddressSuggestions([]);
