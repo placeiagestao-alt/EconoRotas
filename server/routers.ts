@@ -51,6 +51,7 @@ const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "generic_address",
   "duplicate_sequence",
 ]);
+const DUPLICATE_COORDINATE_BLOCKING_GROUPS = 3;
 
 const imileCredentialInput = z.object({
   label: z.string().max(255).optional(),
@@ -224,6 +225,30 @@ function routeStopsToAuditableStops(routeStops: any[]): AuditableStop[] {
 
 function getBlockingAuditIssues(audit: RouteAuditReport) {
   return audit.issues.filter((issue) => BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type));
+}
+
+function getPostOptimizationBlockingReason(audit: RouteAuditReport) {
+  const criticalNearbySkip = audit.issues.find(
+    (issue) => issue.type === "nearby_stop_skipped" && issue.severity === "critical"
+  );
+  if (criticalNearbySkip) {
+    return {
+      issue: criticalNearbySkip,
+      message: `${criticalNearbySkip.title}: ${criticalNearbySkip.message}`,
+    };
+  }
+
+  const duplicateCoordinateIssues = audit.issues.filter(
+    (issue) => issue.type === "duplicate_coordinates"
+  );
+  if (duplicateCoordinateIssues.length >= DUPLICATE_COORDINATE_BLOCKING_GROUPS) {
+    return {
+      issue: duplicateCoordinateIssues[0],
+      message: `Geocodificacao imprecisa: ${duplicateCoordinateIssues.length} grupos de enderecos cairam no mesmo ponto do mapa.`,
+    };
+  }
+
+  return null;
 }
 
 function assertRouteStopsReadyForOptimization(routeStops: any[]) {
@@ -417,6 +442,42 @@ async function optimizeUserRoute(
     usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
     respectInputSequence: Boolean(options?.respectInputSequence),
   });
+  const postOptimizationBlockingReason = getPostOptimizationBlockingReason(audit);
+  if (postOptimizationBlockingReason) {
+    await db.createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "route_audit_blocked_optimization",
+      severity: "error",
+      source: "routes.optimize",
+      title: "Auditor bloqueou a otimizacao",
+      message: postOptimizationBlockingReason.message,
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        auditSource,
+        status: audit.status,
+        score: audit.score,
+        issueCount: audit.issueCount,
+        criticalCount: audit.criticalCount,
+        warningCount: audit.warningCount,
+        totalDistanceKm: audit.totalDistanceKm,
+        maxLegKm: audit.maxLegKm,
+        blockingIssue: postOptimizationBlockingReason.issue,
+        issues: audit.issues.slice(0, 8),
+      },
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record blocked route audit event:", error);
+    });
+
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `Auditor bloqueou a otimizacao. ${postOptimizationBlockingReason.message}`,
+    });
+  }
 
   await db.updateRoute(routeId, userId, {
     totalDistance: optimized.totalDistance,
@@ -976,7 +1037,9 @@ export const appRouter = router({
             route: savedRoute ?? route,
             optimization: null,
             warning:
-              "A rota foi salva como rascunho, mas não foi possível otimizar agora. Abra a rota e tente otimizar novamente.",
+              error instanceof Error
+                ? `A rota foi salva como rascunho, mas não foi possível otimizar agora. ${error.message}`
+                : "A rota foi salva como rascunho, mas não foi possível otimizar agora. Abra a rota e tente otimizar novamente.",
           };
         }
       }),

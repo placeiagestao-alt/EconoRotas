@@ -118,6 +118,102 @@ describe("Route endpoints", () => {
     expect(route?.status).toBe("draft");
   });
 
+  it("keeps route as draft when the auditor blocks a poor optimized sequence", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8212));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Rota com sequencia reprovada",
+      mode: "balanced",
+      respectInputSequence: true,
+      stops: [
+        {
+          address: "Rua Auditoria, 100, Presidente Prudente - SP",
+          latitude: -22.12,
+          longitude: -51.4,
+          sequence: 0,
+        },
+        {
+          address: "Rua Auditoria, 300, Presidente Prudente - SP",
+          latitude: -22.1218,
+          longitude: -51.4,
+          sequence: 1,
+        },
+        {
+          address: "Rua Auditoria, 120, Presidente Prudente - SP",
+          latitude: -22.1204,
+          longitude: -51.4,
+          sequence: 2,
+        },
+      ],
+    });
+
+    const route = await caller.routes.get({ id: result.route.id });
+
+    expect(result.optimization).toBeNull();
+    expect(result.warning).toContain("Auditor bloqueou");
+    expect(route?.status).toBe("draft");
+  });
+
+  it("rejects reoptimization when too many addresses share approximate coordinates", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8213));
+    const route = await caller.routes.create({
+      name: "Rota com geocodificacao duplicada",
+      mode: "balanced",
+    });
+
+    await caller.stops.create({
+      routeId: route.id,
+      stops: [
+        {
+          address: "Rua Duplicada A, 100, Presidente Prudente - SP",
+          latitude: -22.12,
+          longitude: -51.4,
+          sequence: 0,
+        },
+        {
+          address: "Rua Duplicada A, 200, Presidente Prudente - SP",
+          latitude: -22.12,
+          longitude: -51.4,
+          sequence: 1,
+        },
+        {
+          address: "Rua Duplicada B, 100, Presidente Prudente - SP",
+          latitude: -22.121,
+          longitude: -51.401,
+          sequence: 2,
+        },
+        {
+          address: "Rua Duplicada B, 200, Presidente Prudente - SP",
+          latitude: -22.121,
+          longitude: -51.401,
+          sequence: 3,
+        },
+        {
+          address: "Rua Duplicada C, 100, Presidente Prudente - SP",
+          latitude: -22.122,
+          longitude: -51.402,
+          sequence: 4,
+        },
+        {
+          address: "Rua Duplicada C, 200, Presidente Prudente - SP",
+          latitude: -22.122,
+          longitude: -51.402,
+          sequence: 5,
+        },
+      ],
+    });
+
+    await expect(caller.routes.optimize({ id: route.id })).rejects.toThrow(
+      "Geocodificacao imprecisa"
+    );
+
+    const routeAfter = await caller.routes.get({ id: route.id });
+    const stopsAfter = await caller.stops.list({ routeId: route.id });
+
+    expect(routeAfter?.status).toBe("draft");
+    expect(stopsAfter).toHaveLength(6);
+  });
+
   it("respects input stop order when sequential routing is requested", async () => {
     const caller = appRouter.createCaller(createAuthContext(8203));
 
