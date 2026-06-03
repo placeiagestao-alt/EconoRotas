@@ -4548,7 +4548,8 @@ var IMILE_PROVIDER = "imile_rider_delivery";
 var BLOCKING_AUDIT_ISSUE_TYPES = /* @__PURE__ */ new Set([
   "missing_coordinates",
   "invalid_coordinates",
-  "empty_address"
+  "empty_address",
+  "generic_address"
 ]);
 var DUPLICATE_COORDINATE_BLOCKING_GROUPS = 3;
 var imileCredentialInput = z2.object({

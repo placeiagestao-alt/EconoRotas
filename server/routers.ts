@@ -48,6 +48,7 @@ const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",
   "invalid_coordinates",
   "empty_address",
+  "generic_address",
 ]);
 const DUPLICATE_COORDINATE_BLOCKING_GROUPS = 3;
 

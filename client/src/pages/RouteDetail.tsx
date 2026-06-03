@@ -96,7 +96,6 @@ const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "generic_address",
   "duplicate_sequence",
   "region_revisited",
-  "osrm_fallback",
 ]);
 const STRUCTURAL_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",

@@ -89,7 +89,7 @@ describe("Route endpoints", () => {
     expect(stops).toHaveLength(2);
   });
 
-  it("optimizes routeable generic labels instead of stopping at the audit warning", async () => {
+  it("keeps route as draft when optimization finds a generic address", async () => {
     const caller = appRouter.createCaller(createAuthContext(8211));
 
     const result = await caller.routes.createAndOptimize({
@@ -113,13 +113,9 @@ describe("Route endpoints", () => {
 
     const route = await caller.routes.get({ id: result.route.id });
 
-    expect(result.optimization).not.toBeNull();
-    expect(
-      result.optimization?.audit.issues.some(
-        (issue: any) => issue.type === "generic_address"
-      )
-    ).toBe(true);
-    expect(route?.status).toBe("optimized");
+    expect(result.optimization).toBeNull();
+    expect(result.warning).toContain("Endereco generico");
+    expect(route?.status).toBe("draft");
   });
 
   it("reoptimizes automatically when the auditor finds a poor preserved sequence", async () => {
