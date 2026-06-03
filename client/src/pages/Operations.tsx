@@ -30,10 +30,12 @@ function severityVariant(severity: string) {
 function StatCard({
   title,
   value,
+  suffix,
   icon: Icon,
 }: {
   title: string;
   value: number;
+  suffix?: string;
   icon: typeof Users;
 }) {
   return (
@@ -45,7 +47,10 @@ function StatCard({
         <Icon className="h-4 w-4 text-primary" />
       </CardHeader>
       <CardContent>
-        <p className="text-3xl font-semibold tracking-tight">{value}</p>
+        <p className="text-3xl font-semibold tracking-tight">
+          {value}
+          {suffix}
+        </p>
       </CardContent>
     </Card>
   );
@@ -117,6 +122,24 @@ export default function Operations() {
             </CardHeader>
             <CardContent>
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <StatCard
+                  title="Taxa correcao fiscal"
+                  value={Math.round(routeQuality?.correctionRate ?? 0)}
+                  suffix="%"
+                  icon={ShieldCheck}
+                />
+                <StatCard
+                  title="Fallback OSRM"
+                  value={Math.round(routeQuality?.osrmFallbackRate ?? 0)}
+                  suffix="%"
+                  icon={AlertTriangle}
+                />
+                <StatCard
+                  title="Retrabalho regional"
+                  value={Math.round(routeQuality?.regionalReworkIndex ?? 0)}
+                  suffix="%"
+                  icon={MapPinned}
+                />
                 <StatCard
                   title="Score medio"
                   value={Math.round(routeQuality?.averageScore ?? 0)}

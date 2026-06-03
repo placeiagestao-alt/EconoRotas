@@ -290,6 +290,16 @@ function isSequenceCoherenceIssue(issue: RouteAuditReport["issues"][number]) {
   );
 }
 
+function countAuditIssues(audit: RouteAuditReport, type: RouteAuditReport["issues"][number]["type"]) {
+  return audit.issues.filter((issue) => issue.type === type).length;
+}
+
+function countCorrectedIssues(
+  correctionAttempts: Array<{ blockingIssue: RouteAuditReport["issues"][number] }>
+) {
+  return correctionAttempts.length;
+}
+
 function routeWaypointSignature(route: OptimizedRoute) {
   return route.waypoints
     .map((waypoint) =>
@@ -454,6 +464,7 @@ async function optimizeUserRoute(
     localityMode?: "balanced" | "local" | "strict";
   }
 ) {
+  const optimizationStartedAt = Date.now();
   const route = await requireUserRoute(routeId, userId);
   const excludedStopIds = new Set(options?.excludeStopIds ?? []);
   const routeStops = (await db.getRouteStops(routeId)).filter(
@@ -697,6 +708,54 @@ async function optimizeUserRoute(
     });
   }
 
+  async function recordRouteMetricForAttempt(
+    blockedReason: ReturnType<typeof getPostOptimizationBlockingReason>
+  ) {
+    const attemptAudit = optimizationAttempt.audit;
+    await db.createRouteMetric({
+      userId,
+      routeId,
+      qualityScore: attemptAudit.score,
+      optimizationRuntimeMs: Date.now() - optimizationStartedAt,
+      osrmUsed: optimizationAttempt.usedRoadMetrics,
+      osrmFallback: !optimizationAttempt.usedRoadMetrics,
+      clusterCount: attemptAudit.clusterMetrics.clusterCount,
+      averageClusterRadius: attemptAudit.clusterMetrics.averageRadiusKm,
+      maxClusterRadius: attemptAudit.clusterMetrics.maxRadiusKm,
+      regionRevisitedCount: countAuditIssues(attemptAudit, "region_revisited"),
+      prematureRegionExitCount: countAuditIssues(
+        attemptAudit,
+        "premature_region_exit"
+      ),
+      nearbyStopSkippedCount: countAuditIssues(
+        attemptAudit,
+        "nearby_stop_skipped"
+      ),
+      routeCrossingCount: countAuditIssues(attemptAudit, "route_crossing"),
+      issuesDetectedCount: attemptAudit.issueCount + correctionAttempts.length,
+      issuesCorrectedCount: blockedReason
+        ? 0
+        : countCorrectedIssues(correctionAttempts),
+      issuesBlockedCount: blockedReason ? 1 : 0,
+      auditStatus: attemptAudit.status,
+      auditQuality: attemptAudit.quality,
+      auditSource: optimizationAttempt.auditSource,
+      routeMode: mode,
+      localityMode: optimizationAttempt.localityMode ?? options?.localityMode ?? null,
+      stopCount: attemptAudit.stopCount,
+      totalDistanceKm: optimizationAttempt.optimized.totalDistance,
+      totalTimeMinutes: optimizationAttempt.optimized.totalTime,
+      metadata: {
+        firstBlockingIssue: firstBlockingReason?.issue ?? null,
+        blockingIssue: blockedReason?.issue ?? null,
+        correctionAttempts,
+        finalIssues: attemptAudit.issues.slice(0, 12),
+      },
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record route metric:", error);
+    });
+  }
+
   const { optimized, audit, auditSource } = optimizationAttempt;
   if (postOptimizationBlockingReason) {
     await db.createOperationalEvent({
@@ -728,6 +787,8 @@ async function optimizeUserRoute(
       console.warn("[Routes] Failed to record blocked route audit event:", error);
     });
 
+    await recordRouteMetricForAttempt(postOptimizationBlockingReason);
+
     throw new TRPCError({
       code: "BAD_REQUEST",
       message: `Auditor bloqueou a otimizacao. ${postOptimizationBlockingReason.message}`,
@@ -749,6 +810,8 @@ async function optimizeUserRoute(
     notes: replaceImilePackageInNotes(wp.notes, wp.sequence),
   }));
   await db.createStops(routeId, updatedStops);
+
+  await recordRouteMetricForAttempt(null);
 
   return { ...optimized, audit, auditSource };
 }
@@ -1111,6 +1174,10 @@ export const appRouter = router({
 
   admin: router({
     dashboard: adminProcedure.query(() => db.getAdminOperationalDashboard()),
+    routeMetrics: adminProcedure.input(z.object({
+      days: z.number().min(1).max(365).default(30),
+    }))
+      .query(({ input }) => db.getRouteMetricsDashboard(input.days)),
     events: adminProcedure.input(z.object({
       limit: z.number().min(1).max(200).default(100),
     }))

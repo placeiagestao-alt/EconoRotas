@@ -1,17 +1,18 @@
 import { describe, expect, it } from "vitest";
+import * as db from "./db";
 import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
 
 type AuthenticatedUser = NonNullable<TrpcContext["user"]>;
 
-function createAuthContext(userId: number): TrpcContext {
+function createAuthContext(userId: number, role: "user" | "admin" = "user"): TrpcContext {
   const user: AuthenticatedUser = {
     id: userId,
     openId: `route-endpoints-user-${userId}`,
     email: `route-endpoints-${userId}@example.com`,
     name: "Route Endpoints User",
     loginMethod: "manus",
-    role: "user",
+    role,
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
@@ -55,6 +56,39 @@ describe("Route endpoints", () => {
 
     const stops = await caller.stops.list({ routeId: result.route.id });
     expect(stops).toHaveLength(2);
+  });
+
+  it("persists route metrics for admin analytics after optimization", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8216));
+
+    await caller.routes.createAndOptimize({
+      name: "Rota com metricas",
+      mode: "balanced",
+      stops: [
+        {
+          address: "Rua Metrica A, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+        },
+        {
+          address: "Rua Metrica B, Presidente Prudente - SP",
+          latitude: -22.1217,
+          longitude: -51.3899,
+          sequence: 1,
+        },
+      ],
+    });
+
+    const metrics = await db.getRouteMetricsDashboard(30);
+    expect(metrics.routeMetricCount).toBeGreaterThan(0);
+    expect(metrics.averageQualityScore).toBeGreaterThanOrEqual(0);
+    expect(metrics.averageOptimizationRuntimeMs).toBeGreaterThanOrEqual(0);
+    expect(metrics.auditorCorrectionRate).toBeGreaterThanOrEqual(0);
+    expect(metrics.regionalReworkIndex).toBeGreaterThanOrEqual(0);
+    expect(metrics.osrmFallbackCount + metrics.osrmUsedCount).toBe(
+      metrics.routeMetricCount
+    );
   });
 
   it("keeps route as draft when optimization rejects invalid stops", async () => {

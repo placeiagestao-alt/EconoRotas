@@ -210,6 +210,50 @@ export type OperationalEvent = typeof operationalEvents.$inferSelect;
 export type InsertOperationalEvent = typeof operationalEvents.$inferInsert;
 
 /**
+ * Route metrics - immutable optimization measurements used by admin analytics.
+ * One row is stored for each completed optimization attempt or auditor block.
+ */
+export const routeMetrics = mysqlTable("route_metrics", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId"),
+  routeId: int("routeId"),
+  qualityScore: int("qualityScore").notNull(),
+  optimizationRuntimeMs: int("optimizationRuntimeMs").notNull(),
+  osrmUsed: boolean("osrmUsed").default(false).notNull(),
+  osrmFallback: boolean("osrmFallback").default(false).notNull(),
+  clusterCount: int("clusterCount").default(0).notNull(),
+  averageClusterRadius: decimal("averageClusterRadius", { precision: 10, scale: 3 }).default("0").notNull(),
+  maxClusterRadius: decimal("maxClusterRadius", { precision: 10, scale: 3 }).default("0").notNull(),
+  regionRevisitedCount: int("regionRevisitedCount").default(0).notNull(),
+  prematureRegionExitCount: int("prematureRegionExitCount").default(0).notNull(),
+  nearbyStopSkippedCount: int("nearbyStopSkippedCount").default(0).notNull(),
+  routeCrossingCount: int("routeCrossingCount").default(0).notNull(),
+  issuesDetectedCount: int("issuesDetectedCount").default(0).notNull(),
+  issuesCorrectedCount: int("issuesCorrectedCount").default(0).notNull(),
+  issuesBlockedCount: int("issuesBlockedCount").default(0).notNull(),
+  auditStatus: mysqlEnum("auditStatus", ["approved", "attention", "critical"]).notNull(),
+  auditQuality: mysqlEnum("auditQuality", ["excellent", "good", "attention", "poor", "blocked"]).notNull(),
+  auditSource: varchar("auditSource", { length: 128 }),
+  routeMode: mysqlEnum("routeMode", ["shortest_distance", "shortest_time", "balanced"]),
+  localityMode: mysqlEnum("localityMode", ["balanced", "local", "strict"]),
+  stopCount: int("stopCount").default(0).notNull(),
+  totalDistanceKm: decimal("totalDistanceKm", { precision: 10, scale: 2 }).default("0").notNull(),
+  totalTimeMinutes: int("totalTimeMinutes").default(0).notNull(),
+  metadata: json("metadata"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => ({
+  userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("set null"),
+  routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("set null"),
+  createdAtIdx: index("route_metrics_createdAt_idx").on(table.createdAt),
+  routeIdIdx: index("route_metrics_routeId_idx").on(table.routeId),
+  auditStatusIdx: index("route_metrics_auditStatus_idx").on(table.auditStatus),
+  osrmFallbackIdx: index("route_metrics_osrmFallback_idx").on(table.osrmFallback),
+}));
+
+export type RouteMetric = typeof routeMetrics.$inferSelect;
+export type InsertRouteMetric = typeof routeMetrics.$inferInsert;
+
+/**
  * Relations
  */
 export const usersRelations = relations(users, ({ many }) => ({
@@ -219,6 +263,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   chatHistory: many(chatHistory),
   userIntegrations: many(userIntegrations),
   operationalEvents: many(operationalEvents),
+  routeMetrics: many(routeMetrics),
 }));
 
 export const routesRelations = relations(routes, ({ one, many }) => ({
@@ -228,6 +273,7 @@ export const routesRelations = relations(routes, ({ one, many }) => ({
   history: many(routeHistory),
   chats: many(chatHistory),
   operationalEvents: many(operationalEvents),
+  routeMetrics: many(routeMetrics),
 }));
 
 export const stopsRelations = relations(stops, ({ one }) => ({
@@ -256,4 +302,9 @@ export const userIntegrationsRelations = relations(userIntegrations, ({ one }) =
 export const operationalEventsRelations = relations(operationalEvents, ({ one }) => ({
   user: one(users, { fields: [operationalEvents.userId], references: [users.id] }),
   route: one(routes, { fields: [operationalEvents.routeId], references: [routes.id] }),
+}));
+
+export const routeMetricsRelations = relations(routeMetrics, ({ one }) => ({
+  user: one(users, { fields: [routeMetrics.userId], references: [users.id] }),
+  route: one(routes, { fields: [routeMetrics.routeId], references: [routes.id] }),
 }));

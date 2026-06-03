@@ -11,7 +11,7 @@ var __export = (target, all) => {
 // drizzle/schema.ts
 import { decimal, int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, json, foreignKey, uniqueIndex, index } from "drizzle-orm/mysql-core";
 import { relations } from "drizzle-orm";
-var users, routes, stops, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations;
+var users, routes, stops, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, routeMetrics, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations, routeMetricsRelations;
 var init_schema = __esm({
   "drizzle/schema.ts"() {
     "use strict";
@@ -172,13 +172,50 @@ var init_schema = __esm({
       severityIdx: index("operationalEvents_severity_idx").on(table.severity),
       typeIdx: index("operationalEvents_type_idx").on(table.type)
     }));
+    routeMetrics = mysqlTable("route_metrics", {
+      id: int("id").autoincrement().primaryKey(),
+      userId: int("userId"),
+      routeId: int("routeId"),
+      qualityScore: int("qualityScore").notNull(),
+      optimizationRuntimeMs: int("optimizationRuntimeMs").notNull(),
+      osrmUsed: boolean("osrmUsed").default(false).notNull(),
+      osrmFallback: boolean("osrmFallback").default(false).notNull(),
+      clusterCount: int("clusterCount").default(0).notNull(),
+      averageClusterRadius: decimal("averageClusterRadius", { precision: 10, scale: 3 }).default("0").notNull(),
+      maxClusterRadius: decimal("maxClusterRadius", { precision: 10, scale: 3 }).default("0").notNull(),
+      regionRevisitedCount: int("regionRevisitedCount").default(0).notNull(),
+      prematureRegionExitCount: int("prematureRegionExitCount").default(0).notNull(),
+      nearbyStopSkippedCount: int("nearbyStopSkippedCount").default(0).notNull(),
+      routeCrossingCount: int("routeCrossingCount").default(0).notNull(),
+      issuesDetectedCount: int("issuesDetectedCount").default(0).notNull(),
+      issuesCorrectedCount: int("issuesCorrectedCount").default(0).notNull(),
+      issuesBlockedCount: int("issuesBlockedCount").default(0).notNull(),
+      auditStatus: mysqlEnum("auditStatus", ["approved", "attention", "critical"]).notNull(),
+      auditQuality: mysqlEnum("auditQuality", ["excellent", "good", "attention", "poor", "blocked"]).notNull(),
+      auditSource: varchar("auditSource", { length: 128 }),
+      routeMode: mysqlEnum("routeMode", ["shortest_distance", "shortest_time", "balanced"]),
+      localityMode: mysqlEnum("localityMode", ["balanced", "local", "strict"]),
+      stopCount: int("stopCount").default(0).notNull(),
+      totalDistanceKm: decimal("totalDistanceKm", { precision: 10, scale: 2 }).default("0").notNull(),
+      totalTimeMinutes: int("totalTimeMinutes").default(0).notNull(),
+      metadata: json("metadata"),
+      createdAt: timestamp("createdAt").defaultNow().notNull()
+    }, (table) => ({
+      userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("set null"),
+      routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("set null"),
+      createdAtIdx: index("route_metrics_createdAt_idx").on(table.createdAt),
+      routeIdIdx: index("route_metrics_routeId_idx").on(table.routeId),
+      auditStatusIdx: index("route_metrics_auditStatus_idx").on(table.auditStatus),
+      osrmFallbackIdx: index("route_metrics_osrmFallback_idx").on(table.osrmFallback)
+    }));
     usersRelations = relations(users, ({ many }) => ({
       routes: many(routes),
       routeSchedules: many(routeSchedules),
       routeHistory: many(routeHistory),
       chatHistory: many(chatHistory),
       userIntegrations: many(userIntegrations),
-      operationalEvents: many(operationalEvents)
+      operationalEvents: many(operationalEvents),
+      routeMetrics: many(routeMetrics)
     }));
     routesRelations = relations(routes, ({ one, many }) => ({
       user: one(users, { fields: [routes.userId], references: [users.id] }),
@@ -186,7 +223,8 @@ var init_schema = __esm({
       schedules: many(routeSchedules),
       history: many(routeHistory),
       chats: many(chatHistory),
-      operationalEvents: many(operationalEvents)
+      operationalEvents: many(operationalEvents),
+      routeMetrics: many(routeMetrics)
     }));
     stopsRelations = relations(stops, ({ one }) => ({
       route: one(routes, { fields: [stops.routeId], references: [routes.id] })
@@ -209,6 +247,10 @@ var init_schema = __esm({
     operationalEventsRelations = relations(operationalEvents, ({ one }) => ({
       user: one(users, { fields: [operationalEvents.userId], references: [users.id] }),
       route: one(routes, { fields: [operationalEvents.routeId], references: [routes.id] })
+    }));
+    routeMetricsRelations = relations(routeMetrics, ({ one }) => ({
+      user: one(users, { fields: [routeMetrics.userId], references: [users.id] }),
+      route: one(routes, { fields: [routeMetrics.routeId], references: [routes.id] })
     }));
   }
 });
@@ -329,6 +371,7 @@ function hydrateMemory(data) {
   memory.chatHistory = Array.isArray(data.chatHistory) ? data.chatHistory : [];
   memory.userIntegrations = Array.isArray(data.userIntegrations) ? data.userIntegrations : [];
   memory.operationalEvents = Array.isArray(data.operationalEvents) ? data.operationalEvents : [];
+  memory.routeMetrics = Array.isArray(data.routeMetrics) ? data.routeMetrics : [];
   memory.ids = {
     users: Number(data.ids?.users) || 1,
     routes: Number(data.ids?.routes) || 1,
@@ -337,7 +380,8 @@ function hydrateMemory(data) {
     routeHistory: Number(data.ids?.routeHistory) || 1,
     chatHistory: Number(data.ids?.chatHistory) || 1,
     userIntegrations: Number(data.ids?.userIntegrations) || 1,
-    operationalEvents: Number(data.ids?.operationalEvents) || 1
+    operationalEvents: Number(data.ids?.operationalEvents) || 1,
+    routeMetrics: Number(data.ids?.routeMetrics) || 1
   };
 }
 function loadLocalDb() {
@@ -1502,6 +1546,222 @@ async function getLatestRouteOptimizationEvent(routeId, userId) {
   ).orderBy(desc(operationalEvents.createdAt)).limit(1);
   return result[0] ?? null;
 }
+function normalizeMetricNumber(value, fallback = 0) {
+  return Number.isFinite(value) ? value : fallback;
+}
+function metricAverage(values) {
+  return values.length ? values.reduce((total, value) => total + value, 0) / values.length : 0;
+}
+function metricPercent(part, total) {
+  return total > 0 ? part / total * 100 : 0;
+}
+function roundMetric(value, digits = 1) {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+async function createRouteMetric(data) {
+  const metric = {
+    userId: data.userId ?? null,
+    routeId: data.routeId ?? null,
+    qualityScore: Math.round(normalizeMetricNumber(data.qualityScore)),
+    optimizationRuntimeMs: Math.round(
+      normalizeMetricNumber(data.optimizationRuntimeMs)
+    ),
+    osrmUsed: Boolean(data.osrmUsed),
+    osrmFallback: Boolean(data.osrmFallback),
+    clusterCount: Math.round(normalizeMetricNumber(data.clusterCount)),
+    averageClusterRadius: String(
+      roundMetric(normalizeMetricNumber(data.averageClusterRadius), 3)
+    ),
+    maxClusterRadius: String(
+      roundMetric(normalizeMetricNumber(data.maxClusterRadius), 3)
+    ),
+    regionRevisitedCount: Math.round(
+      normalizeMetricNumber(data.regionRevisitedCount)
+    ),
+    prematureRegionExitCount: Math.round(
+      normalizeMetricNumber(data.prematureRegionExitCount)
+    ),
+    nearbyStopSkippedCount: Math.round(
+      normalizeMetricNumber(data.nearbyStopSkippedCount)
+    ),
+    routeCrossingCount: Math.round(
+      normalizeMetricNumber(data.routeCrossingCount)
+    ),
+    issuesDetectedCount: Math.round(
+      normalizeMetricNumber(data.issuesDetectedCount)
+    ),
+    issuesCorrectedCount: Math.round(
+      normalizeMetricNumber(data.issuesCorrectedCount)
+    ),
+    issuesBlockedCount: Math.round(
+      normalizeMetricNumber(data.issuesBlockedCount)
+    ),
+    auditStatus: data.auditStatus,
+    auditQuality: data.auditQuality,
+    auditSource: data.auditSource?.slice(0, 128) ?? null,
+    routeMode: data.routeMode ?? null,
+    localityMode: data.localityMode ?? null,
+    stopCount: Math.round(normalizeMetricNumber(data.stopCount)),
+    totalDistanceKm: String(
+      roundMetric(normalizeMetricNumber(data.totalDistanceKm), 2)
+    ),
+    totalTimeMinutes: Math.round(
+      normalizeMetricNumber(data.totalTimeMinutes)
+    ),
+    metadata: data.metadata ?? null
+  };
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const created = {
+        id: memory.ids.routeMetrics++,
+        ...metric,
+        averageClusterRadius: Number(metric.averageClusterRadius),
+        maxClusterRadius: Number(metric.maxClusterRadius),
+        totalDistanceKm: Number(metric.totalDistanceKm),
+        createdAt: /* @__PURE__ */ new Date()
+      };
+      memory.routeMetrics.push(created);
+      await persistFallbackDb();
+      return created;
+    }
+    requireConfiguredDatabase();
+  }
+  const inserted = await db.insert(routeMetrics).values(metric).$returningId();
+  const insertedId = inserted[0]?.id;
+  if (!insertedId) return null;
+  const result = await db.select().from(routeMetrics).where(eq(routeMetrics.id, insertedId)).limit(1);
+  return result[0] ?? null;
+}
+function buildRouteMetricsSummary(metrics, days) {
+  const total = metrics.length;
+  const corrected = metrics.filter(
+    (metric) => Number(metric.issuesCorrectedCount || 0) > 0
+  ).length;
+  const blocked = metrics.filter(
+    (metric) => Number(metric.issuesBlockedCount || 0) > 0
+  ).length;
+  const osrmFallback = metrics.filter((metric) => Boolean(metric.osrmFallback)).length;
+  const revisits = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.regionRevisitedCount || 0),
+    0
+  );
+  const prematureExits = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.prematureRegionExitCount || 0),
+    0
+  );
+  const nearbySkips = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.nearbyStopSkippedCount || 0),
+    0
+  );
+  const crossings = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.routeCrossingCount || 0),
+    0
+  );
+  const detectedIssues = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.issuesDetectedCount || 0),
+    0
+  );
+  const correctedIssues = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.issuesCorrectedCount || 0),
+    0
+  );
+  const blockedIssues = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.issuesBlockedCount || 0),
+    0
+  );
+  const clusterEfficiencyBase = metrics.filter(
+    (metric) => Number(metric.clusterCount || 0) > 0
+  );
+  const routesWithRegionalProblems = metrics.filter(
+    (metric) => Number(metric.regionRevisitedCount || 0) > 0 || Number(metric.prematureRegionExitCount || 0) > 0
+  ).length;
+  return {
+    periodDays: days,
+    routeMetricCount: total,
+    averageQualityScore: roundMetric(
+      metricAverage(metrics.map((metric) => Number(metric.qualityScore || 0)))
+    ),
+    averageOptimizationRuntimeMs: roundMetric(
+      metricAverage(
+        metrics.map((metric) => Number(metric.optimizationRuntimeMs || 0))
+      )
+    ),
+    averageOptimizationRuntimeSeconds: roundMetric(
+      metricAverage(
+        metrics.map((metric) => Number(metric.optimizationRuntimeMs || 0))
+      ) / 1e3,
+      2
+    ),
+    osrmUsedCount: metrics.filter((metric) => Boolean(metric.osrmUsed)).length,
+    osrmFallbackCount: osrmFallback,
+    osrmFallbackRate: roundMetric(metricPercent(osrmFallback, total)),
+    auditorCorrectionRate: roundMetric(metricPercent(corrected, total)),
+    regionalReworkIndex: roundMetric(
+      metricPercent(revisits + prematureExits, total)
+    ),
+    regionalRevisitIndex: roundMetric(
+      metricPercent(routesWithRegionalProblems, total)
+    ),
+    clusterEfficiencyIndex: roundMetric(
+      100 - metricPercent(
+        clusterEfficiencyBase.filter(
+          (metric) => Number(metric.regionRevisitedCount || 0) > 0 || Number(metric.prematureRegionExitCount || 0) > 0 || Number(metric.nearbyStopSkippedCount || 0) > 0
+        ).length,
+        clusterEfficiencyBase.length
+      )
+    ),
+    averageClusterCount: roundMetric(
+      metricAverage(metrics.map((metric) => Number(metric.clusterCount || 0)))
+    ),
+    averageClusterRadiusKm: roundMetric(
+      metricAverage(
+        metrics.map((metric) => Number(metric.averageClusterRadius || 0))
+      ),
+      3
+    ),
+    maxClusterRadiusKm: roundMetric(
+      Math.max(0, ...metrics.map((metric) => Number(metric.maxClusterRadius || 0))),
+      3
+    ),
+    routeOutcomes: {
+      correctedCount: corrected,
+      correctedRate: roundMetric(metricPercent(corrected, total)),
+      blockedCount: blocked,
+      blockedRate: roundMetric(metricPercent(blocked, total)),
+      approvedFirstPassCount: metrics.filter(
+        (metric) => metric.auditStatus === "approved" && Number(metric.issuesDetectedCount || 0) === 0 && Number(metric.issuesCorrectedCount || 0) === 0 && Number(metric.issuesBlockedCount || 0) === 0
+      ).length
+    },
+    issues: {
+      regionRevisited: revisits,
+      prematureRegionExit: prematureExits,
+      nearbyStopSkipped: nearbySkips,
+      routeCrossing: crossings,
+      detected: detectedIssues,
+      corrected: correctedIssues,
+      blocked: blockedIssues
+    }
+  };
+}
+async function getRouteMetricsDashboard(days = 30) {
+  const safeDays = Math.min(Math.max(Math.round(days), 1), 365);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = Date.now() - safeDays * 24 * 60 * 60 * 1e3;
+      const metrics2 = memory.routeMetrics.filter(
+        (metric) => new Date(metric.createdAt).getTime() >= cutoff
+      );
+      return buildRouteMetricsSummary(metrics2, safeDays);
+    }
+    requireConfiguredDatabase();
+  }
+  const cutoffDate = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1e3);
+  const metrics = await db.select().from(routeMetrics).where(gte(routeMetrics.createdAt, cutoffDate)).orderBy(desc(routeMetrics.createdAt));
+  return buildRouteMetricsSummary(metrics, safeDays);
+}
 function parseOperationalMetadata(metadata) {
   if (!metadata) return {};
   if (typeof metadata === "string") {
@@ -1579,6 +1839,23 @@ function buildRouteQualityDashboard(events) {
     estimatedMinutesSaved: Math.round(estimatedKmSaved * 2.5)
   };
 }
+function buildRouteQualityDashboardFromMetrics(routeMetricsSummary, eventFallback) {
+  return {
+    averageScore: routeMetricsSummary.averageQualityScore,
+    scoredRoutes: routeMetricsSummary.routeMetricCount,
+    corrections: routeMetricsSummary.routeOutcomes.correctedCount,
+    revisitsAvoided: routeMetricsSummary.issues.regionRevisited,
+    prematureExitsCorrected: routeMetricsSummary.issues.prematureRegionExit,
+    routeCrossingsDetected: routeMetricsSummary.issues.routeCrossing,
+    estimatedKmSaved: eventFallback.estimatedKmSaved,
+    estimatedMinutesSaved: eventFallback.estimatedMinutesSaved,
+    correctionRate: routeMetricsSummary.auditorCorrectionRate,
+    osrmFallbackRate: routeMetricsSummary.osrmFallbackRate,
+    regionalReworkIndex: routeMetricsSummary.regionalReworkIndex,
+    optimizedRoutes: routeMetricsSummary.routeMetricCount,
+    osrmFallbackRoutes: routeMetricsSummary.osrmFallbackCount
+  };
+}
 async function getAdminOperationalDashboard() {
   const db = await getDb();
   if (!db) {
@@ -1591,7 +1868,16 @@ async function getAdminOperationalDashboard() {
       const events = sortByDateDesc(memory.operationalEvents, "createdAt");
       const recentUsers2 = sortByDateDesc(memory.users, "createdAt").slice(0, 8);
       const recentRoutes2 = sortByDateDesc(memory.routes, "createdAt").slice(0, 8);
-      const routeQuality2 = buildRouteQualityDashboard(events.slice(0, 200));
+      const routeMetrics2 = buildRouteMetricsSummary(
+        memory.routeMetrics.filter(
+          (metric) => now - new Date(metric.createdAt).getTime() <= 30 * oneDay
+        ),
+        30
+      );
+      const routeQuality2 = buildRouteQualityDashboardFromMetrics(
+        routeMetrics2,
+        buildRouteQualityDashboard(events.slice(0, 200))
+      );
       return {
         stats: {
           usersTotal: memory.users.length,
@@ -1610,6 +1896,7 @@ async function getAdminOperationalDashboard() {
           ).length
         },
         routeQuality: routeQuality2,
+        routeMetrics: routeMetrics2,
         recentUsers: recentUsers2,
         recentRoutes: recentRoutes2,
         recentEvents: events.slice(0, 12)
@@ -1637,7 +1924,11 @@ async function getAdminOperationalDashboard() {
     )
   );
   const recentOperationalEvents = await getRecentOperationalEvents(200);
-  const routeQuality = buildRouteQualityDashboard(recentOperationalEvents);
+  const routeMetricsSummary = await getRouteMetricsDashboard(30);
+  const routeQuality = buildRouteQualityDashboardFromMetrics(
+    routeMetricsSummary,
+    buildRouteQualityDashboard(recentOperationalEvents)
+  );
   const recentUsers = await db.select({
     id: users.id,
     name: users.name,
@@ -1670,6 +1961,7 @@ async function getAdminOperationalDashboard() {
       routeWarnings24h: Number(routeWarnings24h?.count || 0)
     },
     routeQuality,
+    routeMetrics: routeMetricsSummary,
     recentUsers,
     recentRoutes,
     recentEvents: recentOperationalEvents.slice(0, 12)
@@ -1775,6 +2067,7 @@ var init_db = __esm({
       chatHistory: [],
       userIntegrations: [],
       operationalEvents: [],
+      routeMetrics: [],
       ids: {
         users: 1,
         routes: 1,
@@ -1783,7 +2076,8 @@ var init_db = __esm({
         routeHistory: 1,
         chatHistory: 1,
         userIntegrations: 1,
-        operationalEvents: 1
+        operationalEvents: 1,
+        routeMetrics: 1
       }
     };
     REQUIRED_SCHEMA_COLUMNS = [
@@ -1798,7 +2092,11 @@ var init_db = __esm({
       ["stops", "sequence"],
       ["userIntegrations", "authTokenEncrypted"],
       ["operationalEvents", "type"],
-      ["operationalEvents", "severity"]
+      ["operationalEvents", "severity"],
+      ["route_metrics", "qualityScore"],
+      ["route_metrics", "optimizationRuntimeMs"],
+      ["route_metrics", "osrmUsed"],
+      ["route_metrics", "issuesCorrectedCount"]
     ];
   }
 });
@@ -5280,6 +5578,12 @@ function getPostOptimizationBlockingReason(audit) {
 function isSequenceCoherenceIssue(issue) {
   return issue.type === "nearby_stop_skipped" || issue.type === "region_revisited" || issue.type === "premature_region_exit" || issue.type === "route_crossing";
 }
+function countAuditIssues(audit, type) {
+  return audit.issues.filter((issue) => issue.type === type).length;
+}
+function countCorrectedIssues(correctionAttempts) {
+  return correctionAttempts.length;
+}
 function routeWaypointSignature(route) {
   return route.waypoints.map(
     (waypoint) => [
@@ -5386,6 +5690,7 @@ async function requireUserRoute(routeId, userId) {
   return route;
 }
 async function optimizeUserRoute(routeId, userId, requestedMode, options) {
+  const optimizationStartedAt = Date.now();
   const route = await requireUserRoute(routeId, userId);
   const excludedStopIds = new Set(options?.excludeStopIds ?? []);
   const routeStops = (await getRouteStops(routeId)).filter(
@@ -5581,6 +5886,49 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       console.warn("[Routes] Failed to record route audit correction event:", error);
     });
   }
+  async function recordRouteMetricForAttempt(blockedReason) {
+    const attemptAudit = optimizationAttempt.audit;
+    await createRouteMetric({
+      userId,
+      routeId,
+      qualityScore: attemptAudit.score,
+      optimizationRuntimeMs: Date.now() - optimizationStartedAt,
+      osrmUsed: optimizationAttempt.usedRoadMetrics,
+      osrmFallback: !optimizationAttempt.usedRoadMetrics,
+      clusterCount: attemptAudit.clusterMetrics.clusterCount,
+      averageClusterRadius: attemptAudit.clusterMetrics.averageRadiusKm,
+      maxClusterRadius: attemptAudit.clusterMetrics.maxRadiusKm,
+      regionRevisitedCount: countAuditIssues(attemptAudit, "region_revisited"),
+      prematureRegionExitCount: countAuditIssues(
+        attemptAudit,
+        "premature_region_exit"
+      ),
+      nearbyStopSkippedCount: countAuditIssues(
+        attemptAudit,
+        "nearby_stop_skipped"
+      ),
+      routeCrossingCount: countAuditIssues(attemptAudit, "route_crossing"),
+      issuesDetectedCount: attemptAudit.issueCount + correctionAttempts.length,
+      issuesCorrectedCount: blockedReason ? 0 : countCorrectedIssues(correctionAttempts),
+      issuesBlockedCount: blockedReason ? 1 : 0,
+      auditStatus: attemptAudit.status,
+      auditQuality: attemptAudit.quality,
+      auditSource: optimizationAttempt.auditSource,
+      routeMode: mode,
+      localityMode: optimizationAttempt.localityMode ?? options?.localityMode ?? null,
+      stopCount: attemptAudit.stopCount,
+      totalDistanceKm: optimizationAttempt.optimized.totalDistance,
+      totalTimeMinutes: optimizationAttempt.optimized.totalTime,
+      metadata: {
+        firstBlockingIssue: firstBlockingReason?.issue ?? null,
+        blockingIssue: blockedReason?.issue ?? null,
+        correctionAttempts,
+        finalIssues: attemptAudit.issues.slice(0, 12)
+      }
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record route metric:", error);
+    });
+  }
   const { optimized, audit, auditSource } = optimizationAttempt;
   if (postOptimizationBlockingReason) {
     await createOperationalEvent({
@@ -5611,6 +5959,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     }).catch((error) => {
       console.warn("[Routes] Failed to record blocked route audit event:", error);
     });
+    await recordRouteMetricForAttempt(postOptimizationBlockingReason);
     throw new TRPCError3({
       code: "BAD_REQUEST",
       message: `Auditor bloqueou a otimizacao. ${postOptimizationBlockingReason.message}`
@@ -5630,6 +5979,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     notes: replaceImilePackageInNotes(wp.notes, wp.sequence)
   }));
   await createStops(routeId, updatedStops);
+  await recordRouteMetricForAttempt(null);
   return { ...optimized, audit, auditSource };
 }
 var credentialsSchema = z2.object({
@@ -5939,6 +6289,9 @@ var appRouter = router({
   }),
   admin: router({
     dashboard: adminProcedure.query(() => getAdminOperationalDashboard()),
+    routeMetrics: adminProcedure.input(z2.object({
+      days: z2.number().min(1).max(365).default(30)
+    })).query(({ input }) => getRouteMetricsDashboard(input.days)),
     events: adminProcedure.input(z2.object({
       limit: z2.number().min(1).max(200).default(100)
     })).query(({ input }) => getRecentOperationalEvents(input.limit)),
