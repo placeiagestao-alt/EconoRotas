@@ -5346,7 +5346,9 @@ var appRouter = router({
       stops: z2.array(stopCreateSchema)
     })).mutation(async ({ ctx, input }) => {
       await requireUserRoute(input.routeId, ctx.user.id);
-      return createStops(input.routeId, input.stops);
+      const createdStops = await createStops(input.routeId, input.stops);
+      await updateRoute(input.routeId, ctx.user.id, { status: "draft" });
+      return createdStops;
     }),
     update: protectedProcedure.input(stopUpdateSchema).mutation(async ({ ctx, input }) => {
       await requireUserRoute(input.routeId, ctx.user.id);

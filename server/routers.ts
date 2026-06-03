@@ -1090,11 +1090,13 @@ export const appRouter = router({
       }),
     create: protectedProcedure.input(z.object({
       routeId: z.number(),
-        stops: z.array(stopCreateSchema),
+      stops: z.array(stopCreateSchema),
     }))
       .mutation(async ({ ctx, input }) => {
         await requireUserRoute(input.routeId, ctx.user.id);
-        return db.createStops(input.routeId, input.stops);
+        const createdStops = await db.createStops(input.routeId, input.stops);
+        await db.updateRoute(input.routeId, ctx.user.id, { status: "draft" });
+        return createdStops;
       }),
     update: protectedProcedure.input(stopUpdateSchema)
       .mutation(async ({ ctx, input }) => {

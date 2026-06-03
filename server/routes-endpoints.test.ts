@@ -430,4 +430,51 @@ describe("Route endpoints", () => {
       false
     );
   });
+
+  it("marks an optimized route as draft when a new stop is added", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8210));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Rota auditada com parada nova",
+      mode: "balanced",
+      respectInputSequence: true,
+      stops: [
+        {
+          address: "Parada distante",
+          latitude: -22.14,
+          longitude: -51.4,
+          sequence: 0,
+        },
+        {
+          address: "Parada proxima",
+          latitude: -22.12001,
+          longitude: -51.40001,
+          sequence: 1,
+        },
+      ],
+    });
+
+    await caller.stops.create({
+      routeId: result.route.id,
+      stops: [
+        {
+          address: "Parada adicionada manualmente",
+          latitude: -22.121,
+          longitude: -51.401,
+          sequence: 2,
+        },
+      ],
+    });
+
+    const route = await caller.routes.get({ id: result.route.id });
+    const audit = await caller.routes.audit({ id: result.route.id });
+
+    expect(route?.status).toBe("draft");
+    expect(audit.context.staleOptimizationContext).toBe(true);
+    expect(audit.context.respectInputSequence).toBeNull();
+    expect(audit.context.requireStartLocation).toBe(false);
+    expect(audit.issues.some((issue: any) => issue.type === "bad_preserved_sequence")).toBe(
+      false
+    );
+  });
 });
