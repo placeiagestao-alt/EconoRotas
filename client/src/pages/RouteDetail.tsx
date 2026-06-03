@@ -322,6 +322,7 @@ export default function RouteDetail() {
   const params = useParams<{ id: string }>();
   const routeId = Number(params.id);
   const utils = trpc.useUtils();
+  const authQuery = trpc.auth.me.useQuery();
   const routeQuery = trpc.routes.get.useQuery(
     { id: routeId },
     { enabled: Number.isFinite(routeId) }
@@ -837,6 +838,7 @@ export default function RouteDetail() {
   const hasStructuralAuditIssues = structuralAuditIssues.length > 0;
   const hasReoptimizableAuditIssues =
     hasBlockingAuditIssues && !hasStructuralAuditIssues;
+  const canSeeRouteAuditPanel = authQuery.data?.role === "admin";
 
   const completeRoute = async () => {
     await updateRouteMutation.mutateAsync({
@@ -1542,7 +1544,7 @@ export default function RouteDetail() {
           </div>
         </div>
 
-        {auditQuery.data ? (
+        {canSeeRouteAuditPanel && auditQuery.data ? (
           <Alert
             className={
               auditQuery.data.status === "approved"
