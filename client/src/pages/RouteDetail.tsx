@@ -96,6 +96,7 @@ const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "generic_address",
   "duplicate_sequence",
   "region_revisited",
+  "route_crossing",
 ]);
 const STRUCTURAL_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",
@@ -123,11 +124,28 @@ function isBlockingAuditIssue(issue: any) {
   return (
     issue.type === "nearby_stop_skipped" &&
     (issue.severity === "critical" || issue.severity === "high")
-  );
+  ) || issue.type === "route_crossing";
 }
 
 function isStructuralAuditIssue(issue: any) {
   return STRUCTURAL_AUDIT_ISSUE_TYPES.has(issue?.type);
+}
+
+function getRouteQualityLabel(quality?: string) {
+  switch (quality) {
+    case "excellent":
+      return "Excelente";
+    case "good":
+      return "Bom";
+    case "attention":
+      return "Atenção";
+    case "poor":
+      return "Ruim";
+    case "blocked":
+      return "Bloqueado";
+    default:
+      return "Sem classificação";
+  }
 }
 
 function toNumber(value: unknown) {
@@ -1568,6 +1586,9 @@ export default function RouteDetail() {
                   </span>
                   <Badge variant="outline">Score {auditQuery.data.score}</Badge>
                   <Badge variant="outline">
+                    {getRouteQualityLabel((auditQuery.data as any).quality)}
+                  </Badge>
+                  <Badge variant="outline">
                     {auditQuery.data.issueCount} alerta(s)
                   </Badge>
                   <Badge variant="outline">
@@ -2258,6 +2279,7 @@ export default function RouteDetail() {
                   height="h-96"
                   startPoint={hasValidCoordinates(startPoint) ? startPoint : routeStartPoint}
                   endPoint={hasValidCoordinates(endPoint) ? endPoint : routeEndPoint}
+                  auditIssues={auditQuery.data?.issues || []}
                 />
               </Suspense>
             ) : (

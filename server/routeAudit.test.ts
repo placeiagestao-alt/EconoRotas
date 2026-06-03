@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { auditRouteSequence, type AuditableStop } from "./routeAudit";
+import {
+  auditRouteSequence,
+  detectRouteCrossings,
+  type AuditableStop,
+} from "./routeAudit";
 
 describe("Route auditor", () => {
   it("flags a nearby pending stop skipped by the saved sequence", () => {
@@ -234,5 +238,63 @@ describe("Route auditor", () => {
     expect(report.issues.some((issue) => issue.type === "duplicate_sequence")).toBe(
       true
     );
+  });
+
+  it("detects route segments crossing each other", () => {
+    const stops: AuditableStop[] = [
+      {
+        latitude: -22.1,
+        longitude: -51.4,
+        address: "Rua Alfa, 100",
+        sequence: 0,
+      },
+      {
+        latitude: -22.12,
+        longitude: -51.38,
+        address: "Rua Beta, 200",
+        sequence: 1,
+      },
+      {
+        latitude: -22.1,
+        longitude: -51.38,
+        address: "Rua Gama, 300",
+        sequence: 2,
+      },
+      {
+        latitude: -22.12,
+        longitude: -51.4,
+        address: "Rua Delta, 400",
+        sequence: 3,
+      },
+    ];
+
+    expect(detectRouteCrossings(stops)).toHaveLength(1);
+
+    const report = auditRouteSequence(stops);
+
+    expect(report.status).toBe("attention");
+    expect(report.score).toBeLessThan(100);
+    expect(report.issues.some((issue) => issue.type === "route_crossing")).toBe(true);
+  });
+
+  it("uses explicit route quality penalties by issue type", () => {
+    const report = auditRouteSequence([
+      {
+        latitude: -22.12,
+        longitude: -51.4,
+        address: "Cliente 123",
+        sequence: 0,
+      },
+      {
+        latitude: -22.121,
+        longitude: -51.401,
+        address: "Rua Valida, 45",
+        sequence: 1,
+      },
+    ]);
+
+    expect(report.issues.some((issue) => issue.type === "generic_address")).toBe(true);
+    expect(report.score).toBe(95);
+    expect(report.quality).toBe("excellent");
   });
 });

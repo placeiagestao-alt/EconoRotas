@@ -9,6 +9,7 @@ export type RouteAuditIssue = {
     | "duplicate_coordinates"
     | "first_stop_far"
     | "region_revisited"
+    | "route_crossing"
     | "high_road_detour"
     | "missing_driver_origin"
     | "bad_preserved_sequence"
@@ -39,6 +40,7 @@ export type AuditableStop = Location & {
 export type RouteAuditReport = {
   status: "approved" | "attention" | "critical";
   score: number;
+  quality: "excellent" | "good" | "attention" | "poor" | "blocked";
   stopCount: number;
   issueCount: number;
   criticalCount: number;
@@ -62,6 +64,23 @@ const BRAZIL_LATITUDE_MIN = -34;
 const BRAZIL_LATITUDE_MAX = 6;
 const BRAZIL_LONGITUDE_MIN = -74;
 const BRAZIL_LONGITUDE_MAX = -28;
+const ROUTE_QUALITY_PENALTIES: Partial<Record<RouteAuditIssue["type"], number>> = {
+  region_revisited: 20,
+  nearby_stop_skipped: 15,
+  route_crossing: 10,
+  high_road_detour: 10,
+  duplicate_coordinates: 30,
+  generic_address: 5,
+  missing_coordinates: 30,
+  invalid_coordinates: 30,
+  empty_address: 30,
+  duplicate_sequence: 20,
+  bad_preserved_sequence: 15,
+  osrm_fallback: 10,
+  first_stop_far: 10,
+  long_jump: 8,
+  missing_driver_origin: 8,
+};
 
 function roundKm(value: number) {
   return Math.round(value * 100) / 100;
@@ -147,6 +166,88 @@ function getReportStatus(criticalCount: number, warningCount: number) {
   if (criticalCount > 0) return "critical";
   if (warningCount > 0) return "attention";
   return "approved";
+}
+
+function getRouteQuality(score: number): RouteAuditReport["quality"] {
+  if (score >= 90) return "excellent";
+  if (score >= 80) return "good";
+  if (score >= 65) return "attention";
+  if (score >= 50) return "poor";
+  return "blocked";
+}
+
+function orientation(a: Location, b: Location, c: Location) {
+  const value =
+    (b.longitude - a.longitude) * (c.latitude - a.latitude) -
+    (b.latitude - a.latitude) * (c.longitude - a.longitude);
+
+  if (Math.abs(value) < 1e-12) return 0;
+  return value > 0 ? 1 : -1;
+}
+
+function onSegment(a: Location, b: Location, c: Location) {
+  return (
+    Math.min(a.longitude, c.longitude) <= b.longitude + 1e-12 &&
+    b.longitude <= Math.max(a.longitude, c.longitude) + 1e-12 &&
+    Math.min(a.latitude, c.latitude) <= b.latitude + 1e-12 &&
+    b.latitude <= Math.max(a.latitude, c.latitude) + 1e-12
+  );
+}
+
+function samePoint(a: Location, b: Location) {
+  return (
+    Math.abs(a.latitude - b.latitude) < 1e-9 &&
+    Math.abs(a.longitude - b.longitude) < 1e-9
+  );
+}
+
+function segmentsIntersect(a: Location, b: Location, c: Location, d: Location) {
+  if (samePoint(a, c) || samePoint(a, d) || samePoint(b, c) || samePoint(b, d)) {
+    return false;
+  }
+
+  const o1 = orientation(a, b, c);
+  const o2 = orientation(a, b, d);
+  const o3 = orientation(c, d, a);
+  const o4 = orientation(c, d, b);
+
+  if (o1 !== o2 && o3 !== o4) return true;
+  if (o1 === 0 && onSegment(a, c, b)) return true;
+  if (o2 === 0 && onSegment(a, d, b)) return true;
+  if (o3 === 0 && onSegment(c, a, d)) return true;
+  if (o4 === 0 && onSegment(c, b, d)) return true;
+  return false;
+}
+
+export function detectRouteCrossings(route: AuditableStop[]) {
+  const crossings: Array<{
+    fromSequence: number;
+    toSequence: number;
+    crossingFromSequence: number;
+    crossingToSequence: number;
+  }> = [];
+
+  for (let first = 0; first < route.length - 1; first += 1) {
+    for (let second = first + 2; second < route.length - 1; second += 1) {
+      if (second === first + 1) continue;
+
+      const a = route[first];
+      const b = route[first + 1];
+      const c = route[second];
+      const d = route[second + 1];
+
+      if (segmentsIntersect(a, b, c, d)) {
+        crossings.push({
+          fromSequence: a.sequence,
+          toSequence: b.sequence,
+          crossingFromSequence: c.sequence,
+          crossingToSequence: d.sequence,
+        });
+      }
+    }
+  }
+
+  return crossings;
 }
 
 export function auditRouteSequence(
@@ -393,6 +494,22 @@ export function auditRouteSequence(
     }
   }
 
+  for (const crossing of detectRouteCrossings(routeableStops)) {
+    issues.push({
+      type: "route_crossing",
+      severity: "medium",
+      title: "Trajeto com cruzamento",
+      message: `O trecho entre as paradas ${crossing.fromSequence + 1} e ${
+        crossing.toSequence + 1
+      } cruza o trecho entre as paradas ${crossing.crossingFromSequence + 1} e ${
+        crossing.crossingToSequence + 1
+      }. Isso indica sequencia com zigue-zague operacional.`,
+      fromSequence: crossing.fromSequence,
+      toSequence: crossing.toSequence,
+      nearestSequence: crossing.crossingFromSequence,
+    });
+  }
+
   const hasBadPreservedSequence =
     options.respectInputSequence && issues.length > 0;
   if (hasBadPreservedSequence) {
@@ -407,17 +524,19 @@ export function auditRouteSequence(
 
   const finalCriticalCount = issues.filter((issue) => issue.severity === "critical").length;
   const finalWarningCount = issues.filter((issue) => issue.severity !== "critical").length;
-  const highCount = issues.filter((issue) => issue.severity === "high").length;
-  const mediumCount = issues.filter((issue) => issue.severity === "medium").length;
-  const lowCount = issues.filter((issue) => issue.severity === "low").length;
   const score = Math.max(
     0,
-    100 - finalCriticalCount * 30 - highCount * 18 - mediumCount * 10 - lowCount * 4
+    100 -
+      issues.reduce(
+        (total, issue) => total + (ROUTE_QUALITY_PENALTIES[issue.type] ?? 10),
+        0
+      )
   );
 
   return {
     status: getReportStatus(finalCriticalCount, finalWarningCount),
     score,
+    quality: getRouteQuality(score),
     stopCount: orderedStops.length,
     issueCount: issues.length,
     criticalCount: finalCriticalCount,

@@ -250,6 +250,14 @@ function getPostOptimizationBlockingReason(audit: RouteAuditReport) {
     };
   }
 
+  const routeCrossing = audit.issues.find((issue) => issue.type === "route_crossing");
+  if (routeCrossing) {
+    return {
+      issue: routeCrossing,
+      message: `${routeCrossing.title}: ${routeCrossing.message}`,
+    };
+  }
+
   const duplicateCoordinateIssues = audit.issues.filter(
     (issue) => issue.type === "duplicate_coordinates"
   );
@@ -264,7 +272,11 @@ function getPostOptimizationBlockingReason(audit: RouteAuditReport) {
 }
 
 function isSequenceCoherenceIssue(issue: RouteAuditReport["issues"][number]) {
-  return issue.type === "nearby_stop_skipped" || issue.type === "region_revisited";
+  return (
+    issue.type === "nearby_stop_skipped" ||
+    issue.type === "region_revisited" ||
+    issue.type === "route_crossing"
+  );
 }
 
 function routeWaypointSignature(route: OptimizedRoute) {

@@ -58,6 +58,7 @@ function MapView({
   zoom,
   markers,
   routePath = [],
+  routeSegments = [],
   height = "100vh",
   className = "",
   darkMode = false,
@@ -108,7 +109,24 @@ function MapView({
           </Marker>
         ))}
 
-        {routePath.length > 1 ? (
+        {routeSegments.length ? (
+          <>
+            {routeSegments.map((segment, index) => (
+              <Polyline
+                key={`route-segment-shadow-${index}`}
+                positions={segment.positions}
+                pathOptions={{ color: segment.color, opacity: 0.18, weight: 10 }}
+              />
+            ))}
+            {routeSegments.map((segment, index) => (
+              <Polyline
+                key={`route-segment-${index}`}
+                positions={segment.positions}
+                pathOptions={{ color: segment.color, opacity: 0.92, weight: 4 }}
+              />
+            ))}
+          </>
+        ) : routePath.length > 1 ? (
           <>
             <Polyline
               positions={routePath}

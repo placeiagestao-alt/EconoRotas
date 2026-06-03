@@ -7,6 +7,10 @@ export type MapViewProps = {
   zoom?: number;
   markers?: MapMarker[];
   routePath?: LatLngTuple[];
+  routeSegments?: Array<{
+    positions: LatLngTuple[];
+    color: string;
+  }>;
   height?: string;
   className?: string;
   darkMode?: boolean;
