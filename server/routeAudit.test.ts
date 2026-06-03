@@ -153,4 +153,78 @@ describe("Route auditor", () => {
       true
     );
   });
+
+  it("flags missing and invalid coordinates explicitly", () => {
+    const report = auditRouteSequence([
+      {
+        latitude: Number.NaN,
+        longitude: -51.4,
+        address: "Rua sem latitude",
+        sequence: 0,
+      },
+      {
+        latitude: 0,
+        longitude: 0,
+        address: "Coordenada zerada",
+        sequence: 1,
+      },
+      {
+        latitude: 91,
+        longitude: -51.4,
+        address: "Coordenada fora da faixa",
+        sequence: 2,
+      },
+    ]);
+
+    expect(report.status).toBe("critical");
+    expect(report.issues.some((issue) => issue.type === "missing_coordinates")).toBe(
+      true
+    );
+    expect(report.issues.some((issue) => issue.type === "invalid_coordinates")).toBe(
+      true
+    );
+  });
+
+  it("flags empty and generic addresses", () => {
+    const report = auditRouteSequence([
+      {
+        latitude: -22.12,
+        longitude: -51.4,
+        address: "",
+        sequence: 0,
+      },
+      {
+        latitude: -22.121,
+        longitude: -51.401,
+        address: "Entrega",
+        sequence: 1,
+      },
+    ]);
+
+    expect(report.status).toBe("critical");
+    expect(report.issues.some((issue) => issue.type === "empty_address")).toBe(true);
+    expect(report.issues.some((issue) => issue.type === "generic_address")).toBe(true);
+  });
+
+  it("flags duplicated sequence numbers", () => {
+    const report = auditRouteSequence([
+      {
+        latitude: -22.12,
+        longitude: -51.4,
+        address: "A",
+        sequence: 0,
+      },
+      {
+        latitude: -22.121,
+        longitude: -51.401,
+        address: "B",
+        sequence: 0,
+      },
+    ]);
+
+    expect(report.status).toBe("attention");
+    expect(report.issues.some((issue) => issue.type === "duplicate_sequence")).toBe(
+      true
+    );
+  });
 });

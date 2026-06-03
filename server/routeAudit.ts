@@ -12,7 +12,12 @@ export type RouteAuditIssue = {
     | "high_road_detour"
     | "missing_driver_origin"
     | "bad_preserved_sequence"
-    | "osrm_fallback";
+    | "osrm_fallback"
+    | "missing_coordinates"
+    | "invalid_coordinates"
+    | "empty_address"
+    | "generic_address"
+    | "duplicate_sequence";
   severity: RouteAuditSeverity;
   title: string;
   message: string;
@@ -53,6 +58,10 @@ const FIRST_STOP_FAR_KM = 2;
 const ROAD_DETOUR_RATIO = 1.8;
 const LONG_JUMP_KM = 2.5;
 const COORDINATE_PRECISION = 5;
+const BRAZIL_LATITUDE_MIN = -34;
+const BRAZIL_LATITUDE_MAX = 6;
+const BRAZIL_LONGITUDE_MIN = -74;
+const BRAZIL_LONGITUDE_MAX = -28;
 
 function roundKm(value: number) {
   return Math.round(value * 100) / 100;
@@ -66,6 +75,34 @@ function coordinateKey(stop: AuditableStop) {
 
 function normalizeAddress(value: string | undefined) {
   return (value || "").trim().toLowerCase();
+}
+
+function hasValidCoordinateValues(stop: AuditableStop) {
+  return Number.isFinite(stop.latitude) && Number.isFinite(stop.longitude);
+}
+
+function hasMissingCoordinateValues(stop: AuditableStop) {
+  return (
+    stop.latitude == null ||
+    stop.longitude == null ||
+    (Number(stop.latitude) === 0 && Number(stop.longitude) === 0)
+  );
+}
+
+function hasSuspiciousBrazilCoordinate(stop: AuditableStop) {
+  return (
+    stop.latitude < BRAZIL_LATITUDE_MIN ||
+    stop.latitude > BRAZIL_LATITUDE_MAX ||
+    stop.longitude < BRAZIL_LONGITUDE_MIN ||
+    stop.longitude > BRAZIL_LONGITUDE_MAX
+  );
+}
+
+function isGenericAddress(address: string) {
+  const normalized = normalizeAddress(address);
+  return /^(endereco|endereço|parada|entrega|cliente|destino|sem endereco|sem endereço|n\/a|na|-)$/i.test(
+    normalized
+  );
 }
 
 function getReportStatus(criticalCount: number, warningCount: number) {
@@ -89,7 +126,68 @@ export function auditRouteSequence(
   let totalDistanceKm = 0;
   let maxLegKm = 0;
 
-  if (options.requireStartLocation && !options.startLocation && orderedStops.length > 1) {
+  const sequenceCounts = new Map<number, number>();
+  for (const stop of orderedStops) {
+    sequenceCounts.set(stop.sequence, (sequenceCounts.get(stop.sequence) || 0) + 1);
+
+    const address = stop.address?.trim() ?? "";
+    if (!address) {
+      issues.push({
+        type: "empty_address",
+        severity: "critical",
+        title: "Parada sem endereco",
+        message: `A parada ${stop.sequence + 1} esta sem endereco preenchido.`,
+        stopSequence: stop.sequence,
+      });
+    } else if (isGenericAddress(address)) {
+      issues.push({
+        type: "generic_address",
+        severity: "high",
+        title: "Endereco generico",
+        message: `A parada ${stop.sequence + 1} tem endereco generico: "${address}".`,
+        stopSequence: stop.sequence,
+      });
+    }
+
+    if (hasMissingCoordinateValues(stop)) {
+      issues.push({
+        type: "missing_coordinates",
+        severity: "critical",
+        title: "Parada sem coordenada valida",
+        message: `A parada ${stop.sequence + 1} nao tem latitude/longitude valida para roteirizacao.`,
+        stopSequence: stop.sequence,
+      });
+    } else if (!hasValidCoordinateValues(stop) || hasSuspiciousBrazilCoordinate(stop)) {
+      issues.push({
+        type: "invalid_coordinates",
+        severity: "critical",
+        title: "Coordenada invalida",
+        message: `A parada ${stop.sequence + 1} tem coordenadas invalidas ou fora da area esperada.`,
+        stopSequence: stop.sequence,
+      });
+    }
+  }
+
+  for (const [sequence, count] of Array.from(sequenceCounts.entries())) {
+    if (count > 1) {
+      issues.push({
+        type: "duplicate_sequence",
+        severity: "high",
+        title: "Sequencia duplicada",
+        message: `${count} paradas estao usando o mesmo numero de sequencia ${sequence + 1}.`,
+        stopSequence: sequence,
+      });
+    }
+  }
+
+  const routeableStops = orderedStops.filter(
+    (stop) =>
+      hasValidCoordinateValues(stop) &&
+      !hasMissingCoordinateValues(stop) &&
+      !hasSuspiciousBrazilCoordinate(stop)
+  );
+
+  if (options.requireStartLocation && !options.startLocation && routeableStops.length > 1) {
     issues.push({
       type: "missing_driver_origin",
       severity: "medium",
@@ -99,7 +197,7 @@ export function auditRouteSequence(
     });
   }
 
-  if (options.usedRoadMetrics === false && orderedStops.length > 1) {
+  if (options.usedRoadMetrics === false && routeableStops.length > 1) {
     issues.push({
       type: "osrm_fallback",
       severity: "high",
@@ -109,10 +207,10 @@ export function auditRouteSequence(
     });
   }
 
-  for (let index = 0; index < orderedStops.length; index += 1) {
-    const planned = orderedStops[index];
+  for (let index = 0; index < routeableStops.length; index += 1) {
+    const planned = routeableStops[index];
     const origin =
-      index === 0 ? options.startLocation : orderedStops[index - 1];
+      index === 0 ? options.startLocation : routeableStops[index - 1];
     if (!origin) continue;
 
     const plannedDistance = calculateDistance(origin, planned);
@@ -138,13 +236,13 @@ export function auditRouteSequence(
         severity: "medium",
         title: "Salto longo entre paradas",
         message: `Trecho de ${roundKm(plannedDistance)} km entre paradas consecutivas.`,
-        fromSequence: index === 0 ? undefined : orderedStops[index - 1].sequence,
+        fromSequence: index === 0 ? undefined : routeableStops[index - 1].sequence,
         toSequence: planned.sequence,
         distanceKm: roundKm(plannedDistance),
       });
     }
 
-    const remaining = orderedStops.slice(index + 1);
+    const remaining = routeableStops.slice(index + 1);
     let nearest: AuditableStop | null = null;
     let nearestDistance = Infinity;
 
@@ -174,7 +272,7 @@ export function auditRouteSequence(
         message: `A sequência escolheu uma parada a ${roundKm(
           plannedDistance
         )} km, mas havia outra pendente a ${roundKm(nearestDistance)} km.`,
-        fromSequence: index === 0 ? undefined : orderedStops[index - 1].sequence,
+        fromSequence: index === 0 ? undefined : routeableStops[index - 1].sequence,
         toSequence: planned.sequence,
         nearestSequence: nearest.sequence,
         distanceKm: roundKm(plannedDistance),
@@ -198,7 +296,7 @@ export function auditRouteSequence(
           )} km, mas ainda existe parada a ${roundKm(
             returnDistance
           )} km da regiao atual que ficara para depois.`,
-          fromSequence: index === 0 ? undefined : orderedStops[index - 1].sequence,
+          fromSequence: index === 0 ? undefined : routeableStops[index - 1].sequence,
           toSequence: planned.sequence,
           nearestSequence: later.sequence,
           distanceKm: roundKm(plannedDistance),
@@ -227,7 +325,7 @@ export function auditRouteSequence(
   }
 
   const coordinateGroups = new Map<string, AuditableStop[]>();
-  for (const stop of orderedStops) {
+  for (const stop of routeableStops) {
     if (!Number.isFinite(stop.latitude) || !Number.isFinite(stop.longitude)) {
       continue;
     }

@@ -453,7 +453,7 @@ const routeCreateSchema = z.object({
   endLongitude: z.number().optional(),
 });
 const stopCreateSchema = z.object({
-  address: z.string(),
+  address: z.string().min(1, "Informe o endereço da parada."),
   latitude: z.number().optional(),
   longitude: z.number().optional(),
   sequence: z.number(),
@@ -821,8 +821,14 @@ export const appRouter = router({
         const report = auditRouteSequence(
           routeStops.map((stop: any) => ({
             id: Number(stop.id),
-            latitude: parseFloat(String(stop.latitude ?? 0)),
-            longitude: parseFloat(String(stop.longitude ?? 0)),
+            latitude:
+              stop.latitude === null || stop.latitude === undefined
+                ? Number.NaN
+                : parseFloat(String(stop.latitude)),
+            longitude:
+              stop.longitude === null || stop.longitude === undefined
+                ? Number.NaN
+                : parseFloat(String(stop.longitude)),
             address: stop.address,
             notes: stop.notes ?? undefined,
             sequence: Number(stop.sequence),
