@@ -146,6 +146,24 @@ Com `OSRM_REQUIRED=true`:
 
 Runbook de infraestrutura: `ops/osrm/README.md`.
 
+## Particionamento de rotas grandes
+
+Para rotas acima de 120 paradas, o backend particiona a rota antes de pedir
+matriz ao OSRM. O fluxo passa a ser:
+
+```text
+paradas
+  -> DBSCAN por regiao
+  -> quebra de clusters grandes em blocos menores
+  -> OSRM por particao
+  -> combinacao final
+  -> fiscal
+```
+
+Isso evita uma matriz unica gigante, reduz timeout e diminui a chance de cair
+para fallback geografico. O tamanho padrao de particao e 70 paradas, com origem
+da particao anterior usada como ponto de partida da proxima.
+
 ## Consultas SQL
 
 ```sql

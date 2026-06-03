@@ -7,6 +7,7 @@ import {
   calculateTotalDistance,
   calculateTotalTime,
   clusterStops,
+  partitionStopsForOptimization,
   validateLocations,
   type Location,
 } from "./optimization";
@@ -461,6 +462,25 @@ describe("Route Optimization", () => {
 
       expect(clusters).toHaveLength(2);
       expect(clusters.map((cluster) => cluster.stops.length)).toEqual([3, 2]);
+    });
+
+    it("partitions large clustered routes into bounded regional chunks", () => {
+      const locations: Location[] = Array.from({ length: 95 }, (_, index) => ({
+        latitude: -22.12 + index * 0.00001,
+        longitude: -51.4 + index * 0.00001,
+        address: `Centro ${index + 1}`,
+      }));
+
+      const partitions = partitionStopsForOptimization(locations, {
+        localityMode: "strict",
+        maxPartitionSize: 30,
+      });
+
+      expect(partitions.length).toBeGreaterThan(1);
+      expect(partitions.every((partition) => partition.stops.length <= 30)).toBe(true);
+      expect(
+        partitions.flatMap((partition) => partition.stops.map((stop) => stop.originalIndex))
+      ).toHaveLength(locations.length);
     });
 
     it("prefers finishing a cluster before moving to another region", () => {

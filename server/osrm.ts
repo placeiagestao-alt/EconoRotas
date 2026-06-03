@@ -1,6 +1,8 @@
 import { ENV } from "./_core/env";
 import {
   clusterStops,
+  calculateDistance,
+  partitionStopsForOptimization,
   type Location,
   type OptimizedRoute,
   type RouteOptimizationOptions,
@@ -14,6 +16,9 @@ import {
 
 type MatrixValue = number[][];
 type MatrixMetric = "distance" | "duration";
+
+const ROAD_MATRIX_PARTITION_THRESHOLD = 120;
+const ROAD_MATRIX_PARTITION_SIZE = 70;
 
 type OsrmTableResponse = {
   code: string;
@@ -635,6 +640,95 @@ function calculateClusterSwitchPenalty(
   return penalty;
 }
 
+function chooseNextPartition(
+  partitions: Array<ReturnType<typeof partitionStopsForOptimization>[number]>,
+  currentLocation: Location
+) {
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+
+  partitions.forEach((partition, index) => {
+    const distance = calculateDistance(currentLocation, partition.centroid);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  });
+
+  return bestIndex;
+}
+
+async function optimizePartitionedRouteWithRoadMetrics(
+  locations: Location[],
+  mode: RouteMode,
+  options: RouteOptimizationOptions = {}
+): Promise<OptimizedRoute | null> {
+  const partitions = partitionStopsForOptimization(locations, {
+    ...options,
+    maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE,
+  });
+
+  if (partitions.length <= 1) return null;
+
+  const remaining = [...partitions];
+  const finalSequence: number[] = [];
+  const finalWaypoints: OptimizedRoute["waypoints"] = [];
+  let totalDistance = 0;
+  let totalTime = 0;
+  let currentLocation = options.startLocation ?? remaining[0].centroid;
+
+  while (remaining.length > 0) {
+    const partitionIndex = chooseNextPartition(remaining, currentLocation);
+    const [partition] = remaining.splice(partitionIndex, 1);
+    const isLastPartition = remaining.length === 0;
+    const partitionLocations = partition.stops.map((stop) => ({
+      latitude: stop.latitude,
+      longitude: stop.longitude,
+      address: stop.address,
+      notes: stop.notes,
+    }));
+
+    const optimizedPartition = await optimizeRouteWithRoadMetrics(
+      partitionLocations,
+      mode,
+      0,
+      {
+        ...options,
+        startLocation: currentLocation,
+        endLocation: isLastPartition ? options.endLocation : undefined,
+        partitionLargeRoutes: false,
+      }
+    );
+    if (!optimizedPartition) return null;
+
+    totalDistance += optimizedPartition.totalDistance;
+    totalTime += optimizedPartition.totalTime;
+
+    for (const localIndex of optimizedPartition.sequence) {
+      const originalStop = partition.stops[localIndex];
+      if (!originalStop) return null;
+      finalSequence.push(originalStop.originalIndex);
+      finalWaypoints.push({
+        latitude: originalStop.latitude,
+        longitude: originalStop.longitude,
+        address: originalStop.address,
+        notes: originalStop.notes,
+        sequence: finalWaypoints.length,
+      });
+    }
+
+    const lastWaypoint = finalWaypoints[finalWaypoints.length - 1];
+    if (lastWaypoint) currentLocation = lastWaypoint;
+  }
+
+  return {
+    sequence: finalSequence,
+    totalDistance: Math.round(totalDistance * 100) / 100,
+    totalTime: Math.round(totalTime),
+    waypoints: finalWaypoints,
+  };
+}
+
 export async function buildSequentialRouteWithRoadMetrics(
   locations: Location[],
   options: RouteOptimizationOptions = {}
@@ -660,6 +754,13 @@ export async function optimizeRouteWithRoadMetrics(
   startIndex: number = 0,
   options: RouteOptimizationOptions = {}
 ): Promise<OptimizedRoute | null> {
+  if (
+    options.partitionLargeRoutes !== false &&
+    locations.length > ROAD_MATRIX_PARTITION_THRESHOLD
+  ) {
+    return optimizePartitionedRouteWithRoadMetrics(locations, mode, options);
+  }
+
   const result = await fetchRoadMatrix(locations, options);
   if (!result) return null;
 

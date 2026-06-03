@@ -28,12 +28,18 @@ export interface RouteOptimizationOptions {
   startLocation?: Location;
   endLocation?: Location;
   localityMode?: "balanced" | "local" | "strict";
+  partitionLargeRoutes?: boolean;
+  maxPartitionSize?: number;
 }
 
 export type StopCluster = {
   clusterId: number;
   stops: Array<Location & { originalIndex: number }>;
   centroid: Location;
+};
+
+export type RoutePartition = StopCluster & {
+  sourceClusterId: number;
 };
 
 type RouteLeg = {
@@ -355,6 +361,65 @@ export function clusterStops(
         originalIndex: index,
       })),
     }));
+}
+
+function chunkStops(
+  cluster: StopCluster,
+  maxPartitionSize: number,
+  nextClusterId: () => number
+): RoutePartition[] {
+  if (cluster.stops.length <= maxPartitionSize) {
+    return [{
+      ...cluster,
+      sourceClusterId: cluster.clusterId,
+    }];
+  }
+
+  const orderedStops = [...cluster.stops].sort((a, b) => {
+    const angleA = Math.atan2(
+      a.latitude - cluster.centroid.latitude,
+      a.longitude - cluster.centroid.longitude
+    );
+    const angleB = Math.atan2(
+      b.latitude - cluster.centroid.latitude,
+      b.longitude - cluster.centroid.longitude
+    );
+    return angleA - angleB;
+  });
+  const chunks: RoutePartition[] = [];
+
+  for (let index = 0; index < orderedStops.length; index += maxPartitionSize) {
+    const stopsChunk = orderedStops.slice(index, index + maxPartitionSize);
+    chunks.push({
+      clusterId: nextClusterId(),
+      sourceClusterId: cluster.clusterId,
+      centroid: centroidForIndexes(stopsChunk, stopsChunk.map((_, chunkIndex) => chunkIndex)),
+      stops: stopsChunk,
+    });
+  }
+
+  return chunks;
+}
+
+export function partitionStopsForOptimization(
+  stops: Location[],
+  options: RouteOptimizationOptions = {}
+): RoutePartition[] {
+  if (stops.length === 0) return [];
+
+  const maxPartitionSize = Math.max(10, options.maxPartitionSize ?? 80);
+  const clusters = clusterStops(stops, options);
+  let generatedClusterId = clusters.length + 1;
+  const nextClusterId = () => generatedClusterId++;
+  const partitions = clusters.flatMap((cluster) =>
+    chunkStops(cluster, maxPartitionSize, nextClusterId)
+  );
+
+  return partitions.sort((a, b) => {
+    const minA = Math.min(...a.stops.map((stop) => stop.originalIndex));
+    const minB = Math.min(...b.stops.map((stop) => stop.originalIndex));
+    return minA - minB;
+  });
 }
 
 function buildNearestNeighborSequence(

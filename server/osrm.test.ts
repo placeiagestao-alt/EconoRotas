@@ -26,6 +26,36 @@ function mockOsrmTable(distances: number[][], durations: number[][] = distances)
   ) as any;
 }
 
+function mockDynamicOsrmTable() {
+  ENV.osrmEnabled = true;
+  const coordinateCounts: number[] = [];
+  globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const coordinatePart = url.split("/table/v1/driving/")[1]?.split("?")[0] ?? "";
+    const coordinateCount = coordinatePart ? coordinatePart.split(";").length : 0;
+    coordinateCounts.push(coordinateCount);
+    const matrix = Array.from({ length: coordinateCount }, (_, from) =>
+      Array.from({ length: coordinateCount }, (_, to) =>
+        from === to ? 0 : Math.abs(from - to) + 1
+      )
+    );
+
+    return new Response(
+      JSON.stringify({
+        code: "Ok",
+        distances: matrix.map((row) => row.map((value) => value * 1000)),
+        durations: matrix.map((row) => row.map((value) => value * 60)),
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  }) as any;
+
+  return coordinateCounts;
+}
+
 describe("OSRM route metrics", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -326,5 +356,29 @@ describe("OSRM route metrics", () => {
       "Norte 1",
       "Norte 2",
     ]);
+  });
+
+  it("partitions large routes before requesting OSRM matrices", async () => {
+    const coordinateCounts = mockDynamicOsrmTable();
+    const locations: Location[] = [
+      ...Array.from({ length: 65 }, (_, index) => ({
+        latitude: -22.12 + index * 0.00001,
+        longitude: -51.4 + index * 0.00001,
+        address: `Centro ${index + 1}`,
+      })),
+      ...Array.from({ length: 65 }, (_, index) => ({
+        latitude: -22.16 + index * 0.00001,
+        longitude: -51.45 + index * 0.00001,
+        address: `Norte ${index + 1}`,
+      })),
+    ];
+
+    const result = await optimizeRouteWithRoadMetrics(locations, "balanced", 0, {
+      localityMode: "strict",
+    });
+
+    expect(result?.sequence).toHaveLength(130);
+    expect(coordinateCounts.length).toBeGreaterThan(1);
+    expect(Math.max(...coordinateCounts)).toBeLessThan(120);
   });
 });

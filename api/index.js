@@ -3716,6 +3716,51 @@ function clusterStops(stops2, options = {}) {
     }))
   }));
 }
+function chunkStops(cluster, maxPartitionSize, nextClusterId) {
+  if (cluster.stops.length <= maxPartitionSize) {
+    return [{
+      ...cluster,
+      sourceClusterId: cluster.clusterId
+    }];
+  }
+  const orderedStops = [...cluster.stops].sort((a, b) => {
+    const angleA = Math.atan2(
+      a.latitude - cluster.centroid.latitude,
+      a.longitude - cluster.centroid.longitude
+    );
+    const angleB = Math.atan2(
+      b.latitude - cluster.centroid.latitude,
+      b.longitude - cluster.centroid.longitude
+    );
+    return angleA - angleB;
+  });
+  const chunks = [];
+  for (let index2 = 0; index2 < orderedStops.length; index2 += maxPartitionSize) {
+    const stopsChunk = orderedStops.slice(index2, index2 + maxPartitionSize);
+    chunks.push({
+      clusterId: nextClusterId(),
+      sourceClusterId: cluster.clusterId,
+      centroid: centroidForIndexes(stopsChunk, stopsChunk.map((_, chunkIndex) => chunkIndex)),
+      stops: stopsChunk
+    });
+  }
+  return chunks;
+}
+function partitionStopsForOptimization(stops2, options = {}) {
+  if (stops2.length === 0) return [];
+  const maxPartitionSize = Math.max(10, options.maxPartitionSize ?? 80);
+  const clusters = clusterStops(stops2, options);
+  let generatedClusterId = clusters.length + 1;
+  const nextClusterId = () => generatedClusterId++;
+  const partitions = clusters.flatMap(
+    (cluster) => chunkStops(cluster, maxPartitionSize, nextClusterId)
+  );
+  return partitions.sort((a, b) => {
+    const minA = Math.min(...a.stops.map((stop) => stop.originalIndex));
+    const minB = Math.min(...b.stops.map((stop) => stop.originalIndex));
+    return minA - minB;
+  });
+}
 function buildNearestNeighborSequence(locations, startIndex, objective = chooseObjective("balanced"), options = {}) {
   const n = locations.length;
   const visited = new Array(n).fill(false);
@@ -4029,6 +4074,8 @@ function validateLocations(locations) {
 
 // server/osrm.ts
 init_env();
+var ROAD_MATRIX_PARTITION_THRESHOLD = 120;
+var ROAD_MATRIX_PARTITION_SIZE = 70;
 function getLocalitySettings2(localityMode = "local") {
   if (localityMode === "strict") {
     return {
@@ -4416,6 +4463,76 @@ function calculateClusterSwitchPenalty(matrix, locations, sequence, localityMode
   }
   return penalty;
 }
+function chooseNextPartition(partitions, currentLocation) {
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+  partitions.forEach((partition, index2) => {
+    const distance = calculateDistance(currentLocation, partition.centroid);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index2;
+    }
+  });
+  return bestIndex;
+}
+async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options = {}) {
+  const partitions = partitionStopsForOptimization(locations, {
+    ...options,
+    maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE
+  });
+  if (partitions.length <= 1) return null;
+  const remaining = [...partitions];
+  const finalSequence = [];
+  const finalWaypoints = [];
+  let totalDistance = 0;
+  let totalTime = 0;
+  let currentLocation = options.startLocation ?? remaining[0].centroid;
+  while (remaining.length > 0) {
+    const partitionIndex = chooseNextPartition(remaining, currentLocation);
+    const [partition] = remaining.splice(partitionIndex, 1);
+    const isLastPartition = remaining.length === 0;
+    const partitionLocations = partition.stops.map((stop) => ({
+      latitude: stop.latitude,
+      longitude: stop.longitude,
+      address: stop.address,
+      notes: stop.notes
+    }));
+    const optimizedPartition = await optimizeRouteWithRoadMetrics(
+      partitionLocations,
+      mode,
+      0,
+      {
+        ...options,
+        startLocation: currentLocation,
+        endLocation: isLastPartition ? options.endLocation : void 0,
+        partitionLargeRoutes: false
+      }
+    );
+    if (!optimizedPartition) return null;
+    totalDistance += optimizedPartition.totalDistance;
+    totalTime += optimizedPartition.totalTime;
+    for (const localIndex of optimizedPartition.sequence) {
+      const originalStop = partition.stops[localIndex];
+      if (!originalStop) return null;
+      finalSequence.push(originalStop.originalIndex);
+      finalWaypoints.push({
+        latitude: originalStop.latitude,
+        longitude: originalStop.longitude,
+        address: originalStop.address,
+        notes: originalStop.notes,
+        sequence: finalWaypoints.length
+      });
+    }
+    const lastWaypoint = finalWaypoints[finalWaypoints.length - 1];
+    if (lastWaypoint) currentLocation = lastWaypoint;
+  }
+  return {
+    sequence: finalSequence,
+    totalDistance: Math.round(totalDistance * 100) / 100,
+    totalTime: Math.round(totalTime),
+    waypoints: finalWaypoints
+  };
+}
 async function buildSequentialRouteWithRoadMetrics(locations, options = {}) {
   const result = await fetchRoadMatrix(locations, options);
   if (!result) return null;
@@ -4428,6 +4545,9 @@ async function buildSequentialRouteWithRoadMetrics(locations, options = {}) {
   );
 }
 async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startIndex = 0, options = {}) {
+  if (options.partitionLargeRoutes !== false && locations.length > ROAD_MATRIX_PARTITION_THRESHOLD) {
+    return optimizePartitionedRouteWithRoadMetrics(locations, mode, options);
+  }
   const result = await fetchRoadMatrix(locations, options);
   if (!result) return null;
   const deliveryNodeIndexes = result.matrix.nodes.map((node, nodeIndex) => node.role === "delivery" ? nodeIndex : -1).filter((nodeIndex) => nodeIndex >= 0);
