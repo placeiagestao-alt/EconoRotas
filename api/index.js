@@ -3707,7 +3707,12 @@ function hasSuspiciousBrazilCoordinate(stop) {
 }
 function isGenericAddress(address) {
   const normalized = normalizeAddress(address);
-  return /^(endereco|endereço|parada|entrega|cliente|destino|sem endereco|sem endereço|n\/a|na|-)$/i.test(
+  if (/^(endereco|endereço|parada|entrega|cliente|destino|sem endereco|sem endereço|n\/a|na|-)$/i.test(
+    normalized
+  )) {
+    return true;
+  }
+  return /^(cliente|client|parada|entrega|destino|stop|pacote|pedido|rastreio|tracking)\s*[:#-]?\s*[\w.-]+$/i.test(
     normalized
   );
 }

@@ -127,19 +127,19 @@ describe("Route endpoints", () => {
       respectInputSequence: true,
       stops: [
         {
-          address: "Stop A",
+          address: "Rua Jose Bongiovani, 100, Presidente Prudente - SP",
           latitude: -22.1207,
           longitude: -51.3889,
           sequence: 0,
         },
         {
-          address: "Stop B",
+          address: "Rua Jose Bongiovani, 200, Presidente Prudente - SP",
           latitude: -22.1207,
           longitude: -51.2889,
           sequence: 1,
         },
         {
-          address: "Stop C",
+          address: "Rua Jose Bongiovani, 300, Presidente Prudente - SP",
           latitude: -22.1207,
           longitude: -51.3789,
           sequence: 2,
@@ -149,9 +149,9 @@ describe("Route endpoints", () => {
 
     const stops = await caller.stops.list({ routeId: result.route.id });
     expect(stops.map((stop: any) => stop.address)).toEqual([
-      "Stop A",
-      "Stop B",
-      "Stop C",
+      "Rua Jose Bongiovani, 100, Presidente Prudente - SP",
+      "Rua Jose Bongiovani, 200, Presidente Prudente - SP",
+      "Rua Jose Bongiovani, 300, Presidente Prudente - SP",
     ]);
     expect(stops.map((stop: any) => Number(stop.sequence))).toEqual([0, 1, 2]);
   });
@@ -164,19 +164,19 @@ describe("Route endpoints", () => {
       mode: "shortest_distance",
       stops: [
         {
-          address: "Stop A",
+          address: "Rua Fernando Costa, 100, Presidente Prudente - SP",
           latitude: -22.1207,
           longitude: -51.3889,
           sequence: 0,
         },
         {
-          address: "Stop B",
+          address: "Rua Fernando Costa, 900, Presidente Prudente - SP",
           latitude: -22.1307,
           longitude: -51.3989,
           sequence: 1,
         },
         {
-          address: "Stop C",
+          address: "Rua Fernando Costa, 120, Presidente Prudente - SP",
           latitude: -22.121,
           longitude: -51.3892,
           sequence: 2,
@@ -188,9 +188,9 @@ describe("Route endpoints", () => {
 
     expect(result.optimization.totalDistance).toBeLessThan(1200);
     expect(stops.map((stop: any) => stop.address)).not.toEqual([
-      "Stop A",
-      "Stop B",
-      "Stop C",
+      "Rua Fernando Costa, 100, Presidente Prudente - SP",
+      "Rua Fernando Costa, 900, Presidente Prudente - SP",
+      "Rua Fernando Costa, 120, Presidente Prudente - SP",
     ]);
   });
 
@@ -333,25 +333,25 @@ describe("Route endpoints", () => {
       mode: "shortest_distance",
       stops: [
         {
-          address: "Stop entregue",
+          address: "Rua Doutor Gurgel, 100, Presidente Prudente - SP",
           latitude: -22.1207,
           longitude: -51.3889,
           sequence: 0,
         },
         {
-          address: "Stop nao entregue",
+          address: "Rua Doutor Gurgel, 120, Presidente Prudente - SP",
           latitude: -22.121,
           longitude: -51.3892,
           sequence: 1,
         },
         {
-          address: "Stop pendente A",
+          address: "Rua Doutor Gurgel, 140, Presidente Prudente - SP",
           latitude: -22.122,
           longitude: -51.3902,
           sequence: 2,
         },
         {
-          address: "Stop pendente B",
+          address: "Rua Doutor Gurgel, 160, Presidente Prudente - SP",
           latitude: -22.123,
           longitude: -51.3912,
           sequence: 3,
@@ -360,7 +360,10 @@ describe("Route endpoints", () => {
     });
     const stopsBeforeReoptimize = await caller.stops.list({ routeId: result.route.id });
     const handledStops = stopsBeforeReoptimize.filter((stop: any) =>
-      ["Stop entregue", "Stop nao entregue"].includes(stop.address)
+      [
+        "Rua Doutor Gurgel, 100, Presidente Prudente - SP",
+        "Rua Doutor Gurgel, 120, Presidente Prudente - SP",
+      ].includes(stop.address)
     );
 
     await caller.routes.optimizeRemaining({
@@ -373,8 +376,8 @@ describe("Route endpoints", () => {
 
     expect(stopsAfterReoptimize).toHaveLength(2);
     expect(stopsAfterReoptimize.map((stop: any) => stop.address).sort()).toEqual([
-      "Stop pendente A",
-      "Stop pendente B",
+      "Rua Doutor Gurgel, 140, Presidente Prudente - SP",
+      "Rua Doutor Gurgel, 160, Presidente Prudente - SP",
     ]);
   });
 
@@ -387,13 +390,13 @@ describe("Route endpoints", () => {
       respectInputSequence: true,
       stops: [
         {
-          address: "Parada distante",
+          address: "Rua Doutor Jose Foz, 900, Presidente Prudente - SP",
           latitude: -22.14,
           longitude: -51.4,
           sequence: 0,
         },
         {
-          address: "Parada proxima",
+          address: "Rua Doutor Jose Foz, 120, Presidente Prudente - SP",
           latitude: -22.12001,
           longitude: -51.40001,
           sequence: 1,
@@ -422,13 +425,13 @@ describe("Route endpoints", () => {
       respectInputSequence: true,
       stops: [
         {
-          address: "Parada distante",
+          address: "Rua Doutor Jose Foz, 900, Presidente Prudente - SP",
           latitude: -22.14,
           longitude: -51.4,
           sequence: 0,
         },
         {
-          address: "Parada proxima",
+          address: "Rua Doutor Jose Foz, 120, Presidente Prudente - SP",
           latitude: -22.12001,
           longitude: -51.40001,
           sequence: 1,
@@ -469,13 +472,13 @@ describe("Route endpoints", () => {
       respectInputSequence: true,
       stops: [
         {
-          address: "Parada distante",
+          address: "Rua Doutor Jose Foz, 900, Presidente Prudente - SP",
           latitude: -22.14,
           longitude: -51.4,
           sequence: 0,
         },
         {
-          address: "Parada proxima",
+          address: "Rua Doutor Jose Foz, 120, Presidente Prudente - SP",
           latitude: -22.12001,
           longitude: -51.40001,
           sequence: 1,
@@ -487,7 +490,7 @@ describe("Route endpoints", () => {
       routeId: result.route.id,
       stops: [
         {
-          address: "Parada adicionada manualmente",
+      address: "Rua Doutor Jose Foz, 140, Presidente Prudente - SP",
           latitude: -22.121,
           longitude: -51.401,
           sequence: 2,

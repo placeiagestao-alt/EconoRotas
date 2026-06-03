@@ -199,11 +199,19 @@ describe("Route auditor", () => {
         address: "Entrega",
         sequence: 1,
       },
+      {
+        latitude: -22.122,
+        longitude: -51.402,
+        address: "Cliente 123",
+        sequence: 2,
+      },
     ]);
 
     expect(report.status).toBe("critical");
     expect(report.issues.some((issue) => issue.type === "empty_address")).toBe(true);
-    expect(report.issues.some((issue) => issue.type === "generic_address")).toBe(true);
+    expect(
+      report.issues.filter((issue) => issue.type === "generic_address")
+    ).toHaveLength(2);
   });
 
   it("flags duplicated sequence numbers", () => {
