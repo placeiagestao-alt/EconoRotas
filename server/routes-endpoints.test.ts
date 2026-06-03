@@ -89,6 +89,35 @@ describe("Route endpoints", () => {
     expect(stops).toHaveLength(2);
   });
 
+  it("keeps route as draft when optimization finds blocking audit issues", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8211));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Rota com parada generica",
+      mode: "balanced",
+      stops: [
+        {
+          address: "Entrega",
+          latitude: -22.12,
+          longitude: -51.4,
+          sequence: 0,
+        },
+        {
+          address: "Rua Valida, Presidente Prudente - SP",
+          latitude: -22.121,
+          longitude: -51.401,
+          sequence: 1,
+        },
+      ],
+    });
+
+    const route = await caller.routes.get({ id: result.route.id });
+
+    expect(result.optimization).toBeNull();
+    expect(result.warning).toContain("não foi possível otimizar");
+    expect(route?.status).toBe("draft");
+  });
+
   it("respects input stop order when sequential routing is requested", async () => {
     const caller = appRouter.createCaller(createAuthContext(8203));
 
@@ -136,20 +165,20 @@ describe("Route endpoints", () => {
       stops: [
         {
           address: "Stop A",
-          latitude: 1,
-          longitude: 0,
+          latitude: -22.1207,
+          longitude: -51.3889,
           sequence: 0,
         },
         {
           address: "Stop B",
-          latitude: 1,
-          longitude: 10,
+          latitude: -22.1307,
+          longitude: -51.3989,
           sequence: 1,
         },
         {
           address: "Stop C",
-          latitude: 1,
-          longitude: 1,
+          latitude: -22.121,
+          longitude: -51.3892,
           sequence: 2,
         },
       ],
@@ -305,39 +334,39 @@ describe("Route endpoints", () => {
       stops: [
         {
           address: "Stop entregue",
-          latitude: 1,
-          longitude: 0,
+          latitude: -22.1207,
+          longitude: -51.3889,
           sequence: 0,
         },
         {
           address: "Stop nao entregue",
-          latitude: 1,
-          longitude: 1,
+          latitude: -22.121,
+          longitude: -51.3892,
           sequence: 1,
         },
         {
           address: "Stop pendente A",
-          latitude: 1,
-          longitude: 2,
+          latitude: -22.122,
+          longitude: -51.3902,
           sequence: 2,
         },
         {
           address: "Stop pendente B",
-          latitude: 1,
-          longitude: 3,
+          latitude: -22.123,
+          longitude: -51.3912,
           sequence: 3,
         },
       ],
     });
     const stopsBeforeReoptimize = await caller.stops.list({ routeId: result.route.id });
+    const handledStops = stopsBeforeReoptimize.filter((stop: any) =>
+      ["Stop entregue", "Stop nao entregue"].includes(stop.address)
+    );
 
     await caller.routes.optimizeRemaining({
       id: result.route.id,
       mode: "shortest_distance",
-      excludeStopIds: [
-        stopsBeforeReoptimize[0].id,
-        stopsBeforeReoptimize[1].id,
-      ],
+      excludeStopIds: handledStops.map((stop: any) => stop.id),
     });
 
     const stopsAfterReoptimize = await caller.stops.list({ routeId: result.route.id });

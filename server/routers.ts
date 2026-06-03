@@ -44,6 +44,13 @@ import {
 } from "./integrationCredentials";
 
 const IMILE_PROVIDER = "imile_rider_delivery";
+const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
+  "missing_coordinates",
+  "invalid_coordinates",
+  "empty_address",
+  "generic_address",
+  "duplicate_sequence",
+]);
 
 const imileCredentialInput = z.object({
   label: z.string().max(255).optional(),
@@ -200,6 +207,37 @@ function routeToAuditableStops(route: OptimizedRoute): AuditableStop[] {
   }));
 }
 
+function parseAuditCoordinate(value: unknown) {
+  return value === null || value === undefined ? Number.NaN : parseFloat(String(value));
+}
+
+function routeStopsToAuditableStops(routeStops: any[]): AuditableStop[] {
+  return routeStops.map((stop: any) => ({
+    id: Number(stop.id),
+    latitude: parseAuditCoordinate(stop.latitude),
+    longitude: parseAuditCoordinate(stop.longitude),
+    address: stop.address,
+    notes: stop.notes ?? undefined,
+    sequence: Number(stop.sequence),
+  }));
+}
+
+function getBlockingAuditIssues(audit: RouteAuditReport) {
+  return audit.issues.filter((issue) => BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type));
+}
+
+function assertRouteStopsReadyForOptimization(routeStops: any[]) {
+  const audit = auditRouteSequence(routeStopsToAuditableStops(routeStops));
+  const blockingIssues = getBlockingAuditIssues(audit);
+  if (blockingIssues.length === 0) return;
+
+  const firstIssue = blockingIssues[0];
+  throw new TRPCError({
+    code: "BAD_REQUEST",
+    message: `${firstIssue.title}: ${firstIssue.message}`,
+  });
+}
+
 function auditOptimizedRoute(
   route: OptimizedRoute,
   options: {
@@ -294,6 +332,8 @@ async function optimizeUserRoute(
       message: "A rota precisa ter pelo menos 2 paradas para otimizar.",
     });
   }
+
+  assertRouteStopsReadyForOptimization(routeStops);
 
   const locations: Location[] = routeStops.map((stop: any) => ({
     latitude: parseFloat(String(stop.latitude ?? 0)),
@@ -819,20 +859,7 @@ export const appRouter = router({
         );
 
         const report = auditRouteSequence(
-          routeStops.map((stop: any) => ({
-            id: Number(stop.id),
-            latitude:
-              stop.latitude === null || stop.latitude === undefined
-                ? Number.NaN
-                : parseFloat(String(stop.latitude)),
-            longitude:
-              stop.longitude === null || stop.longitude === undefined
-                ? Number.NaN
-                : parseFloat(String(stop.longitude)),
-            address: stop.address,
-            notes: stop.notes ?? undefined,
-            sequence: Number(stop.sequence),
-          })),
+          routeStopsToAuditableStops(routeStops),
           {
             startLocation,
             requireStartLocation,

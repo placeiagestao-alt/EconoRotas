@@ -4540,6 +4540,13 @@ function decryptIntegrationSecret(value) {
 
 // server/routers.ts
 var IMILE_PROVIDER = "imile_rider_delivery";
+var BLOCKING_AUDIT_ISSUE_TYPES = /* @__PURE__ */ new Set([
+  "missing_coordinates",
+  "invalid_coordinates",
+  "empty_address",
+  "generic_address",
+  "duplicate_sequence"
+]);
 var imileCredentialInput = z2.object({
   label: z2.string().max(255).optional(),
   baseUrl: z2.string().url().optional().or(z2.literal("")),
@@ -4661,6 +4668,32 @@ function routeToAuditableStops(route) {
     sequence: waypoint.sequence
   }));
 }
+function parseAuditCoordinate(value) {
+  return value === null || value === void 0 ? Number.NaN : parseFloat(String(value));
+}
+function routeStopsToAuditableStops(routeStops) {
+  return routeStops.map((stop) => ({
+    id: Number(stop.id),
+    latitude: parseAuditCoordinate(stop.latitude),
+    longitude: parseAuditCoordinate(stop.longitude),
+    address: stop.address,
+    notes: stop.notes ?? void 0,
+    sequence: Number(stop.sequence)
+  }));
+}
+function getBlockingAuditIssues(audit) {
+  return audit.issues.filter((issue) => BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type));
+}
+function assertRouteStopsReadyForOptimization(routeStops) {
+  const audit = auditRouteSequence(routeStopsToAuditableStops(routeStops));
+  const blockingIssues = getBlockingAuditIssues(audit);
+  if (blockingIssues.length === 0) return;
+  const firstIssue = blockingIssues[0];
+  throw new TRPCError3({
+    code: "BAD_REQUEST",
+    message: `${firstIssue.title}: ${firstIssue.message}`
+  });
+}
 function auditOptimizedRoute(route, options = {}) {
   return auditRouteSequence(routeToAuditableStops(route), {
     startLocation: options.startLocation,
@@ -4717,6 +4750,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       message: "A rota precisa ter pelo menos 2 paradas para otimizar."
     });
   }
+  assertRouteStopsReadyForOptimization(routeStops);
   const locations = routeStops.map((stop) => ({
     latitude: parseFloat(String(stop.latitude ?? 0)),
     longitude: parseFloat(String(stop.longitude ?? 0)),
@@ -5169,14 +5203,7 @@ var appRouter = router({
         route.startLongitude
       );
       const report = auditRouteSequence(
-        routeStops.map((stop) => ({
-          id: Number(stop.id),
-          latitude: stop.latitude === null || stop.latitude === void 0 ? Number.NaN : parseFloat(String(stop.latitude)),
-          longitude: stop.longitude === null || stop.longitude === void 0 ? Number.NaN : parseFloat(String(stop.longitude)),
-          address: stop.address,
-          notes: stop.notes ?? void 0,
-          sequence: Number(stop.sequence)
-        })),
+        routeStopsToAuditableStops(routeStops),
         {
           startLocation,
           requireStartLocation,

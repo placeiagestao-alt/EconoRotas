@@ -88,6 +88,14 @@ const DEFAULT_DELIVERY_STATE: DeliveryState = {
   delivered: [],
   failed: [],
 };
+
+const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
+  "missing_coordinates",
+  "invalid_coordinates",
+  "empty_address",
+  "generic_address",
+  "duplicate_sequence",
+]);
 const EMPTY_ROUTE_POINT: RoutePoint = { address: "", latitude: 0, longitude: 0 };
 const FAR_FROM_STOP_ALERT_KM = 0.5;
 const SEQUENCE_INCOHERENCE_ALERT_KM = 0.45;
@@ -790,6 +798,14 @@ export default function RouteDetail() {
         return normalizeText(stop.address).includes(query);
       });
   }, [stopSearch, stops]);
+  const blockingAuditIssues = useMemo(
+    () =>
+      (auditQuery.data?.issues || []).filter((issue: any) =>
+        BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type)
+      ),
+    [auditQuery.data?.issues]
+  );
+  const hasBlockingAuditIssues = blockingAuditIssues.length > 0;
 
   const completeRoute = async () => {
     await updateRouteMutation.mutateAsync({
@@ -800,6 +816,14 @@ export default function RouteDetail() {
   };
 
   const handleStartRoute = async () => {
+    if (hasBlockingAuditIssues) {
+      const firstIssue = blockingAuditIssues[0];
+      toast.error(
+        `${firstIssue.title}: corrija as paradas com problema antes de iniciar a rota.`
+      );
+      return;
+    }
+
     const firstPendingIndex = stops.findIndex(
       (_, index) => !deliveredSet.has(index) && !failedSet.has(index)
     );
@@ -1401,7 +1425,13 @@ export default function RouteDetail() {
             <Button
               type="button"
               onClick={handleStartRoute}
-              disabled={stops.length === 0 || isComplete || isLocatingForReoptimization}
+              disabled={
+                stops.length === 0 ||
+                isComplete ||
+                isLocatingForReoptimization ||
+                auditQuery.isLoading ||
+                hasBlockingAuditIssues
+              }
             >
               <Play className="mr-2 h-4 w-4" />
               Iniciar rota
@@ -1439,6 +1469,11 @@ export default function RouteDetail() {
                     maior salto {auditQuery.data.maxLegKm.toFixed(2)} km
                   </Badge>
                 </div>
+                {hasBlockingAuditIssues ? (
+                  <p className="text-sm font-semibold">
+                    Corrija os problemas de parada antes de otimizar ou iniciar a rota.
+                  </p>
+                ) : null}
                 {auditQuery.data.issues.length ? (
                   <div className="max-h-56 space-y-2 overflow-y-auto pr-1 text-sm">
                     {auditQuery.data.issues.map((issue: any, index: number) => (
