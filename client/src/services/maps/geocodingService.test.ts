@@ -96,4 +96,53 @@ describe("geocodingService", () => {
     expect(searchedQueries[0]).toMatch(/ap\s*12/i);
     expect(searchedQueries.slice(1).some((q) => !/ap\s*12/i.test(q))).toBe(true);
   });
+
+  it("prioritizes exact house-number matches over street-only approximations", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify([
+            {
+              place_id: 20,
+              lat: "-22.11",
+              lon: "-51.41",
+              display_name: "Rua Teste, Centro, Presidente Prudente, Sao Paulo",
+              importance: 0.8,
+              type: "tertiary",
+              address: {
+                road: "Rua Teste",
+                suburb: "Centro",
+                city: "Presidente Prudente",
+                state: "Sao Paulo",
+              },
+            },
+            {
+              place_id: 21,
+              lat: "-22.12",
+              lon: "-51.42",
+              display_name: "Rua Teste, 123, Centro, Presidente Prudente, Sao Paulo",
+              importance: 0.2,
+              type: "house",
+              address: {
+                road: "Rua Teste",
+                house_number: "123",
+                suburb: "Centro",
+                city: "Presidente Prudente",
+                state: "Sao Paulo",
+              },
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      )
+    );
+
+    const results = await searchAddress("Rua Teste, 123, Presidente Prudente, SP");
+
+    expect(results[0]?.id).toBe("21");
+    expect(results[0]?.accuracy).toBe("exact");
+    expect(results[1]?.accuracy).toBe("approximate");
+    expect(results[1]?.shortLabel).toContain("Aproximado pela rua");
+  });
 });

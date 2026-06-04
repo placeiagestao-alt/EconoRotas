@@ -15,6 +15,8 @@ export type AddressSuggestion = Coordinate & {
   shortLabel: string;
   type?: string;
   importance?: number;
+  accuracy?: "saved" | "exact" | "approximate";
+  score?: number;
 };
 
 type RememberedAddress = Coordinate & {
@@ -143,6 +145,8 @@ function getRememberedAddressSuggestion(query: string): AddressSuggestion | unde
     longitude: remembered.longitude,
     type: "saved",
     importance: 1,
+    accuracy: "saved",
+    score: 1_000,
   };
 }
 
@@ -177,6 +181,51 @@ function hasHouseNumber(label: string, houseNumber: string) {
   return new RegExp(
     `(^|\\D)${houseNumber.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\D|$)`
   ).test(label);
+}
+
+function resultHasHouseNumber(result: NominatimResult, queryHouseNumber?: string) {
+  if (!queryHouseNumber) return true;
+  if (result.type === "user_confirmed") return true;
+  if (result.address?.house_number && result.address.house_number === queryHouseNumber) {
+    return true;
+  }
+  return hasHouseNumber(result.display_name || "", queryHouseNumber);
+}
+
+function getResultAccuracy(result: NominatimResult, queryHouseNumber?: string) {
+  if (result.type === "user_confirmed") return "saved" as const;
+  if (resultHasHouseNumber(result, queryHouseNumber)) return "exact" as const;
+  return "approximate" as const;
+}
+
+function scoreAddressResult(
+  result: NominatimResult,
+  queryHouseNumber?: string,
+  query?: string
+) {
+  const accuracy = getResultAccuracy(result, queryHouseNumber);
+  const address = result.address;
+  const normalizedQuery = normalizeAddressKey(query || "");
+  let score = Number(result.importance || 0) * 100;
+
+  if (accuracy === "saved") score += 1_000;
+  if (accuracy === "exact") score += 350;
+  if (accuracy === "approximate") score -= queryHouseNumber ? 120 : 20;
+  if (address?.road) score += 50;
+  if (address?.city || address?.town || address?.village || address?.municipality) {
+    score += 40;
+  }
+  if (address?.state && /sao paulo|sp/.test(normalizeAddressKey(address.state))) {
+    score += 30;
+  }
+  if (normalizedQuery.includes("presidente prudente")) {
+    const city = normalizeAddressKey(
+      address?.city || address?.town || address?.village || address?.municipality || ""
+    );
+    if (city.includes("presidente prudente")) score += 60;
+  }
+
+  return score;
 }
 
 function formatAddressLabel(result: NominatimResult, queryHouseNumber?: string) {
@@ -386,17 +435,29 @@ async function fetchAddressQuery(
   const results = (await response.json()) as NominatimResult[];
 
   return results
-    .map((result) => ({
-      id: String(result.place_id),
-      label: formatAddressLabel(result, queryHouseNumber),
-      shortLabel: result.display_name,
-      latitude: Number(result.lat),
-      longitude: Number(result.lon),
-      type: result.type,
-      importance: result.importance,
-    }))
+    .map((result) => {
+      const accuracy = getResultAccuracy(result, queryHouseNumber);
+      const score = scoreAddressResult(result, queryHouseNumber, normalizedQuery);
+      const shortLabel =
+        accuracy === "approximate" && queryHouseNumber
+          ? `Aproximado pela rua. Confirme o ponto antes de iniciar. ${result.display_name}`
+          : result.display_name;
+
+      return {
+        id: String(result.place_id),
+        label: formatAddressLabel(result, queryHouseNumber),
+        shortLabel,
+        latitude: Number(result.lat),
+        longitude: Number(result.lon),
+        type: result.type,
+        importance: result.importance,
+        accuracy,
+        score,
+      };
+    })
     .filter(
       (suggestion) =>
         Number.isFinite(suggestion.latitude) && Number.isFinite(suggestion.longitude)
-    );
+    )
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
 }
