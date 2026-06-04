@@ -94,6 +94,41 @@ describe("Route endpoints", () => {
     expect(metrics.osrmFallbackCount + metrics.osrmUsedCount).toBe(
       metrics.routeMetricCount
     );
+    expect(metrics.geocodingConfidence.averageScore).toBeGreaterThanOrEqual(0);
+    expect(metrics.geocodingConfidence.suspiciousStopRate).toBeGreaterThanOrEqual(0);
+  });
+
+  it("blocks optimization when a stop has low geocoding confidence", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8261));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Rota com baixa confianca",
+      mode: "balanced",
+      stops: [
+        {
+          address: "Rua Confianca Baixa A, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+          geocodingConfidenceScore: 45,
+          geocodingMethod: "street_match",
+          geocodingSuspect: true,
+        },
+        {
+          address: "Rua Confianca Baixa B, Presidente Prudente - SP",
+          latitude: -22.1217,
+          longitude: -51.3899,
+          sequence: 1,
+          geocodingConfidenceScore: 95,
+          geocodingMethod: "exact_address",
+          geocodingSuspect: false,
+        },
+      ],
+    });
+
+    expect(result.route.status).toBe("draft");
+    expect(result.optimization).toBeNull();
+    expect(result.warning).toContain("Coordenada com baixa confianca");
   });
 
   it("blocks route optimization when OSRM is required and road metrics are unavailable", async () => {

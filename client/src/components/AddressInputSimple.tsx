@@ -10,6 +10,7 @@ import {
   type AddressSuggestion,
   searchAddress,
 } from "@/services/maps/geocodingService";
+import type { GeocodingMethod } from "@shared/geocodingConfidence";
 
 interface AddressInputSimpleProps {
   id: string;
@@ -20,6 +21,11 @@ interface AddressInputSimpleProps {
   longitude: number;
   onAddressChange: (address: string) => void;
   onCoordinatesChange: (lat: number, lng: number) => void;
+  onGeocodingConfidenceChange?: (
+    score: number,
+    method: GeocodingMethod,
+    suspect: boolean
+  ) => void;
 }
 
 const MIN_QUERY_LENGTH = 6;
@@ -33,6 +39,7 @@ export default function AddressInputSimple({
   longitude,
   onAddressChange,
   onCoordinatesChange,
+  onGeocodingConfidenceChange,
 }: AddressInputSimpleProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -124,7 +131,21 @@ export default function AddressInputSimple({
   const handleSelectSuggestion = (suggestion: AddressSuggestion) => {
     onAddressChange(suggestion.label);
     onCoordinatesChange(suggestion.latitude, suggestion.longitude);
-    rememberAddressCoordinates(suggestion.label, suggestion.latitude, suggestion.longitude);
+    onGeocodingConfidenceChange?.(
+      suggestion.geocodingConfidenceScore ?? 0,
+      suggestion.geocodingMethod ?? "city_match",
+      Boolean(suggestion.geocodingSuspect)
+    );
+    rememberAddressCoordinates(
+      suggestion.label,
+      suggestion.latitude,
+      suggestion.longitude,
+      {
+        geocodingConfidenceScore: suggestion.geocodingConfidenceScore,
+        geocodingMethod: suggestion.geocodingMethod,
+        geocodingSuspect: suggestion.geocodingSuspect,
+      }
+    );
     setSuggestions([]);
     setError(null);
     setHasSearched(true);
@@ -151,7 +172,12 @@ export default function AddressInputSimple({
     }
 
     onCoordinatesChange(lat, lng);
-    rememberAddressCoordinates(value, lat, lng);
+    onGeocodingConfidenceChange?.(100, "manual_coordinate", false);
+    rememberAddressCoordinates(value, lat, lng, {
+      geocodingConfidenceScore: 100,
+      geocodingMethod: "manual_coordinate",
+      geocodingSuspect: false,
+    });
     setError(null);
     setShowManual(false);
     setSuggestions([]);

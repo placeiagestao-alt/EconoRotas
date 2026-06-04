@@ -52,6 +52,41 @@ describe("geocodingService", () => {
     });
   });
 
+  it("returns remembered coordinates for equivalent address variations", async () => {
+    rememberAddressCoordinates(
+      "Rua Teste, 123, Centro, Presidente Prudente, SP, ap 12",
+      -22.12,
+      -51.4,
+      {
+        geocodingConfidenceScore: 95,
+        geocodingMethod: "exact_address",
+        geocodingSuspect: false,
+      }
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      )
+    );
+
+    const results = await searchAddress(
+      "R. Teste, 123, Centro, Presidente Prudente, SP"
+    );
+
+    expect(results[0]).toMatchObject({
+      latitude: -22.12,
+      longitude: -51.4,
+      type: "saved",
+      geocodingConfidenceScore: 95,
+      geocodingMethod: "exact_address",
+    });
+  });
+
   it("tries cleaned fallback queries when the first query has no result", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       const requestUrl = new URL(String(url), "https://econo-rotas.test");

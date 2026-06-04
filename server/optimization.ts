@@ -15,6 +15,9 @@ export interface Location {
   longitude: number;
   address?: string;
   notes?: string;
+  geocodingConfidenceScore?: number;
+  geocodingMethod?: string;
+  geocodingSuspect?: boolean;
 }
 
 export interface OptimizedRoute {

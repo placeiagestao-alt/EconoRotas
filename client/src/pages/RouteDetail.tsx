@@ -42,6 +42,7 @@ import {
   rememberAddressCoordinates,
   searchAddress,
 } from "@/services/maps/geocodingService";
+import type { GeocodingMethod } from "@shared/geocodingConfidence";
 import {
   calculateDistanceKm,
   getCurrentPosition,
@@ -1332,6 +1333,9 @@ export default function RouteDetail() {
         location: address,
         latitude: point.latitude,
         longitude: point.longitude,
+        geocodingConfidenceScore: 100,
+        geocodingMethod: "manual_coordinate" as GeocodingMethod,
+        geocodingSuspect: false,
       };
     }
 
@@ -1341,12 +1345,19 @@ export default function RouteDetail() {
       throw new Error(`Confira o endereço e as coordenadas de ${label}.`);
     }
 
-    rememberAddressCoordinates(address, suggestion.latitude, suggestion.longitude);
+    rememberAddressCoordinates(address, suggestion.latitude, suggestion.longitude, {
+      geocodingConfidenceScore: suggestion.geocodingConfidenceScore,
+      geocodingMethod: suggestion.geocodingMethod,
+      geocodingSuspect: suggestion.geocodingSuspect,
+    });
 
     return {
       location: address,
       latitude: suggestion.latitude,
       longitude: suggestion.longitude,
+      geocodingConfidenceScore: suggestion.geocodingConfidenceScore,
+      geocodingMethod: suggestion.geocodingMethod,
+      geocodingSuspect: suggestion.geocodingSuspect,
     };
   };
 
@@ -1373,6 +1384,9 @@ export default function RouteDetail() {
         longitude: resolved.longitude,
         sequence: stop.sequence,
         notes: buildStopNotes(stopDraft.packageNumber, stopDraft.notes),
+        geocodingConfidenceScore: resolved.geocodingConfidenceScore,
+        geocodingMethod: resolved.geocodingMethod,
+        geocodingSuspect: resolved.geocodingSuspect,
       });
 
       handleCancelEditStop();

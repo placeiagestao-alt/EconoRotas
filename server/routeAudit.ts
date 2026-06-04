@@ -1,4 +1,5 @@
 import { calculateDistance, clusterStops, type Location } from "./optimization";
+import { GEOCODING_CONFIDENCE_SUSPECT_THRESHOLD } from "../shared/geocodingConfidence";
 
 export type RouteAuditSeverity = "low" | "medium" | "high" | "critical";
 
@@ -20,6 +21,7 @@ export type RouteAuditIssue = {
     | "invalid_coordinates"
     | "empty_address"
     | "generic_address"
+    | "low_geocoding_confidence"
     | "duplicate_sequence";
   severity: RouteAuditSeverity;
   title: string;
@@ -89,6 +91,7 @@ const ROUTE_QUALITY_PENALTIES: Partial<Record<RouteAuditIssue["type"], number>> 
   high_road_detour: 10,
   duplicate_coordinates: 30,
   generic_address: 5,
+  low_geocoding_confidence: 15,
   missing_coordinates: 30,
   invalid_coordinates: 30,
   empty_address: 30,
@@ -421,6 +424,21 @@ export function auditRouteSequence(
         message: `A parada ${stop.sequence + 1} tem coordenadas invalidas ou fora da area esperada.`,
         stopSequence: stop.sequence,
       });
+    } else {
+      const confidenceScore = Number(stop.geocodingConfidenceScore);
+      if (
+        Number.isFinite(confidenceScore) &&
+        confidenceScore > 0 &&
+        confidenceScore < GEOCODING_CONFIDENCE_SUSPECT_THRESHOLD
+      ) {
+        issues.push({
+          type: "low_geocoding_confidence",
+          severity: "high",
+          title: "Coordenada com baixa confianca",
+          message: `A parada ${stop.sequence + 1} tem confianca ${confidenceScore}/100. Confirme a sugestao ou digite coordenadas manualmente antes de otimizar.`,
+          stopSequence: stop.sequence,
+        });
+      }
     }
   }
 

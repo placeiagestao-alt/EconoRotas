@@ -65,6 +65,16 @@ var init_schema = __esm({
       address: varchar("address", { length: 500 }).notNull(),
       latitude: decimal("latitude", { precision: 10, scale: 8 }),
       longitude: decimal("longitude", { precision: 11, scale: 8 }),
+      geocodingConfidenceScore: int("geocodingConfidenceScore").default(0).notNull(),
+      geocodingMethod: mysqlEnum("geocodingMethod", [
+        "exact_address",
+        "street_match",
+        "neighborhood_match",
+        "city_match",
+        "approximate_route_cluster",
+        "manual_coordinate"
+      ]).default("city_match").notNull(),
+      geocodingSuspect: boolean("geocodingSuspect").default(true).notNull(),
       sequence: int("sequence").notNull(),
       // order in the optimized route
       notes: text("notes"),
@@ -187,6 +197,9 @@ var init_schema = __esm({
       prematureRegionExitCount: int("prematureRegionExitCount").default(0).notNull(),
       nearbyStopSkippedCount: int("nearbyStopSkippedCount").default(0).notNull(),
       routeCrossingCount: int("routeCrossingCount").default(0).notNull(),
+      averageGeocodingConfidence: int("averageGeocodingConfidence").default(0).notNull(),
+      minGeocodingConfidence: int("minGeocodingConfidence").default(0).notNull(),
+      suspiciousGeocodingCount: int("suspiciousGeocodingCount").default(0).notNull(),
       issuesDetectedCount: int("issuesDetectedCount").default(0).notNull(),
       issuesCorrectedCount: int("issuesCorrectedCount").default(0).notNull(),
       issuesBlockedCount: int("issuesBlockedCount").default(0).notNull(),
@@ -342,6 +355,93 @@ var init_env = __esm({
       osrmRequired: process.env.OSRM_REQUIRED === "true",
       integrationCredentialsSecret: process.env.INTEGRATION_CREDENTIALS_SECRET ?? process.env.JWT_SECRET ?? ""
     };
+  }
+});
+
+// shared/geocodingConfidence.ts
+function clampScore(score) {
+  if (!Number.isFinite(score)) return 0;
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+function normalizeGeocodingMethod(method) {
+  return GEOCODING_METHODS.includes(method) ? method : "city_match";
+}
+function defaultConfidenceForMethod(method) {
+  switch (normalizeGeocodingMethod(method)) {
+    case "manual_coordinate":
+      return 100;
+    case "exact_address":
+      return 95;
+    case "street_match":
+      return 72;
+    case "neighborhood_match":
+      return 55;
+    case "city_match":
+      return 35;
+    case "approximate_route_cluster":
+      return 25;
+    default:
+      return 0;
+  }
+}
+function calculateGeocodingConfidence(input) {
+  if (input.score != null && Number.isFinite(Number(input.score))) {
+    const score2 = clampScore(Number(input.score));
+    const method2 = normalizeGeocodingMethod(input.method);
+    return {
+      score: score2,
+      method: method2,
+      suspect: score2 < GEOCODING_CONFIDENCE_SUSPECT_THRESHOLD
+    };
+  }
+  let method = normalizeGeocodingMethod(input.method);
+  if (input.isManual) method = "manual_coordinate";
+  else if (input.isSaved || input.hasHouseNumber) method = "exact_address";
+  else if (input.hasRoad) method = "street_match";
+  else if (input.hasDistrict) method = "neighborhood_match";
+  else if (input.hasCity) method = "city_match";
+  else if (input.isApproximate) method = "approximate_route_cluster";
+  const score = defaultConfidenceForMethod(method);
+  return {
+    score,
+    method,
+    suspect: score < GEOCODING_CONFIDENCE_SUSPECT_THRESHOLD
+  };
+}
+function summarizeGeocodingConfidence(stops2) {
+  const scores = stops2.map((stop) => Number(stop.geocodingConfidenceScore)).filter((score) => Number.isFinite(score));
+  const methodCounts = stops2.reduce((acc, stop) => {
+    const method = normalizeGeocodingMethod(stop.geocodingMethod);
+    acc[method] = (acc[method] || 0) + 1;
+    return acc;
+  }, {});
+  const suspectCount = stops2.filter((stop) => {
+    const score = Number(stop.geocodingConfidenceScore);
+    if (Number.isFinite(score)) {
+      return score < GEOCODING_CONFIDENCE_SUSPECT_THRESHOLD;
+    }
+    return Boolean(stop.geocodingSuspect);
+  }).length;
+  return {
+    averageScore: scores.length ? Math.round(scores.reduce((total, score) => total + score, 0) / scores.length) : 0,
+    minScore: scores.length ? Math.min(...scores) : 0,
+    suspectCount,
+    methodCounts
+  };
+}
+var GEOCODING_CONFIDENCE_SUSPECT_THRESHOLD, GEOCODING_METHODS;
+var init_geocodingConfidence = __esm({
+  "shared/geocodingConfidence.ts"() {
+    "use strict";
+    GEOCODING_CONFIDENCE_SUSPECT_THRESHOLD = 60;
+    GEOCODING_METHODS = [
+      "exact_address",
+      "street_match",
+      "neighborhood_match",
+      "city_match",
+      "approximate_route_cluster",
+      "manual_coordinate"
+    ];
   }
 });
 
@@ -1204,30 +1304,50 @@ async function createStops(routeId, stopsData) {
   if (!db) {
     if (await shouldUseMemoryDb()) {
       const now = /* @__PURE__ */ new Date();
-      const createdStops = stopsData.map((stop) => ({
-        id: memory.ids.stops++,
-        routeId,
-        address: stop.address,
-        latitude: stop.latitude !== void 0 ? String(stop.latitude) : null,
-        longitude: stop.longitude !== void 0 ? String(stop.longitude) : null,
-        sequence: stop.sequence,
-        notes: stop.notes ?? null,
-        createdAt: now
-      }));
+      const createdStops = stopsData.map((stop) => {
+        const confidence = calculateGeocodingConfidence({
+          score: stop.geocodingConfidenceScore,
+          method: stop.geocodingMethod,
+          isManual: stop.geocodingConfidenceScore == null && Number.isFinite(Number(stop.latitude)) && Number.isFinite(Number(stop.longitude)) && !(Number(stop.latitude) === 0 && Number(stop.longitude) === 0)
+        });
+        return {
+          id: memory.ids.stops++,
+          routeId,
+          address: stop.address,
+          latitude: stop.latitude !== void 0 ? String(stop.latitude) : null,
+          longitude: stop.longitude !== void 0 ? String(stop.longitude) : null,
+          geocodingConfidenceScore: confidence.score,
+          geocodingMethod: confidence.method,
+          geocodingSuspect: stop.geocodingSuspect ?? confidence.suspect,
+          sequence: stop.sequence,
+          notes: stop.notes ?? null,
+          createdAt: now
+        };
+      });
       memory.stops.push(...createdStops);
       await persistFallbackDb();
       return getRouteStops(routeId);
     }
     requireConfiguredDatabase();
   }
-  const values = stopsData.map((s) => ({
-    routeId,
-    address: s.address,
-    latitude: s.latitude !== void 0 ? String(s.latitude) : null,
-    longitude: s.longitude !== void 0 ? String(s.longitude) : null,
-    sequence: s.sequence,
-    notes: s.notes
-  }));
+  const values = stopsData.map((s) => {
+    const confidence = calculateGeocodingConfidence({
+      score: s.geocodingConfidenceScore,
+      method: s.geocodingMethod,
+      isManual: s.geocodingConfidenceScore == null && Number.isFinite(Number(s.latitude)) && Number.isFinite(Number(s.longitude)) && !(Number(s.latitude) === 0 && Number(s.longitude) === 0)
+    });
+    return {
+      routeId,
+      address: s.address,
+      latitude: s.latitude !== void 0 ? String(s.latitude) : null,
+      longitude: s.longitude !== void 0 ? String(s.longitude) : null,
+      geocodingConfidenceScore: confidence.score,
+      geocodingMethod: confidence.method,
+      geocodingSuspect: s.geocodingSuspect ?? confidence.suspect,
+      sequence: s.sequence,
+      notes: s.notes
+    };
+  });
   await db.insert(stops).values(values);
   return getRouteStops(routeId);
 }
@@ -1654,7 +1774,8 @@ async function getLatestRouteOptimizationEvent(routeId, userId) {
   return result[0] ?? null;
 }
 function normalizeMetricNumber(value, fallback = 0) {
-  return Number.isFinite(value) ? value : fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 function metricAverage(values) {
   return values.length ? values.reduce((total, value) => total + value, 0) / values.length : 0;
@@ -1729,6 +1850,15 @@ async function createRouteMetric(data) {
     routeCrossingCount: Math.round(
       normalizeMetricNumber(data.routeCrossingCount)
     ),
+    averageGeocodingConfidence: Math.round(
+      normalizeMetricNumber(data.averageGeocodingConfidence)
+    ),
+    minGeocodingConfidence: Math.round(
+      normalizeMetricNumber(data.minGeocodingConfidence)
+    ),
+    suspiciousGeocodingCount: Math.round(
+      normalizeMetricNumber(data.suspiciousGeocodingCount)
+    ),
     issuesDetectedCount: Math.round(
       normalizeMetricNumber(data.issuesDetectedCount)
     ),
@@ -1800,6 +1930,21 @@ function buildRouteMetricsSummary(metrics, days) {
     (totalCount, metric) => totalCount + Number(metric.routeCrossingCount || 0),
     0
   );
+  const suspiciousGeocoding = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.suspiciousGeocodingCount || 0),
+    0
+  );
+  const geocodingAverageScores = metrics.map((metric) => Number(metric.averageGeocodingConfidence || 0)).filter((score) => Number.isFinite(score) && score > 0);
+  const geocodingMinScores = metrics.map((metric) => Number(metric.minGeocodingConfidence || 0)).filter((score) => Number.isFinite(score) && score > 0);
+  const geocodingScoreDistribution = {
+    excellent: geocodingAverageScores.filter((score) => score >= 90).length,
+    good: geocodingAverageScores.filter((score) => score >= 75 && score < 90).length,
+    attention: geocodingAverageScores.filter(
+      (score) => score >= 60 && score < 75
+    ).length,
+    suspicious: geocodingAverageScores.filter((score) => score < 60).length,
+    notClassified: Math.max(0, total - geocodingAverageScores.length)
+  };
   const detectedIssues = metrics.reduce(
     (totalCount, metric) => totalCount + Number(metric.issuesDetectedCount || 0),
     0
@@ -1858,7 +2003,14 @@ function buildRouteMetricsSummary(metrics, days) {
         metricAverage(modeMetrics.map((metric) => Number(metric.totalTimeMinutes || 0)))
       ),
       auditorCorrectionRate: roundMetric(metricPercent(modeCorrected, modeTotal)),
-      osrmFallbackRate: roundMetric(metricPercent(modeFallback, modeTotal))
+      osrmFallbackRate: roundMetric(metricPercent(modeFallback, modeTotal)),
+      averageGeocodingConfidence: roundMetric(
+        metricAverage(
+          modeMetrics.map(
+            (metric) => Number(metric.averageGeocodingConfidence || 0)
+          )
+        )
+      )
     };
   });
   return {
@@ -1881,6 +2033,23 @@ function buildRouteMetricsSummary(metrics, days) {
     osrmUsedCount: metrics.filter((metric) => Boolean(metric.osrmUsed)).length,
     osrmFallbackCount: osrmFallback,
     osrmFallbackRate: roundMetric(metricPercent(osrmFallback, total)),
+    geocodingConfidence: {
+      averageScore: roundMetric(
+        metricAverage(geocodingAverageScores)
+      ),
+      minScore: geocodingMinScores.length ? Math.min(...geocodingMinScores) : 0,
+      suspiciousStopCount: suspiciousGeocoding,
+      suspiciousStopRate: roundMetric(
+        metricPercent(
+          suspiciousGeocoding,
+          metrics.reduce(
+            (totalStops, metric) => totalStops + Number(metric.stopCount || 0),
+            0
+          )
+        )
+      ),
+      scoreDistribution: geocodingScoreDistribution
+    },
     auditorCorrectionRate: roundMetric(metricPercent(corrected, total)),
     regionalReworkIndex: roundMetric(
       metricPercent(revisits + prematureExits, total)
@@ -2243,6 +2412,7 @@ var init_db = __esm({
     "use strict";
     init_schema();
     init_env();
+    init_geocodingConfidence();
     _db = null;
     _pool = null;
     _lastDbConnectAttempt = 0;
@@ -2290,6 +2460,9 @@ var init_db = __esm({
       ["routes", "userId"],
       ["stops", "routeId"],
       ["stops", "sequence"],
+      ["stops", "geocodingConfidenceScore"],
+      ["stops", "geocodingMethod"],
+      ["stops", "geocodingSuspect"],
       ["userIntegrations", "authTokenEncrypted"],
       ["operationalEvents", "type"],
       ["operationalEvents", "severity"],
@@ -2297,6 +2470,9 @@ var init_db = __esm({
       ["route_metrics", "optimizationRuntimeMs"],
       ["route_metrics", "osrmUsed"],
       ["route_metrics", "issuesCorrectedCount"],
+      ["route_metrics", "averageGeocodingConfidence"],
+      ["route_metrics", "minGeocodingConfidence"],
+      ["route_metrics", "suspiciousGeocodingCount"],
       ["geocode_cache", "cacheKey"],
       ["geocode_cache", "results"],
       ["geocode_cache", "expiresAt"]
@@ -4876,6 +5052,7 @@ async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startI
 }
 
 // server/routeAudit.ts
+init_geocodingConfidence();
 var IMMEDIATE_NEARBY_KM = 0.12;
 var IMMEDIATE_GAP_KM = 0.05;
 var LOCAL_NEARBY_KM = 1.5;
@@ -4901,6 +5078,7 @@ var ROUTE_QUALITY_PENALTIES = {
   high_road_detour: 10,
   duplicate_coordinates: 30,
   generic_address: 5,
+  low_geocoding_confidence: 15,
   missing_coordinates: 30,
   invalid_coordinates: 30,
   empty_address: 30,
@@ -5135,6 +5313,17 @@ function auditRouteSequence(stops2, options = {}) {
         message: `A parada ${stop.sequence + 1} tem coordenadas invalidas ou fora da area esperada.`,
         stopSequence: stop.sequence
       });
+    } else {
+      const confidenceScore = Number(stop.geocodingConfidenceScore);
+      if (Number.isFinite(confidenceScore) && confidenceScore > 0 && confidenceScore < GEOCODING_CONFIDENCE_SUSPECT_THRESHOLD) {
+        issues.push({
+          type: "low_geocoding_confidence",
+          severity: "high",
+          title: "Coordenada com baixa confianca",
+          message: `A parada ${stop.sequence + 1} tem confianca ${confidenceScore}/100. Confirme a sugestao ou digite coordenadas manualmente antes de otimizar.`,
+          stopSequence: stop.sequence
+        });
+      }
     }
   }
   for (const [sequence, count] of Array.from(sequenceCounts.entries())) {
@@ -5960,12 +6149,14 @@ function decryptIntegrationSecret(value) {
 }
 
 // server/routers.ts
+init_geocodingConfidence();
 var IMILE_PROVIDER = "imile_rider_delivery";
 var BLOCKING_AUDIT_ISSUE_TYPES = /* @__PURE__ */ new Set([
   "missing_coordinates",
   "invalid_coordinates",
   "empty_address",
-  "generic_address"
+  "generic_address",
+  "low_geocoding_confidence"
 ]);
 var DUPLICATE_COORDINATE_BLOCKING_GROUPS = 3;
 var MAX_AUDIT_CORRECTION_ATTEMPTS = 20;
@@ -6100,7 +6291,10 @@ function routeStopsToAuditableStops(routeStops) {
     longitude: parseAuditCoordinate(stop.longitude),
     address: stop.address,
     notes: stop.notes ?? void 0,
-    sequence: Number(stop.sequence)
+    sequence: Number(stop.sequence),
+    geocodingConfidenceScore: Number(stop.geocodingConfidenceScore ?? 0),
+    geocodingMethod: stop.geocodingMethod ?? void 0,
+    geocodingSuspect: Boolean(stop.geocodingSuspect)
   }));
 }
 function getBlockingAuditIssues(audit) {
@@ -6290,7 +6484,10 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     latitude: parseFloat(String(stop.latitude ?? 0)),
     longitude: parseFloat(String(stop.longitude ?? 0)),
     address: stop.address,
-    notes: stop.notes ?? void 0
+    notes: stop.notes ?? void 0,
+    geocodingConfidenceScore: Number(stop.geocodingConfidenceScore ?? 0),
+    geocodingMethod: stop.geocodingMethod ?? void 0,
+    geocodingSuspect: Boolean(stop.geocodingSuspect)
   }));
   const validation = validateLocations(locations);
   if (!validation.valid) {
@@ -6466,6 +6663,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
   }
   async function recordRouteMetricForAttempt(blockedReason) {
     const attemptAudit = optimizationAttempt.audit;
+    const geocodingConfidence = summarizeGeocodingConfidence(routeStops);
     await createRouteMetric({
       userId,
       routeId,
@@ -6486,6 +6684,9 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         "nearby_stop_skipped"
       ),
       routeCrossingCount: countAuditIssues(attemptAudit, "route_crossing"),
+      averageGeocodingConfidence: geocodingConfidence.averageScore,
+      minGeocodingConfidence: geocodingConfidence.minScore,
+      suspiciousGeocodingCount: geocodingConfidence.suspectCount,
       issuesDetectedCount: attemptAudit.issueCount + correctionAttempts.length,
       issuesCorrectedCount: blockedReason ? 0 : countCorrectedIssues(correctionAttempts),
       issuesBlockedCount: blockedReason ? 1 : 0,
@@ -6502,7 +6703,8 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         blockingIssue: blockedReason?.issue ?? null,
         correctionAttempts,
         finalIssues: attemptAudit.issues.slice(0, 12),
-        routeMetadata: optimizationAttempt.optimized.metadata ?? null
+        routeMetadata: optimizationAttempt.optimized.metadata ?? null,
+        geocodingConfidence
       }
     }).catch((error) => {
       console.warn("[Routes] Failed to record route metric:", error);
@@ -6591,6 +6793,9 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     address: wp.address || "",
     latitude: wp.latitude,
     longitude: wp.longitude,
+    geocodingConfidenceScore: wp.geocodingConfidenceScore,
+    geocodingMethod: wp.geocodingMethod,
+    geocodingSuspect: wp.geocodingSuspect,
     sequence: wp.sequence,
     notes: replaceImilePackageInNotes(wp.notes, wp.sequence)
   }));
@@ -6653,12 +6858,23 @@ var routeCreateSchema = z2.object({
   endLatitude: z2.number().optional(),
   endLongitude: z2.number().optional()
 });
+var geocodingMethodSchema = z2.enum([
+  "exact_address",
+  "street_match",
+  "neighborhood_match",
+  "city_match",
+  "approximate_route_cluster",
+  "manual_coordinate"
+]);
 var stopCreateSchema = z2.object({
   address: z2.string().min(1, "Informe o endere\xE7o da parada."),
   latitude: z2.number().optional(),
   longitude: z2.number().optional(),
   sequence: z2.number(),
-  notes: z2.string().optional()
+  notes: z2.string().optional(),
+  geocodingConfidenceScore: z2.number().min(0).max(100).optional(),
+  geocodingMethod: geocodingMethodSchema.optional(),
+  geocodingSuspect: z2.boolean().optional()
 });
 var stopUpdateSchema = z2.object({
   routeId: z2.number(),
@@ -6667,7 +6883,10 @@ var stopUpdateSchema = z2.object({
   latitude: z2.number().nullable().optional(),
   longitude: z2.number().nullable().optional(),
   sequence: z2.number().optional(),
-  notes: z2.string().nullable().optional()
+  notes: z2.string().nullable().optional(),
+  geocodingConfidenceScore: z2.number().min(0).max(100).optional(),
+  geocodingMethod: geocodingMethodSchema.optional(),
+  geocodingSuspect: z2.boolean().optional()
 });
 function sanitizeUser(user) {
   if (!user) return null;
@@ -7218,7 +7437,10 @@ var appRouter = router({
         latitude: input.latitude,
         longitude: input.longitude,
         sequence: input.sequence,
-        notes: input.notes?.trim() || null
+        notes: input.notes?.trim() || null,
+        geocodingConfidenceScore: input.geocodingConfidenceScore,
+        geocodingMethod: input.geocodingMethod,
+        geocodingSuspect: input.geocodingSuspect
       });
       if (!updatedStop) {
         throw new TRPCError3({

@@ -19,6 +19,11 @@ import {
   geocodeCache,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
+import {
+  calculateGeocodingConfidence,
+  summarizeGeocodingConfidence,
+  type GeocodingMethod,
+} from "../shared/geocodingConfidence";
 
 let _db: any = null;
 let _pool: mysql.Pool | null = null;
@@ -515,6 +520,9 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["routes", "userId"],
   ["stops", "routeId"],
   ["stops", "sequence"],
+  ["stops", "geocodingConfidenceScore"],
+  ["stops", "geocodingMethod"],
+  ["stops", "geocodingSuspect"],
   ["userIntegrations", "authTokenEncrypted"],
   ["operationalEvents", "type"],
   ["operationalEvents", "severity"],
@@ -522,6 +530,9 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["route_metrics", "optimizationRuntimeMs"],
   ["route_metrics", "osrmUsed"],
   ["route_metrics", "issuesCorrectedCount"],
+  ["route_metrics", "averageGeocodingConfidence"],
+  ["route_metrics", "minGeocodingConfidence"],
+  ["route_metrics", "suspiciousGeocodingCount"],
   ["geocode_cache", "cacheKey"],
   ["geocode_cache", "results"],
   ["geocode_cache", "expiresAt"],
@@ -1261,21 +1272,39 @@ export async function createStops(routeId: number, stopsData: Array<{
   longitude?: number;
   sequence: number;
   notes?: string;
+  geocodingConfidenceScore?: number;
+  geocodingMethod?: GeocodingMethod | string;
+  geocodingSuspect?: boolean;
 }>) {
   const db = await getDb();
   if (!db) {
     if (await shouldUseMemoryDb()) {
       const now = new Date();
-      const createdStops = stopsData.map((stop) => ({
-        id: memory.ids.stops++,
-        routeId,
-        address: stop.address,
-        latitude: stop.latitude !== undefined ? String(stop.latitude) : null,
-        longitude: stop.longitude !== undefined ? String(stop.longitude) : null,
-        sequence: stop.sequence,
-        notes: stop.notes ?? null,
-        createdAt: now,
-      }));
+      const createdStops = stopsData.map((stop) => {
+        const confidence = calculateGeocodingConfidence({
+          score: stop.geocodingConfidenceScore,
+          method: stop.geocodingMethod,
+          isManual:
+            stop.geocodingConfidenceScore == null &&
+            Number.isFinite(Number(stop.latitude)) &&
+            Number.isFinite(Number(stop.longitude)) &&
+            !(Number(stop.latitude) === 0 && Number(stop.longitude) === 0),
+        });
+
+        return {
+          id: memory.ids.stops++,
+          routeId,
+          address: stop.address,
+          latitude: stop.latitude !== undefined ? String(stop.latitude) : null,
+          longitude: stop.longitude !== undefined ? String(stop.longitude) : null,
+          geocodingConfidenceScore: confidence.score,
+          geocodingMethod: confidence.method,
+          geocodingSuspect: stop.geocodingSuspect ?? confidence.suspect,
+          sequence: stop.sequence,
+          notes: stop.notes ?? null,
+          createdAt: now,
+        };
+      });
 
       memory.stops.push(...createdStops);
       await persistFallbackDb();
@@ -1284,14 +1313,29 @@ export async function createStops(routeId: number, stopsData: Array<{
     requireConfiguredDatabase();
   }
 
-  const values = stopsData.map(s => ({
-    routeId,
-    address: s.address,
-    latitude: s.latitude !== undefined ? String(s.latitude) : null,
-    longitude: s.longitude !== undefined ? String(s.longitude) : null,
-    sequence: s.sequence,
-    notes: s.notes,
-  }));
+  const values = stopsData.map(s => {
+    const confidence = calculateGeocodingConfidence({
+      score: s.geocodingConfidenceScore,
+      method: s.geocodingMethod,
+      isManual:
+        s.geocodingConfidenceScore == null &&
+        Number.isFinite(Number(s.latitude)) &&
+        Number.isFinite(Number(s.longitude)) &&
+        !(Number(s.latitude) === 0 && Number(s.longitude) === 0),
+    });
+
+    return {
+      routeId,
+      address: s.address,
+      latitude: s.latitude !== undefined ? String(s.latitude) : null,
+      longitude: s.longitude !== undefined ? String(s.longitude) : null,
+      geocodingConfidenceScore: confidence.score,
+      geocodingMethod: confidence.method,
+      geocodingSuspect: s.geocodingSuspect ?? confidence.suspect,
+      sequence: s.sequence,
+      notes: s.notes,
+    };
+  });
 
   await db.insert(stops).values(values as any);
   
@@ -1321,6 +1365,9 @@ export async function updateStop(routeId: number, stopId: number, data: Partial<
   longitude: number | null;
   sequence: number;
   notes: string | null;
+  geocodingConfidenceScore: number;
+  geocodingMethod: GeocodingMethod | string;
+  geocodingSuspect: boolean;
 }>) {
   const db = await getDb();
   if (!db) {
@@ -1955,6 +2002,9 @@ export type CreateRouteMetricInput = {
   prematureRegionExitCount: number;
   nearbyStopSkippedCount: number;
   routeCrossingCount: number;
+  averageGeocodingConfidence?: number;
+  minGeocodingConfidence?: number;
+  suspiciousGeocodingCount?: number;
   issuesDetectedCount: number;
   issuesCorrectedCount: number;
   issuesBlockedCount: number;
@@ -1969,8 +2019,9 @@ export type CreateRouteMetricInput = {
   metadata?: Record<string, unknown> | null;
 };
 
-function normalizeMetricNumber(value: number, fallback = 0) {
-  return Number.isFinite(value) ? value : fallback;
+function normalizeMetricNumber(value: unknown, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 function metricAverage(values: number[]) {
@@ -2064,6 +2115,15 @@ export async function createRouteMetric(data: CreateRouteMetricInput) {
     routeCrossingCount: Math.round(
       normalizeMetricNumber(data.routeCrossingCount)
     ),
+    averageGeocodingConfidence: Math.round(
+      normalizeMetricNumber(data.averageGeocodingConfidence)
+    ),
+    minGeocodingConfidence: Math.round(
+      normalizeMetricNumber(data.minGeocodingConfidence)
+    ),
+    suspiciousGeocodingCount: Math.round(
+      normalizeMetricNumber(data.suspiciousGeocodingCount)
+    ),
     issuesDetectedCount: Math.round(
       normalizeMetricNumber(data.issuesDetectedCount)
     ),
@@ -2149,6 +2209,27 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
     (totalCount, metric) => totalCount + Number(metric.routeCrossingCount || 0),
     0
   );
+  const suspiciousGeocoding = metrics.reduce(
+    (totalCount, metric) =>
+      totalCount + Number(metric.suspiciousGeocodingCount || 0),
+    0
+  );
+  const geocodingAverageScores = metrics
+    .map((metric) => Number(metric.averageGeocodingConfidence || 0))
+    .filter((score) => Number.isFinite(score) && score > 0);
+  const geocodingMinScores = metrics
+    .map((metric) => Number(metric.minGeocodingConfidence || 0))
+    .filter((score) => Number.isFinite(score) && score > 0);
+  const geocodingScoreDistribution = {
+    excellent: geocodingAverageScores.filter((score) => score >= 90).length,
+    good: geocodingAverageScores.filter((score) => score >= 75 && score < 90)
+      .length,
+    attention: geocodingAverageScores.filter(
+      (score) => score >= 60 && score < 75
+    ).length,
+    suspicious: geocodingAverageScores.filter((score) => score < 60).length,
+    notClassified: Math.max(0, total - geocodingAverageScores.length),
+  };
   const detectedIssues = metrics.reduce(
     (totalCount, metric) => totalCount + Number(metric.issuesDetectedCount || 0),
     0
@@ -2211,6 +2292,13 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
       ),
       auditorCorrectionRate: roundMetric(metricPercent(modeCorrected, modeTotal)),
       osrmFallbackRate: roundMetric(metricPercent(modeFallback, modeTotal)),
+      averageGeocodingConfidence: roundMetric(
+        metricAverage(
+          modeMetrics.map((metric) =>
+            Number(metric.averageGeocodingConfidence || 0)
+          )
+        )
+      ),
     };
   });
 
@@ -2234,6 +2322,23 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
     osrmUsedCount: metrics.filter((metric) => Boolean(metric.osrmUsed)).length,
     osrmFallbackCount: osrmFallback,
     osrmFallbackRate: roundMetric(metricPercent(osrmFallback, total)),
+    geocodingConfidence: {
+      averageScore: roundMetric(
+        metricAverage(geocodingAverageScores)
+      ),
+      minScore: geocodingMinScores.length ? Math.min(...geocodingMinScores) : 0,
+      suspiciousStopCount: suspiciousGeocoding,
+      suspiciousStopRate: roundMetric(
+        metricPercent(
+          suspiciousGeocoding,
+          metrics.reduce(
+            (totalStops, metric) => totalStops + Number(metric.stopCount || 0),
+            0
+          )
+        )
+      ),
+      scoreDistribution: geocodingScoreDistribution,
+    },
     auditorCorrectionRate: roundMetric(metricPercent(corrected, total)),
     regionalReworkIndex: roundMetric(
       metricPercent(revisits + prematureExits, total)

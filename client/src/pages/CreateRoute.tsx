@@ -11,6 +11,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import AddressInputSimple from "@/components/AddressInputSimple";
 import RouteMetrics from "@/components/RouteMetrics";
+import {
+  calculateGeocodingConfidence,
+  type GeocodingMethod,
+} from "@shared/geocodingConfidence";
 import RouteShare from "@/components/RouteShare";
 import RouteMap from "@/components/RouteMap";
 import { toast } from "sonner";
@@ -86,6 +90,9 @@ type RouteStop = Pick<ImportedStop, "address" | "latitude" | "longitude"> & {
   routingStop?: number;
   notes?: string;
   sourceRow?: number;
+  geocodingConfidenceScore?: number;
+  geocodingMethod?: GeocodingMethod;
+  geocodingSuspect?: boolean;
 };
 type RoutePoint = Pick<RouteStop, "address" | "latitude" | "longitude">;
 type StopIssue = {
@@ -94,6 +101,8 @@ type StopIssue = {
   address: string;
   hasAddress: boolean;
   hasCoordinates: boolean;
+  suspiciousGeocoding: boolean;
+  geocodingConfidenceScore?: number;
 };
 
 const EMPTY_ROUTE_POINT: RoutePoint = { address: "", latitude: 0, longitude: 0 };
@@ -304,8 +313,8 @@ export default function CreateRoute() {
   const [endPoint, setEndPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
   const [invalidStopIndexes, setInvalidStopIndexes] = useState<number[]>([]);
   const [stops, setStops] = useState<RouteStop[]>([
-    { address: "", latitude: 0, longitude: 0 },
-    { address: "", latitude: 0, longitude: 0 },
+    { address: "", latitude: 0, longitude: 0, geocodingConfidenceScore: 0, geocodingMethod: "city_match", geocodingSuspect: true },
+    { address: "", latitude: 0, longitude: 0, geocodingConfidenceScore: 0, geocodingMethod: "city_match", geocodingSuspect: true },
   ]);
 
   const createAndOptimizeMutation = trpc.routes.createAndOptimize.useMutation();
@@ -385,6 +394,11 @@ export default function CreateRoute() {
     stop.longitude >= -180 &&
     stop.longitude <= 180;
 
+  const getDefaultStopConfidence = (stop: RoutePoint) =>
+    calculateGeocodingConfidence({
+      method: hasValidCoordinates(stop) ? "manual_coordinate" : "city_match",
+    });
+
   const getStopIssues = (routeStops: RouteStop[]): StopIssue[] =>
     routeStops
       .map((stop, index) => ({
@@ -393,8 +407,15 @@ export default function CreateRoute() {
         address: stop.address,
         hasAddress: Boolean(stop.address.trim()),
         hasCoordinates: hasValidCoordinates(stop),
+        suspiciousGeocoding:
+          hasValidCoordinates(stop) &&
+          Number(stop.geocodingConfidenceScore ?? 0) < 60,
+        geocodingConfidenceScore: stop.geocodingConfidenceScore,
       }))
-      .filter((item) => !item.hasAddress || !item.hasCoordinates);
+      .filter(
+        (item) =>
+          !item.hasAddress || !item.hasCoordinates || item.suspiciousGeocoding
+      );
 
   const formatStopIssue = (issue: StopIssue) =>
     `Parada ${issue.index + 1}${issue.sourceRow ? ` (linha ${issue.sourceRow})` : ""}`;
@@ -417,9 +438,17 @@ export default function CreateRoute() {
     setInvalidStopIndexes([]);
     setStops(
       importedRoute.stops.map((stop) => ({
-        address: stop.address,
-        latitude: stop.latitude,
-        longitude: stop.longitude,
+        ...(() => {
+          const confidence = getDefaultStopConfidence(stop);
+          return {
+            address: stop.address,
+            latitude: stop.latitude,
+            longitude: stop.longitude,
+            geocodingConfidenceScore: confidence.score,
+            geocodingMethod: confidence.method,
+            geocodingSuspect: confidence.suspect,
+          };
+        })(),
         packageNumber: stop.packageNumber,
         deliveryCount: stop.deliveryCount,
         routingStop: stop.routingStop,
@@ -624,6 +653,9 @@ export default function CreateRoute() {
           ...stop,
           latitude: suggestion.latitude,
           longitude: suggestion.longitude,
+          geocodingConfidenceScore: suggestion.geocodingConfidenceScore,
+          geocodingMethod: suggestion.geocodingMethod,
+          geocodingSuspect: suggestion.geocodingSuspect,
         });
         resolvedCount += 1;
       } else {
@@ -658,6 +690,9 @@ export default function CreateRoute() {
             ...stop,
             latitude: suggestion.latitude,
             longitude: suggestion.longitude,
+            geocodingConfidenceScore: suggestion.geocodingConfidenceScore,
+            geocodingMethod: suggestion.geocodingMethod,
+            geocodingSuspect: suggestion.geocodingSuspect,
           };
           resolvedCount += 1;
         }
@@ -699,7 +734,17 @@ export default function CreateRoute() {
   const handleAddStop = () => {
     setInvalidStopIndexes([]);
     setRespectImportedStopSequence(false);
-    setStops((currentStops) => [...currentStops, { address: "", latitude: 0, longitude: 0 }]);
+    setStops((currentStops) => [
+      ...currentStops,
+      {
+        address: "",
+        latitude: 0,
+        longitude: 0,
+        geocodingConfidenceScore: 0,
+        geocodingMethod: "city_match",
+        geocodingSuspect: true,
+      },
+    ]);
   };
 
   const loadVoiceAddressSuggestions = async (address: string) => {
@@ -868,11 +913,23 @@ export default function CreateRoute() {
               address: suggestion.label,
               latitude: suggestion.latitude,
               longitude: suggestion.longitude,
+              geocodingConfidenceScore: suggestion.geocodingConfidenceScore,
+              geocodingMethod: suggestion.geocodingMethod,
+              geocodingSuspect: suggestion.geocodingSuspect,
             }
           : stop
       )
     );
-    rememberAddressCoordinates(suggestion.label, suggestion.latitude, suggestion.longitude);
+    rememberAddressCoordinates(
+      suggestion.label,
+      suggestion.latitude,
+      suggestion.longitude,
+      {
+        geocodingConfidenceScore: suggestion.geocodingConfidenceScore,
+        geocodingMethod: suggestion.geocodingMethod,
+        geocodingSuspect: suggestion.geocodingSuspect,
+      }
+    );
     updatePendingVoiceStopIndex(null);
     setVoiceTranscript("");
     setVoiceAddressSuggestions([]);
@@ -898,7 +955,17 @@ export default function CreateRoute() {
     setInvalidStopIndexes((current) => current.filter((item) => item !== index));
     setStops((currentStops) =>
       currentStops.map((stop, stopIndex) =>
-        stopIndex === index ? { ...stop, address, latitude: 0, longitude: 0 } : stop
+        stopIndex === index
+          ? {
+              ...stop,
+              address,
+              latitude: 0,
+              longitude: 0,
+              geocodingConfidenceScore: 0,
+              geocodingMethod: "city_match",
+              geocodingSuspect: true,
+            }
+          : stop
       )
     );
   };
@@ -954,17 +1021,23 @@ export default function CreateRoute() {
 
     try {
       const importedRoute = await parseRouteWorkbook(file);
-      const importedStops = importedRoute.stops.map((stop) => ({
-        ...parseStopNotes(stop.notes),
-        address: stop.address,
-        latitude: stop.latitude,
-        longitude: stop.longitude,
-        packageNumber: stop.packageNumber,
-        deliveryCount: stop.deliveryCount,
-        routingStop: stop.routingStop,
-        notes: stop.notes,
-        sourceRow: stop.sourceRow,
-      }));
+      const importedStops = importedRoute.stops.map((stop) => {
+        const confidence = getDefaultStopConfidence(stop);
+        return {
+          ...parseStopNotes(stop.notes),
+          address: stop.address,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          geocodingConfidenceScore: confidence.score,
+          geocodingMethod: confidence.method,
+          geocodingSuspect: confidence.suspect,
+          packageNumber: stop.packageNumber,
+          deliveryCount: stop.deliveryCount,
+          routingStop: stop.routingStop,
+          notes: stop.notes,
+          sourceRow: stop.sourceRow,
+        };
+      });
 
       setInvalidStopIndexes([]);
       setStops(importedStops);
@@ -1145,14 +1218,20 @@ export default function CreateRoute() {
 
       setInvalidStopIndexes([]);
       setStops(
-        importedRoute.stops.map((stop, index) => ({
-          address: stop.address,
-          latitude: stop.latitude,
-          longitude: stop.longitude,
-          packageNumber: buildSequentialImilePackageNumber(index),
-          notes: stop.notes,
-          sourceRow: index + 1,
-        }))
+        importedRoute.stops.map((stop, index) => {
+          const confidence = getDefaultStopConfidence(stop);
+          return {
+            address: stop.address,
+            latitude: stop.latitude,
+            longitude: stop.longitude,
+            geocodingConfidenceScore: confidence.score,
+            geocodingMethod: confidence.method,
+            geocodingSuspect: confidence.suspect,
+            packageNumber: buildSequentialImilePackageNumber(index),
+            notes: stop.notes,
+            sourceRow: index + 1,
+          };
+        })
       );
       setImportSummary({
         routeName: `Rider Delivery ${imileDateFrom}${imileDateTo !== imileDateFrom ? ` a ${imileDateTo}` : ""}`,
@@ -1215,24 +1294,58 @@ export default function CreateRoute() {
     toast.success(`${invalidIndexes.size} parada(s) com problema removida(s).`);
   };
 
+  const handleGeocodingConfidenceChange = (
+    index: number,
+    score: number,
+    method: GeocodingMethod,
+    suspect: boolean
+  ) => {
+    setStops((currentStops) =>
+      currentStops.map((stop, stopIndex) =>
+        stopIndex === index
+          ? {
+              ...stop,
+              geocodingConfidenceScore: score,
+              geocodingMethod: method,
+              geocodingSuspect: suspect,
+            }
+          : stop
+      )
+    );
+  };
+
   const handleRelocateInvalidStops = async () => {
     const issues = getStopIssues(stops);
-    const missingCoordinateIssues = issues.filter(
-      (issue) => issue.hasAddress && !issue.hasCoordinates
+    const relocatableIssues = issues.filter(
+      (issue) =>
+        issue.hasAddress && (!issue.hasCoordinates || issue.suspiciousGeocoding)
     );
 
-    if (missingCoordinateIssues.length === 0) {
-      toast.message("Não há parada com endereço preenchido aguardando coordenada.");
+    if (relocatableIssues.length === 0) {
+      toast.message("Não há parada com endereço preenchido aguardando localização.");
       return;
     }
 
     setIsResolvingCoordinates(true);
     toast.message(
-      `Tentando localizar ${missingCoordinateIssues.length} parada(s) pendente(s)...`
+      `Tentando localizar ${relocatableIssues.length} parada(s) pendente(s)...`
     );
 
     try {
-      const result = await resolveMissingCoordinates(stops);
+      const indexesToRetry = new Set(relocatableIssues.map((issue) => issue.index));
+      const stopsForResolve = stops.map((stop, index) =>
+        indexesToRetry.has(index)
+          ? {
+              ...stop,
+              latitude: 0,
+              longitude: 0,
+              geocodingConfidenceScore: 0,
+              geocodingMethod: "city_match" as GeocodingMethod,
+              geocodingSuspect: true,
+            }
+          : stop
+      );
+      const result = await resolveMissingCoordinates(stopsForResolve);
       const nextIssues = getStopIssues(result.resolvedStops);
 
       setStops(result.resolvedStops);
@@ -1269,6 +1382,10 @@ export default function CreateRoute() {
         address: stop.address,
         hasAddress: Boolean(stop.address.trim()),
         hasCoordinates: hasValidCoordinates(stop),
+        suspiciousGeocoding:
+          hasValidCoordinates(stop) &&
+          Number(stop.geocodingConfidenceScore ?? 0) < 60,
+        geocodingConfidenceScore: stop.geocodingConfidenceScore,
       };
     })
     .filter(Boolean) as StopIssue[];
@@ -1412,6 +1529,15 @@ export default function CreateRoute() {
         longitude: stop.longitude,
         notes: buildStopNotes(stop.packageNumber, stop.notes),
         sequence: index,
+        geocodingConfidenceScore:
+          stop.geocodingConfidenceScore ??
+          getDefaultStopConfidence(stop).score,
+        geocodingMethod:
+          stop.geocodingMethod ??
+          getDefaultStopConfidence(stop).method,
+        geocodingSuspect:
+          stop.geocodingSuspect ??
+          getDefaultStopConfidence(stop).suspect,
       }));
       const result = await createAndOptimizeWithNetworkRetry({
         name,
@@ -1955,11 +2081,11 @@ export default function CreateRoute() {
                   <AlertDescription className="space-y-3">
                     <div>
                       <p className="font-medium">
-                        {invalidStopIssues.length} parada(s) sem coordenadas válidas.
+                        {invalidStopIssues.length} parada(s) precisam de revisão.
                       </p>
                       <p className="mt-1">
-                        Corrija o endereço, digite as coordenadas manualmente ou remova as
-                        paradas com problema.
+                        Corrija endereço, confirme uma sugestão confiável, digite
+                        coordenadas manualmente ou remova paradas com problema.
                       </p>
                     </div>
                     <div className="space-y-1 text-sm">
@@ -2051,7 +2177,16 @@ export default function CreateRoute() {
                     longitude={stop.longitude}
                     onAddressChange={(address) => handleAddressChange(index, address)}
                     onCoordinatesChange={(lat, lng) => handleCoordinatesChange(index, lat, lng)}
+                    onGeocodingConfidenceChange={(score, method, suspect) =>
+                      handleGeocodingConfidenceChange(index, score, method, suspect)
+                    }
                   />
+                  {hasValidCoordinates(stop) && (
+                    <p className="text-xs text-muted-foreground">
+                      Confiança do endereço: {stop.geocodingConfidenceScore ?? 0}/100
+                      {stop.geocodingSuspect ? " · revisar antes de otimizar" : ""}
+                    </p>
+                  )}
                   <div className="space-y-1">
                     <Label htmlFor={`package-number-${index}`}>Número do pacote</Label>
                     <Input
@@ -2076,8 +2211,8 @@ export default function CreateRoute() {
                   )}
                   {invalidStopIndexes.includes(index) && (
                     <p className="rounded-md border border-destructive/30 bg-background p-2 text-sm text-destructive">
-                      Essa parada não tem coordenadas válidas. Se o endereço estiver
-                      correto, use "Digitar coordenadas manualmente".
+                      Essa parada precisa de revisão de endereço/coordenada antes da
+                      otimização.
                     </p>
                   )}
                 </div>

@@ -42,6 +42,10 @@ import {
   decryptIntegrationSecret,
   encryptIntegrationSecret,
 } from "./integrationCredentials";
+import {
+  summarizeGeocodingConfidence,
+  type GeocodingMethod,
+} from "../shared/geocodingConfidence";
 
 const IMILE_PROVIDER = "imile_rider_delivery";
 const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
@@ -49,6 +53,7 @@ const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "invalid_coordinates",
   "empty_address",
   "generic_address",
+  "low_geocoding_confidence",
 ]);
 const DUPLICATE_COORDINATE_BLOCKING_GROUPS = 3;
 const MAX_AUDIT_CORRECTION_ATTEMPTS = 20;
@@ -220,6 +225,9 @@ function routeStopsToAuditableStops(routeStops: any[]): AuditableStop[] {
     address: stop.address,
     notes: stop.notes ?? undefined,
     sequence: Number(stop.sequence),
+    geocodingConfidenceScore: Number(stop.geocodingConfidenceScore ?? 0),
+    geocodingMethod: stop.geocodingMethod ?? undefined,
+    geocodingSuspect: Boolean(stop.geocodingSuspect),
   }));
 }
 
@@ -492,6 +500,9 @@ async function optimizeUserRoute(
     longitude: parseFloat(String(stop.longitude ?? 0)),
     address: stop.address,
     notes: stop.notes ?? undefined,
+    geocodingConfidenceScore: Number(stop.geocodingConfidenceScore ?? 0),
+    geocodingMethod: stop.geocodingMethod ?? undefined,
+    geocodingSuspect: Boolean(stop.geocodingSuspect),
   }));
 
   const validation = validateLocations(locations);
@@ -713,6 +724,7 @@ async function optimizeUserRoute(
     blockedReason: ReturnType<typeof getPostOptimizationBlockingReason>
   ) {
     const attemptAudit = optimizationAttempt.audit;
+    const geocodingConfidence = summarizeGeocodingConfidence(routeStops);
     await db.createRouteMetric({
       userId,
       routeId,
@@ -733,6 +745,9 @@ async function optimizeUserRoute(
         "nearby_stop_skipped"
       ),
       routeCrossingCount: countAuditIssues(attemptAudit, "route_crossing"),
+      averageGeocodingConfidence: geocodingConfidence.averageScore,
+      minGeocodingConfidence: geocodingConfidence.minScore,
+      suspiciousGeocodingCount: geocodingConfidence.suspectCount,
       issuesDetectedCount: attemptAudit.issueCount + correctionAttempts.length,
       issuesCorrectedCount: blockedReason
         ? 0
@@ -752,6 +767,7 @@ async function optimizeUserRoute(
         correctionAttempts,
         finalIssues: attemptAudit.issues.slice(0, 12),
         routeMetadata: optimizationAttempt.optimized.metadata ?? null,
+        geocodingConfidence,
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record route metric:", error);
@@ -850,6 +866,9 @@ async function optimizeUserRoute(
     address: wp.address || "",
     latitude: wp.latitude,
     longitude: wp.longitude,
+    geocodingConfidenceScore: wp.geocodingConfidenceScore,
+    geocodingMethod: wp.geocodingMethod as GeocodingMethod | undefined,
+    geocodingSuspect: wp.geocodingSuspect,
     sequence: wp.sequence,
     notes: replaceImilePackageInNotes(wp.notes, wp.sequence),
   }));
@@ -915,12 +934,24 @@ const routeCreateSchema = z.object({
   endLatitude: z.number().optional(),
   endLongitude: z.number().optional(),
 });
+const geocodingMethodSchema = z.enum([
+  "exact_address",
+  "street_match",
+  "neighborhood_match",
+  "city_match",
+  "approximate_route_cluster",
+  "manual_coordinate",
+]);
+
 const stopCreateSchema = z.object({
   address: z.string().min(1, "Informe o endereço da parada."),
   latitude: z.number().optional(),
   longitude: z.number().optional(),
   sequence: z.number(),
   notes: z.string().optional(),
+  geocodingConfidenceScore: z.number().min(0).max(100).optional(),
+  geocodingMethod: geocodingMethodSchema.optional(),
+  geocodingSuspect: z.boolean().optional(),
 });
 const stopUpdateSchema = z.object({
   routeId: z.number(),
@@ -930,6 +961,9 @@ const stopUpdateSchema = z.object({
   longitude: z.number().nullable().optional(),
   sequence: z.number().optional(),
   notes: z.string().nullable().optional(),
+  geocodingConfidenceScore: z.number().min(0).max(100).optional(),
+  geocodingMethod: geocodingMethodSchema.optional(),
+  geocodingSuspect: z.boolean().optional(),
 });
 
 function sanitizeUser<T extends User | null | undefined>(user: T) {
@@ -1569,6 +1603,9 @@ export const appRouter = router({
           longitude: input.longitude,
           sequence: input.sequence,
           notes: input.notes?.trim() || null,
+          geocodingConfidenceScore: input.geocodingConfidenceScore,
+          geocodingMethod: input.geocodingMethod,
+          geocodingSuspect: input.geocodingSuspect,
         });
 
         if (!updatedStop) {

@@ -62,6 +62,16 @@ function modeLabel(mode: string) {
   return "Balanceado";
 }
 
+function confidenceDistributionItems(distribution: any) {
+  return [
+    { label: "90-100", value: distribution?.excellent ?? 0 },
+    { label: "75-89", value: distribution?.good ?? 0 },
+    { label: "60-74", value: distribution?.attention ?? 0 },
+    { label: "< 60", value: distribution?.suspicious ?? 0 },
+    { label: "Sem score", value: distribution?.notClassified ?? 0 },
+  ];
+}
+
 export default function Operations() {
   const utils = trpc.useUtils();
   const dashboardQuery = trpc.admin.dashboard.useQuery(undefined, {
@@ -139,6 +149,24 @@ export default function Operations() {
                   value={Math.round(routeMetrics?.osrmFallbackRate ?? 0)}
                   suffix="%"
                   icon={AlertTriangle}
+                />
+                <StatCard
+                  title="Confiança endereço"
+                  value={Math.round(routeMetrics?.geocodingConfidence?.averageScore ?? 0)}
+                  suffix="/100"
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Menor confiança"
+                  value={Math.round(routeMetrics?.geocodingConfidence?.minScore ?? 0)}
+                  suffix="/100"
+                  icon={AlertTriangle}
+                />
+                <StatCard
+                  title="Paradas suspeitas"
+                  value={Math.round(routeMetrics?.geocodingConfidence?.suspiciousStopRate ?? 0)}
+                  suffix="%"
+                  icon={Gauge}
                 />
                 <StatCard
                   title="Retrabalho regional"
@@ -252,6 +280,21 @@ export default function Operations() {
                 Métricas dos últimos 30 dias gravadas em route_metrics a cada
                 otimização, reotimização ou bloqueio do fiscal.
               </p>
+              <div className="mt-5 rounded-lg border border-border/80 p-4">
+                <p className="text-sm font-medium">
+                  Distribuicao de confianca dos enderecos
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-5">
+                  {confidenceDistributionItems(
+                    routeMetrics?.geocodingConfidence?.scoreDistribution
+                  ).map((item) => (
+                    <div key={item.label} className="rounded-md bg-muted/50 p-3">
+                      <p className="text-xs text-muted-foreground">{item.label}</p>
+                      <p className="text-2xl font-semibold">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
               <div className="mt-5 overflow-x-auto rounded-lg border border-border/80">
                 <table className="w-full min-w-[720px] text-left text-sm">
                   <thead className="bg-muted/60 text-xs uppercase text-muted-foreground">

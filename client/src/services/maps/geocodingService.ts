@@ -1,5 +1,9 @@
 import { buildApiUrl } from "@/lib/apiBase";
 import type { Coordinate } from "./locationService";
+import {
+  calculateGeocodingConfidence,
+  type GeocodingMethod,
+} from "@shared/geocodingConfidence";
 
 const GEOCODING_SEARCH_URL = buildApiUrl("/api/geocode/search");
 const GEOCODING_REMEMBER_URL = buildApiUrl("/api/geocode/remember");
@@ -17,11 +21,17 @@ export type AddressSuggestion = Coordinate & {
   importance?: number;
   accuracy?: "saved" | "exact" | "approximate";
   score?: number;
+  geocodingConfidenceScore?: number;
+  geocodingMethod?: GeocodingMethod;
+  geocodingSuspect?: boolean;
 };
 
 type RememberedAddress = Coordinate & {
   address: string;
   savedAt: number;
+  geocodingConfidenceScore?: number;
+  geocodingMethod?: GeocodingMethod;
+  geocodingSuspect?: boolean;
 };
 
 type NominatimAddress = {
@@ -66,6 +76,27 @@ function normalizeAddressKey(query: string) {
     .trim();
 }
 
+function getEquivalentAddressKeys(query: string) {
+  const normalized = normalizeAddressQuery(query);
+  const withoutComplement = stripAddressComplement(normalized);
+  const candidates = [
+    normalized,
+    withoutComplement,
+    normalized.replace(/,\s*brasil$/i, ""),
+    withoutComplement.replace(/,\s*brasil$/i, ""),
+    moveLeadingHouseNumber(normalized),
+    moveLeadingHouseNumber(withoutComplement),
+  ];
+
+  return Array.from(
+    new Set(
+      candidates
+        .map(normalizeAddressKey)
+        .filter((key) => key.length >= 4)
+    )
+  );
+}
+
 function readAddressMemory(): Record<string, RememberedAddress> {
   if (typeof window === "undefined") return {};
 
@@ -96,22 +127,37 @@ function writeAddressMemory(memory: Record<string, RememberedAddress>) {
 export function rememberAddressCoordinates(
   address: string,
   latitude: number,
-  longitude: number
+  longitude: number,
+  confidence?: {
+    geocodingConfidenceScore?: number;
+    geocodingMethod?: GeocodingMethod;
+    geocodingSuspect?: boolean;
+  }
 ) {
   const normalizedAddress = normalizeAddressQuery(address);
-  const key = normalizeAddressKey(normalizedAddress);
+  const keys = getEquivalentAddressKeys(normalizedAddress);
 
-  if (!key || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+  if (keys.length === 0 || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
   if (latitude === 0 && longitude === 0) return;
 
+  const confidenceResult = calculateGeocodingConfidence({
+    score: confidence?.geocodingConfidenceScore,
+    method: confidence?.geocodingMethod,
+  });
   const memory = readAddressMemory();
-  memory[key] = {
-    address: normalizedAddress,
-    latitude,
-    longitude,
-    savedAt: Date.now(),
-  };
+  for (const key of keys) {
+    memory[key] = {
+      address: normalizedAddress,
+      latitude,
+      longitude,
+      savedAt: Date.now(),
+      geocodingConfidenceScore: confidenceResult.score,
+      geocodingMethod: confidenceResult.method,
+      geocodingSuspect: confidence?.geocodingSuspect ?? confidenceResult.suspect,
+    };
+  }
   writeAddressMemory(memory);
+  requestCache.clear();
 
   if (typeof window === "undefined") return;
 
@@ -134,11 +180,18 @@ export function rememberAddressCoordinates(
 }
 
 function getRememberedAddressSuggestion(query: string): AddressSuggestion | undefined {
-  const remembered = readAddressMemory()[normalizeAddressKey(query)];
+  const memory = readAddressMemory();
+  const remembered = getEquivalentAddressKeys(query)
+    .map((key) => memory[key])
+    .find(Boolean);
   if (!remembered) return undefined;
+  const confidence = calculateGeocodingConfidence({
+    score: remembered.geocodingConfidenceScore,
+    method: remembered.geocodingMethod,
+  });
 
   return {
-    id: `memory:${normalizeAddressKey(query)}`,
+    id: `memory:${getEquivalentAddressKeys(query)[0] ?? normalizeAddressKey(query)}`,
     label: remembered.address,
     shortLabel: "Coordenada usada anteriormente neste aparelho",
     latitude: remembered.latitude,
@@ -147,6 +200,9 @@ function getRememberedAddressSuggestion(query: string): AddressSuggestion | unde
     importance: 1,
     accuracy: "saved",
     score: 1_000,
+    geocodingConfidenceScore: confidence.score,
+    geocodingMethod: confidence.method,
+    geocodingSuspect: remembered.geocodingSuspect ?? confidence.suspect,
   };
 }
 
@@ -196,6 +252,22 @@ function getResultAccuracy(result: NominatimResult, queryHouseNumber?: string) {
   if (result.type === "user_confirmed") return "saved" as const;
   if (resultHasHouseNumber(result, queryHouseNumber)) return "exact" as const;
   return "approximate" as const;
+}
+
+function getResultGeocodingMethod(
+  result: NominatimResult,
+  queryHouseNumber?: string
+): GeocodingMethod {
+  if (result.type === "user_confirmed") return "exact_address";
+  if (resultHasHouseNumber(result, queryHouseNumber)) return "exact_address";
+  if (result.address?.road) return "street_match";
+  if (result.address?.suburb || result.address?.neighbourhood || result.address?.quarter) {
+    return "neighborhood_match";
+  }
+  if (result.address?.city || result.address?.town || result.address?.village || result.address?.municipality) {
+    return "city_match";
+  }
+  return "city_match";
 }
 
 function scoreAddressResult(
@@ -438,6 +510,24 @@ async function fetchAddressQuery(
     .map((result) => {
       const accuracy = getResultAccuracy(result, queryHouseNumber);
       const score = scoreAddressResult(result, queryHouseNumber, normalizedQuery);
+      const method = getResultGeocodingMethod(result, queryHouseNumber);
+      const confidence = calculateGeocodingConfidence({
+        method,
+        isSaved: result.type === "user_confirmed",
+        hasHouseNumber: resultHasHouseNumber(result, queryHouseNumber),
+        hasRoad: Boolean(result.address?.road),
+        hasDistrict: Boolean(
+          result.address?.suburb ||
+            result.address?.neighbourhood ||
+            result.address?.quarter
+        ),
+        hasCity: Boolean(
+          result.address?.city ||
+            result.address?.town ||
+            result.address?.village ||
+            result.address?.municipality
+        ),
+      });
       const shortLabel =
         accuracy === "approximate" && queryHouseNumber
           ? `Aproximado pela rua. Confirme o ponto antes de iniciar. ${result.display_name}`
@@ -453,6 +543,9 @@ async function fetchAddressQuery(
         importance: result.importance,
         accuracy,
         score,
+        geocodingConfidenceScore: confidence.score,
+        geocodingMethod: confidence.method,
+        geocodingSuspect: confidence.suspect,
       };
     })
     .filter(
