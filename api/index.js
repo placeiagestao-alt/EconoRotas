@@ -3289,6 +3289,12 @@ var cache = /* @__PURE__ */ new Map();
 var rateLimiter = /* @__PURE__ */ new Map();
 var inFlightSearches = /* @__PURE__ */ new Map();
 var lastExternalSearchAt = 0;
+function normalizeSearchQuery(query) {
+  return query.replace(/\s+/g, " ").trim();
+}
+function isCoordinateInBrazil(latitude, longitude) {
+  return latitude >= -34 && latitude <= 6 && longitude >= -74 && longitude <= -34;
+}
 function getNominatimUserAgent() {
   return process.env.NOMINATIM_USER_AGENT || `routing-pwa/1.0 (${process.env.NOMINATIM_CONTACT_EMAIL || "local-development"})`;
 }
@@ -3408,9 +3414,40 @@ function checkRateLimit(req) {
   existing.count += 1;
   return { allowed: true, retryAfterSeconds: 0 };
 }
+async function requireAuthenticatedGeocodeUser(req) {
+  try {
+    return await sdk.authenticateRequest(req);
+  } catch {
+    return null;
+  }
+}
+function buildConfirmedAddressResult(data) {
+  return {
+    place_id: `confirmed:${createHash("sha1").update(`${data.address}|${data.latitude}|${data.longitude}`).digest("hex")}`,
+    licence: "EconoRota user-confirmed address memory",
+    osm_type: "user_confirmed",
+    osm_id: 0,
+    lat: String(data.latitude),
+    lon: String(data.longitude),
+    category: "place",
+    type: "user_confirmed",
+    importance: 1,
+    addresstype: "address",
+    display_name: data.address,
+    address: {
+      road: data.address,
+      country: "Brasil",
+      country_code: "br"
+    },
+    econorotas: {
+      source: "user_confirmed",
+      userId: data.userId
+    }
+  };
+}
 function registerGeocodingProxy(app2) {
   app2.get("/api/geocode/search", async (req, res) => {
-    const q = String(req.query.q || "").replace(/\s+/g, " ").trim();
+    const q = normalizeSearchQuery(String(req.query.q || ""));
     const limit = Math.min(Number(req.query.limit || 6) || 6, 10);
     if (q.length < 4) {
       res.json([]);
@@ -3471,6 +3508,47 @@ function registerGeocodingProxy(app2) {
         error: error instanceof Error ? error.message : "Falha ao consultar o servico de enderecos."
       });
     }
+  });
+  app2.post("/api/geocode/remember", async (req, res) => {
+    const user = await requireAuthenticatedGeocodeUser(req);
+    if (!user) {
+      res.status(401).json({ error: "Entre para salvar a coordenada confirmada." });
+      return;
+    }
+    const rateLimit = checkRateLimit(req);
+    if (!rateLimit.allowed) {
+      res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
+      res.status(429).json({
+        error: "Limite de consultas excedido. Tente novamente em alguns segundos."
+      });
+      return;
+    }
+    const address = normalizeSearchQuery(String(req.body?.address || ""));
+    const latitude = Number(req.body?.latitude);
+    const longitude = Number(req.body?.longitude);
+    if (address.length < 6 || address.length > 500) {
+      res.status(400).json({ error: "Endereco invalido para memoria central." });
+      return;
+    }
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !isCoordinateInBrazil(latitude, longitude)) {
+      res.status(400).json({ error: "Coordenada invalida para memoria central." });
+      return;
+    }
+    const result = buildConfirmedAddressResult({
+      address,
+      latitude,
+      longitude,
+      userId: user.id
+    });
+    await Promise.all(
+      [1, 6].map(
+        (limit) => setCached(`${address.toLowerCase()}|${limit}`, [result])
+      )
+    );
+    res.json({
+      ok: true,
+      source: "user_confirmed"
+    });
   });
 }
 

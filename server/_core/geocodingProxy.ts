@@ -6,6 +6,7 @@ import {
   setGeocodeCache,
   setPersistentValue,
 } from "../db";
+import { sdk } from "./sdk";
 
 const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -34,6 +35,14 @@ const cache = new Map<string, { expiresAt: number; data: unknown }>();
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
 const inFlightSearches = new Map<string, Promise<unknown>>();
 let lastExternalSearchAt = 0;
+
+function normalizeSearchQuery(query: string) {
+  return query.replace(/\s+/g, " ").trim();
+}
+
+function isCoordinateInBrazil(latitude: number, longitude: number) {
+  return latitude >= -34 && latitude <= 6 && longitude >= -74 && longitude <= -34;
+}
 
 function getNominatimUserAgent() {
   return (
@@ -190,9 +199,49 @@ function checkRateLimit(req: Request) {
   return { allowed: true, retryAfterSeconds: 0 };
 }
 
+async function requireAuthenticatedGeocodeUser(req: Request) {
+  try {
+    return await sdk.authenticateRequest(req);
+  } catch {
+    return null;
+  }
+}
+
+function buildConfirmedAddressResult(data: {
+  address: string;
+  latitude: number;
+  longitude: number;
+  userId: number | string;
+}) {
+  return {
+    place_id: `confirmed:${createHash("sha1")
+      .update(`${data.address}|${data.latitude}|${data.longitude}`)
+      .digest("hex")}`,
+    licence: "EconoRota user-confirmed address memory",
+    osm_type: "user_confirmed",
+    osm_id: 0,
+    lat: String(data.latitude),
+    lon: String(data.longitude),
+    category: "place",
+    type: "user_confirmed",
+    importance: 1,
+    addresstype: "address",
+    display_name: data.address,
+    address: {
+      road: data.address,
+      country: "Brasil",
+      country_code: "br",
+    },
+    econorotas: {
+      source: "user_confirmed",
+      userId: data.userId,
+    },
+  };
+}
+
 export function registerGeocodingProxy(app: Express) {
   app.get("/api/geocode/search", async (req, res) => {
-    const q = String(req.query.q || "").replace(/\s+/g, " ").trim();
+    const q = normalizeSearchQuery(String(req.query.q || ""));
     const limit = Math.min(Number(req.query.limit || 6) || 6, 10);
 
     if (q.length < 4) {
@@ -265,5 +314,58 @@ export function registerGeocodingProxy(app: Express) {
             : "Falha ao consultar o servico de enderecos.",
       });
     }
+  });
+
+  app.post("/api/geocode/remember", async (req, res) => {
+    const user = await requireAuthenticatedGeocodeUser(req);
+    if (!user) {
+      res.status(401).json({ error: "Entre para salvar a coordenada confirmada." });
+      return;
+    }
+
+    const rateLimit = checkRateLimit(req);
+    if (!rateLimit.allowed) {
+      res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
+      res.status(429).json({
+        error: "Limite de consultas excedido. Tente novamente em alguns segundos.",
+      });
+      return;
+    }
+
+    const address = normalizeSearchQuery(String(req.body?.address || ""));
+    const latitude = Number(req.body?.latitude);
+    const longitude = Number(req.body?.longitude);
+
+    if (address.length < 6 || address.length > 500) {
+      res.status(400).json({ error: "Endereco invalido para memoria central." });
+      return;
+    }
+
+    if (
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude) ||
+      !isCoordinateInBrazil(latitude, longitude)
+    ) {
+      res.status(400).json({ error: "Coordenada invalida para memoria central." });
+      return;
+    }
+
+    const result = buildConfirmedAddressResult({
+      address,
+      latitude,
+      longitude,
+      userId: user.id,
+    });
+
+    await Promise.all(
+      [1, 6].map((limit) =>
+        setCached(`${address.toLowerCase()}|${limit}`, [result])
+      )
+    );
+
+    res.json({
+      ok: true,
+      source: "user_confirmed",
+    });
   });
 }

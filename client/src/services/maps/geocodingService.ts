@@ -2,6 +2,7 @@ import { buildApiUrl } from "@/lib/apiBase";
 import type { Coordinate } from "./locationService";
 
 const GEOCODING_SEARCH_URL = buildApiUrl("/api/geocode/search");
+const GEOCODING_REMEMBER_URL = buildApiUrl("/api/geocode/remember");
 const DEFAULT_LIMIT = 6;
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const ADDRESS_MEMORY_KEY = "econorotas:address-coordinate-memory:v1";
@@ -109,6 +110,25 @@ export function rememberAddressCoordinates(
     savedAt: Date.now(),
   };
   writeAddressMemory(memory);
+
+  if (typeof window === "undefined") return;
+
+  window.setTimeout(() => {
+    void fetch(GEOCODING_REMEMBER_URL, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        address: normalizedAddress,
+        latitude,
+        longitude,
+      }),
+    }).catch(() => {
+      // Local memory already saved the coordinate. Central learning is best-effort.
+    });
+  }, 0);
 }
 
 function getRememberedAddressSuggestion(query: string): AddressSuggestion | undefined {
