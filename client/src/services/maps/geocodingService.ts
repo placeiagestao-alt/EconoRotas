@@ -4,12 +4,18 @@ import {
   calculateGeocodingConfidence,
   type GeocodingMethod,
 } from "@shared/geocodingConfidence";
+import {
+  getEquivalentAddressCacheKeys,
+  normalizeAddressForCache,
+  normalizeAddressText,
+} from "@shared/addressCache";
 
 const GEOCODING_SEARCH_URL = buildApiUrl("/api/geocode/search");
 const GEOCODING_REMEMBER_URL = buildApiUrl("/api/geocode/remember");
 const DEFAULT_LIMIT = 6;
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const ADDRESS_MEMORY_KEY = "econorotas:address-coordinate-memory:v1";
+const LOCAL_CACHE_METRICS_KEY = "econorotas:geocoding-local-cache-metrics:v1";
 const MAX_MEMORY_ENTRIES = 1500;
 const requestCache = new Map<string, Promise<AddressSuggestion[]>>();
 
@@ -67,34 +73,55 @@ export type SearchAddressOptions = {
 };
 
 function normalizeAddressKey(query: string) {
-  return query
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return normalizeAddressForCache(query);
 }
 
 function getEquivalentAddressKeys(query: string) {
-  const normalized = normalizeAddressQuery(query);
-  const withoutComplement = stripAddressComplement(normalized);
-  const candidates = [
-    normalized,
-    withoutComplement,
-    normalized.replace(/,\s*brasil$/i, ""),
-    withoutComplement.replace(/,\s*brasil$/i, ""),
-    moveLeadingHouseNumber(normalized),
-    moveLeadingHouseNumber(withoutComplement),
-  ];
+  return getEquivalentAddressCacheKeys(query);
+}
 
-  return Array.from(
-    new Set(
-      candidates
-        .map(normalizeAddressKey)
-        .filter((key) => key.length >= 4)
-    )
-  );
+function readLocalCacheMetrics() {
+  if (typeof window === "undefined") return { hits: 0, misses: 0 };
+
+  try {
+    const raw = window.localStorage.getItem(LOCAL_CACHE_METRICS_KEY);
+    if (!raw) return { hits: 0, misses: 0 };
+    const parsed = JSON.parse(raw);
+    return {
+      hits: Math.max(0, Math.trunc(Number(parsed?.hits || 0))),
+      misses: Math.max(0, Math.trunc(Number(parsed?.misses || 0))),
+    };
+  } catch {
+    return { hits: 0, misses: 0 };
+  }
+}
+
+function writeLocalCacheMetrics(metrics: { hits: number; misses: number }) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(LOCAL_CACHE_METRICS_KEY, JSON.stringify(metrics));
+  } catch {
+    // Metrics are best-effort and must never block geocoding.
+  }
+}
+
+function recordLocalCacheMetric(type: "hit" | "miss") {
+  const metrics = readLocalCacheMetrics();
+  if (type === "hit") metrics.hits += 1;
+  else metrics.misses += 1;
+  writeLocalCacheMetrics(metrics);
+}
+
+function takeLocalCacheMetricHeaders() {
+  const metrics = readLocalCacheMetrics();
+  if (metrics.hits <= 0 && metrics.misses <= 0) return {};
+
+  writeLocalCacheMetrics({ hits: 0, misses: 0 });
+  const headers: Record<string, string> = {};
+  headers["X-EconoRotas-Geocoding-Local-Hits"] = String(metrics.hits);
+  headers["X-EconoRotas-Geocoding-Local-Misses"] = String(metrics.misses);
+  return headers;
 }
 
 function readAddressMemory(): Record<string, RememberedAddress> {
@@ -323,13 +350,7 @@ function formatAddressLabel(result: NominatimResult, queryHouseNumber?: string) 
 }
 
 export function normalizeAddressQuery(query: string) {
-  return query
-    .replace(/\bR\.\s+/gi, "Rua ")
-    .replace(/\bAv\.\s+/gi, "Avenida ")
-    .replace(/\bPres\.\s+Prudente\b/gi, "Presidente Prudente")
-    .replace(/\bPte\.\s+Prudente\b/gi, "Presidente Prudente")
-    .replace(/\s+/g, " ")
-    .trim();
+  return normalizeAddressText(query);
 }
 
 function stripAddressComplement(query: string) {
@@ -425,6 +446,14 @@ export async function searchAddress(
 
   if (normalizedQuery.length < 4) return [];
 
+  const remembered = getRememberedAddressSuggestion(normalizedQuery);
+  if (remembered) {
+    recordLocalCacheMetric("hit");
+    return [remembered];
+  }
+
+  recordLocalCacheMetric("miss");
+
   const cacheKey = `${normalizedQuery.toLowerCase()}|${options.limit ?? DEFAULT_LIMIT}|${options.useFallbackQueries !== false ? "fallback" : "single"}`;
   if (!options.signal) {
     const cachedRequest = requestCache.get(cacheKey);
@@ -445,12 +474,11 @@ async function searchAddressUncached(
   options: SearchAddressOptions
 ): Promise<AddressSuggestion[]> {
   const limit = options.limit ?? DEFAULT_LIMIT;
-  const remembered = getRememberedAddressSuggestion(normalizedQuery);
   const queries =
     options.useFallbackQueries === false
       ? [normalizedQuery]
       : buildFallbackQueries(normalizedQuery).slice(0, 5);
-  const suggestions: AddressSuggestion[] = remembered ? [remembered] : [];
+  const suggestions: AddressSuggestion[] = [];
   const seen = new Set(suggestions.map((suggestion) => suggestion.id));
 
   for (const query of queries) {
@@ -485,9 +513,13 @@ async function fetchAddressQuery(
 
   let response: Response | undefined;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      ...takeLocalCacheMetricHeaders(),
+    };
     response = await fetch(`${GEOCODING_SEARCH_URL}?${params.toString()}`, {
       signal: options.signal,
-      headers: { Accept: "application/json" },
+      headers,
     });
 
     if (!RETRYABLE_STATUS_CODES.has(response.status) || attempt === 2) break;

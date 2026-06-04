@@ -1,12 +1,17 @@
 import type { Express, Request } from "express";
 import { createHash } from "node:crypto";
 import {
+  createOperationalEvent,
   getGeocodeCache,
   getPersistentValue,
   setGeocodeCache,
   setPersistentValue,
 } from "../db";
 import { sdk } from "./sdk";
+import {
+  getEquivalentAddressCacheKeys,
+  normalizeAddressForCache,
+} from "../../shared/addressCache";
 
 const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -38,6 +43,52 @@ let lastExternalSearchAt = 0;
 
 function normalizeSearchQuery(query: string) {
   return query.replace(/\s+/g, " ").trim();
+}
+
+function getSearchCacheKey(query: string, limit: number) {
+  const normalized = normalizeAddressForCache(query) || query.toLowerCase();
+  return `${normalized}|${limit}`;
+}
+
+function getRememberCacheKeys(address: string, limit: number) {
+  const keys = getEquivalentAddressCacheKeys(address);
+  return (keys.length > 0 ? keys : [normalizeAddressForCache(address)]).map(
+    (key) => `${key}|${limit}`
+  );
+}
+
+function readPositiveHeaderNumber(req: Request, name: string) {
+  const raw = req.headers[name.toLowerCase()];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const number = Math.trunc(Number(value || 0));
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+async function recordClientCacheMetrics(req: Request) {
+  const hits = readPositiveHeaderNumber(
+    req,
+    "X-EconoRotas-Geocoding-Local-Hits"
+  );
+  const misses = readPositiveHeaderNumber(
+    req,
+    "X-EconoRotas-Geocoding-Local-Misses"
+  );
+
+  if (hits <= 0 && misses <= 0) return;
+
+  await createOperationalEvent({
+    type: "geocoding_cache_client_metrics",
+    severity: "info",
+    source: "geocoding.cache",
+    title: "Metricas de cache local de enderecos",
+    message: `${hits} hit(s) local(is), ${misses} miss(es) local(is).`,
+    metadata: {
+      geocoding_cache_hit_local: hits,
+      geocoding_cache_miss_local: misses,
+    },
+  }).catch((error) => {
+    console.warn("[Geocoding] Failed to record local cache metrics:", error);
+  });
 }
 
 function isCoordinateInBrazil(latitude: number, longitude: number) {
@@ -249,7 +300,9 @@ export function registerGeocodingProxy(app: Express) {
       return;
     }
 
-    const cacheKey = `${q.toLowerCase()}|${limit}`;
+    await recordClientCacheMetrics(req);
+
+    const cacheKey = getSearchCacheKey(q, limit);
     const cached = await getCached(cacheKey);
 
     if (cached) {
@@ -358,8 +411,10 @@ export function registerGeocodingProxy(app: Express) {
     });
 
     await Promise.all(
-      [1, 6].map((limit) =>
-        setCached(`${address.toLowerCase()}|${limit}`, [result])
+      [1, 6].flatMap((limit) =>
+        getRememberCacheKeys(address, limit).map((cacheKey) =>
+          setCached(cacheKey, [result])
+        )
       )
     );
 

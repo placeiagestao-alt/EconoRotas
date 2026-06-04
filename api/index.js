@@ -2223,6 +2223,22 @@ function buildRouteQualityDashboardFromMetrics(routeMetricsSummary, eventFallbac
     osrmFallbackRoutes: routeMetricsSummary.osrmFallbackCount
   };
 }
+function buildGeocodingCacheDashboard(events) {
+  let localHits = 0;
+  let localMisses = 0;
+  for (const event of events) {
+    if (event.type !== "geocoding_cache_client_metrics") continue;
+    const metadata = parseOperationalMetadata(event.metadata);
+    localHits += Number(metadata.geocoding_cache_hit_local || 0);
+    localMisses += Number(metadata.geocoding_cache_miss_local || 0);
+  }
+  const total = localHits + localMisses;
+  return {
+    localHits,
+    localMisses,
+    localReuseRate: roundMetric(metricPercent(localHits, total))
+  };
+}
 async function getAdminOperationalDashboard() {
   const db = await getDb();
   if (!db) {
@@ -2245,6 +2261,7 @@ async function getAdminOperationalDashboard() {
         routeMetrics2,
         buildRouteQualityDashboard(events.slice(0, 200))
       );
+      const geocodingCache2 = buildGeocodingCacheDashboard(events.slice(0, 500));
       return {
         stats: {
           usersTotal: memory.users.length,
@@ -2264,6 +2281,7 @@ async function getAdminOperationalDashboard() {
         },
         routeQuality: routeQuality2,
         routeMetrics: routeMetrics2,
+        geocodingCache: geocodingCache2,
         recentUsers: recentUsers2,
         recentRoutes: recentRoutes2,
         recentEvents: events.slice(0, 12)
@@ -2296,6 +2314,7 @@ async function getAdminOperationalDashboard() {
     routeMetricsSummary,
     buildRouteQualityDashboard(recentOperationalEvents)
   );
+  const geocodingCache = buildGeocodingCacheDashboard(recentOperationalEvents);
   const recentUsers = await db.select({
     id: users.id,
     name: users.name,
@@ -2329,6 +2348,7 @@ async function getAdminOperationalDashboard() {
     },
     routeQuality,
     routeMetrics: routeMetricsSummary,
+    geocodingCache,
     recentUsers,
     recentRoutes,
     recentEvents: recentOperationalEvents.slice(0, 12)
@@ -3445,6 +3465,51 @@ function registerStorageProxy(app2) {
 // server/_core/geocodingProxy.ts
 init_db();
 import { createHash } from "node:crypto";
+
+// shared/addressCache.ts
+function normalizeAddressText(value) {
+  return value.replace(/\bR\.\s+/gi, "Rua ").replace(/\bAv\.\s+/gi, "Avenida ").replace(/\bPres\.\s+Prudente\b/gi, "Presidente Prudente").replace(/\bPte\.\s+Prudente\b/gi, "Presidente Prudente").replace(/\s+/g, " ").trim();
+}
+function normalizeAddressForCache(value) {
+  return normalizeAddressText(value).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\bbrasil\b/g, " ").replace(/\bsao paulo\b/g, " sp ").replace(
+    /\b(?:apto?|apartamento|ap|bloco|torre|casa|fundos|sala|loja|quadra|lote|andar|condominio)\b.*$/i,
+    " "
+  ).replace(/\bcep\b/g, " ").replace(/\b\d{5}-?\d{3}\b/g, " ").replace(/[^a-z0-9]+/g, "").trim();
+}
+function stripAddressComplementForCache(value) {
+  const normalized = normalizeAddressText(value);
+  return normalized.replace(
+    /\s*,?\s*\b(?:apto?|apartamento|ap|bloco|torre|casa|fundos|sala|loja|quadra|lote|andar|condominio|condomínio)\b.*$/i,
+    ""
+  ).trim() || normalized;
+}
+function moveLeadingHouseNumberForCache(value) {
+  const parts = normalizeAddressText(value).split(",").map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2) return value;
+  if (!/^\d+[a-zA-Z]?$/.test(parts[0]) || !/[a-zA-ZÀ-ÿ]/.test(parts[1])) {
+    return value;
+  }
+  return [parts[1], parts[0], ...parts.slice(2)].join(", ");
+}
+function getEquivalentAddressCacheKeys(value) {
+  const normalized = normalizeAddressText(value);
+  const withoutComplement = stripAddressComplementForCache(normalized);
+  const candidates = [
+    normalized,
+    withoutComplement,
+    normalized.replace(/,\s*brasil$/i, ""),
+    withoutComplement.replace(/,\s*brasil$/i, ""),
+    moveLeadingHouseNumberForCache(normalized),
+    moveLeadingHouseNumberForCache(withoutComplement)
+  ];
+  return Array.from(
+    new Set(
+      candidates.map(normalizeAddressForCache).filter((key) => key.length >= 4)
+    )
+  );
+}
+
+// server/_core/geocodingProxy.ts
 var NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 var CACHE_TTL_MS = 24 * 60 * 60 * 1e3;
 var databaseCacheTtlDays = Number(process.env.GEOCODING_DATABASE_CACHE_TTL_DAYS);
@@ -3467,6 +3532,46 @@ var inFlightSearches = /* @__PURE__ */ new Map();
 var lastExternalSearchAt = 0;
 function normalizeSearchQuery(query) {
   return query.replace(/\s+/g, " ").trim();
+}
+function getSearchCacheKey(query, limit) {
+  const normalized = normalizeAddressForCache(query) || query.toLowerCase();
+  return `${normalized}|${limit}`;
+}
+function getRememberCacheKeys(address, limit) {
+  const keys = getEquivalentAddressCacheKeys(address);
+  return (keys.length > 0 ? keys : [normalizeAddressForCache(address)]).map(
+    (key) => `${key}|${limit}`
+  );
+}
+function readPositiveHeaderNumber(req, name) {
+  const raw = req.headers[name.toLowerCase()];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const number = Math.trunc(Number(value || 0));
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+async function recordClientCacheMetrics(req) {
+  const hits = readPositiveHeaderNumber(
+    req,
+    "X-EconoRotas-Geocoding-Local-Hits"
+  );
+  const misses = readPositiveHeaderNumber(
+    req,
+    "X-EconoRotas-Geocoding-Local-Misses"
+  );
+  if (hits <= 0 && misses <= 0) return;
+  await createOperationalEvent({
+    type: "geocoding_cache_client_metrics",
+    severity: "info",
+    source: "geocoding.cache",
+    title: "Metricas de cache local de enderecos",
+    message: `${hits} hit(s) local(is), ${misses} miss(es) local(is).`,
+    metadata: {
+      geocoding_cache_hit_local: hits,
+      geocoding_cache_miss_local: misses
+    }
+  }).catch((error) => {
+    console.warn("[Geocoding] Failed to record local cache metrics:", error);
+  });
 }
 function isCoordinateInBrazil(latitude, longitude) {
   return latitude >= -34 && latitude <= 6 && longitude >= -74 && longitude <= -34;
@@ -3629,7 +3734,8 @@ function registerGeocodingProxy(app2) {
       res.json([]);
       return;
     }
-    const cacheKey = `${q.toLowerCase()}|${limit}`;
+    await recordClientCacheMetrics(req);
+    const cacheKey = getSearchCacheKey(q, limit);
     const cached = await getCached(cacheKey);
     if (cached) {
       res.setHeader("X-EconoRotas-Geocoding-Cache", "hit");
@@ -3717,8 +3823,10 @@ function registerGeocodingProxy(app2) {
       userId: user.id
     });
     await Promise.all(
-      [1, 6].map(
-        (limit) => setCached(`${address.toLowerCase()}|${limit}`, [result])
+      [1, 6].flatMap(
+        (limit) => getRememberCacheKeys(address, limit).map(
+          (cacheKey) => setCached(cacheKey, [result])
+        )
       )
     );
     res.json({

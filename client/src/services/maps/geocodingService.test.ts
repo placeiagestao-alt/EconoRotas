@@ -12,7 +12,7 @@ beforeEach(() => {
 
   Object.defineProperty(globalThis, "window", {
     value: {
-      setTimeout,
+      setTimeout: vi.fn(() => 0),
       clearTimeout,
       localStorage: {
         getItem: (key: string) => memory.get(key) ?? null,
@@ -31,15 +31,13 @@ describe("geocodingService", () => {
       -51.4
     );
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
+    const fetchMock = vi.fn(async () =>
         new Response(JSON.stringify([]), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         })
-      )
     );
+    vi.stubGlobal("fetch", fetchMock);
 
     const results = await searchAddress(
       "Rua Teste, 123, Centro, Presidente Prudente, SP"
@@ -50,6 +48,7 @@ describe("geocodingService", () => {
       longitude: -51.4,
       type: "saved",
     });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("returns remembered coordinates for equivalent address variations", async () => {
@@ -64,15 +63,13 @@ describe("geocodingService", () => {
       }
     );
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
+    const fetchMock = vi.fn(async () =>
         new Response(JSON.stringify([]), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         })
-      )
     );
+    vi.stubGlobal("fetch", fetchMock);
 
     const results = await searchAddress(
       "R. Teste, 123, Centro, Presidente Prudente, SP"
@@ -85,6 +82,36 @@ describe("geocodingService", () => {
       geocodingConfidenceScore: 95,
       geocodingMethod: "exact_address",
     });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the external geocoder flow when local memory misses", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify([
+          {
+            place_id: 99,
+            lat: "-22.13",
+            lon: "-51.41",
+            display_name: "Rua Nova, 456, Centro, Presidente Prudente, Sao Paulo",
+            address: {
+              road: "Rua Nova",
+              house_number: "456",
+              suburb: "Centro",
+              city: "Presidente Prudente",
+              state: "Sao Paulo",
+            },
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const results = await searchAddress("Rua Nova, 456, Presidente Prudente, SP");
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(results[0]?.id).toBe("99");
   });
 
   it("tries cleaned fallback queries when the first query has no result", async () => {

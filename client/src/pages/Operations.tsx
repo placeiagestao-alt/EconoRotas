@@ -90,6 +90,7 @@ export default function Operations() {
   const data = dashboardQuery.data;
   const stats = data?.stats;
   const routeMetrics = (data as any)?.routeMetrics;
+  const geocodingCache = (data as any)?.geocodingCache;
 
   return (
     <DashboardLayout>
@@ -167,6 +168,22 @@ export default function Operations() {
                   value={Math.round(routeMetrics?.geocodingConfidence?.suspiciousStopRate ?? 0)}
                   suffix="%"
                   icon={Gauge}
+                />
+                <StatCard
+                  title="Cache local"
+                  value={Math.round(geocodingCache?.localReuseRate ?? 0)}
+                  suffix="%"
+                  icon={ShieldCheck}
+                />
+                <StatCard
+                  title="Hits endereço"
+                  value={geocodingCache?.localHits ?? 0}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Misses endereço"
+                  value={geocodingCache?.localMisses ?? 0}
+                  icon={AlertTriangle}
                 />
                 <StatCard
                   title="Retrabalho regional"

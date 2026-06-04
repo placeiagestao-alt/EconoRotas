@@ -2553,6 +2553,25 @@ function buildRouteQualityDashboardFromMetrics(
   };
 }
 
+function buildGeocodingCacheDashboard(events: any[]) {
+  let localHits = 0;
+  let localMisses = 0;
+
+  for (const event of events) {
+    if (event.type !== "geocoding_cache_client_metrics") continue;
+    const metadata = parseOperationalMetadata(event.metadata);
+    localHits += Number(metadata.geocoding_cache_hit_local || 0);
+    localMisses += Number(metadata.geocoding_cache_miss_local || 0);
+  }
+
+  const total = localHits + localMisses;
+  return {
+    localHits,
+    localMisses,
+    localReuseRate: roundMetric(metricPercent(localHits, total)),
+  };
+}
+
 export async function getAdminOperationalDashboard() {
   const db = await getDb();
   if (!db) {
@@ -2576,6 +2595,7 @@ export async function getAdminOperationalDashboard() {
         routeMetrics,
         buildRouteQualityDashboard(events.slice(0, 200))
       );
+      const geocodingCache = buildGeocodingCacheDashboard(events.slice(0, 500));
 
       return {
         stats: {
@@ -2603,6 +2623,7 @@ export async function getAdminOperationalDashboard() {
         },
         routeQuality,
         routeMetrics,
+        geocodingCache,
         recentUsers,
         recentRoutes,
         recentEvents: events.slice(0, 12),
@@ -2655,6 +2676,7 @@ export async function getAdminOperationalDashboard() {
     routeMetricsSummary,
     buildRouteQualityDashboard(recentOperationalEvents)
   );
+  const geocodingCache = buildGeocodingCacheDashboard(recentOperationalEvents);
 
   const recentUsers = await db
     .select({
@@ -2700,6 +2722,7 @@ export async function getAdminOperationalDashboard() {
     },
     routeQuality,
     routeMetrics: routeMetricsSummary,
+    geocodingCache,
     recentUsers,
     recentRoutes,
     recentEvents: recentOperationalEvents.slice(0, 12),
