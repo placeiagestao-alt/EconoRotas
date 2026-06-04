@@ -573,59 +573,6 @@ export default function CreateRoute() {
     return Array.from(new Set(candidates));
   };
 
-  const getAddressDistrict = (address: string) => {
-    const parts = getAddressParts(address);
-    return parts.length >= 5 ? normalizeAddressToken(parts[2]) : "";
-  };
-
-  const getAddressCity = (address: string) => {
-    const parts = getAddressParts(address);
-    return parts.length >= 5 ? normalizeAddressToken(parts[3]) : "";
-  };
-
-  const getStableCoordinateOffset = (address: string) => {
-    const hash = Array.from(address).reduce(
-      (value, char) => (value * 31 + char.charCodeAt(0)) % 9973,
-      7
-    );
-    const angle = ((hash % 360) * Math.PI) / 180;
-    const radius = 0.00025 + (hash % 9) * 0.00003;
-
-    return {
-      latitude: Math.sin(angle) * radius,
-      longitude: Math.cos(angle) * radius,
-    };
-  };
-
-  const getApproximateCoordinateFromRoute = (
-    stop: RouteStop,
-    routeStops: RouteStop[]
-  ) => {
-    const district = getAddressDistrict(stop.address);
-    const city = getAddressCity(stop.address);
-    const candidates = routeStops.filter((candidate) => {
-      if (!hasValidCoordinates(candidate)) return false;
-      if (district && getAddressDistrict(candidate.address) === district) return true;
-      return Boolean(city && getAddressCity(candidate.address) === city);
-    });
-
-    if (candidates.length === 0) return undefined;
-
-    const base = candidates.reduce(
-      (acc, candidate) => ({
-        latitude: acc.latitude + candidate.latitude,
-        longitude: acc.longitude + candidate.longitude,
-      }),
-      { latitude: 0, longitude: 0 }
-    );
-    const offset = getStableCoordinateOffset(stop.address);
-
-    return {
-      latitude: base.latitude / candidates.length + offset.latitude,
-      longitude: base.longitude / candidates.length + offset.longitude,
-    };
-  };
-
   const searchFirstAddressMatch = async (
     address: string,
     maxCandidates = MAX_BATCH_GEOCODE_CANDIDATES
@@ -661,7 +608,6 @@ export default function CreateRoute() {
   const resolveMissingCoordinates = async (routeStops: RouteStop[]) => {
     const resolvedStops: RouteStop[] = [];
     let resolvedCount = 0;
-    let approximateCount = 0;
     const totalToResolve = routeStops.filter((stop) => !hasValidCoordinates(stop)).length;
     let attemptedCount = 0;
 
@@ -724,29 +670,9 @@ export default function CreateRoute() {
       }
     }
 
-    const stillUnresolvedIndexes = resolvedStops
-      .map((stop, index) => (hasValidCoordinates(stop) ? -1 : index))
-      .filter((index) => index >= 0);
+    const unresolvedCount = resolvedStops.filter((stop) => !hasValidCoordinates(stop)).length;
 
-    for (const index of stillUnresolvedIndexes) {
-      const stop = resolvedStops[index];
-      const approximateCoordinate = getApproximateCoordinateFromRoute(stop, resolvedStops);
-
-      if (!approximateCoordinate) continue;
-
-      resolvedStops[index] = {
-        ...stop,
-        latitude: approximateCoordinate.latitude,
-        longitude: approximateCoordinate.longitude,
-        notes: [stop.notes, "Coordenada aproximada pelo bairro para ordenar a rota."]
-          .filter(Boolean)
-          .join(" | "),
-      };
-      resolvedCount += 1;
-      approximateCount += 1;
-    }
-
-    return { resolvedStops, resolvedCount, approximateCount };
+    return { resolvedStops, resolvedCount, unresolvedCount };
   };
 
   const resolveOptionalPoint = async (point: RoutePoint) => {
@@ -1393,9 +1319,9 @@ export default function CreateRoute() {
           toast.success(`${result.resolvedCount} parada(s) localizada(s).`);
         }
 
-        if (result.approximateCount > 0) {
+        if (result.unresolvedCount > 0) {
           toast.warning(
-            `${result.approximateCount} parada(s) sem coordenada exata foram posicionadas pelo bairro. O Maps/Waze continuará recebendo o endereço completo.`
+            `${result.unresolvedCount} parada(s) ainda precisam de correção manual antes da otimização.`
           );
         }
       } catch (error: any) {
