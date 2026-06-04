@@ -16,6 +16,7 @@ import {
   userIntegrations,
   operationalEvents,
   routeMetrics,
+  geocodeCache,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -46,6 +47,7 @@ const memory = {
   userIntegrations: [] as any[],
   operationalEvents: [] as any[],
   routeMetrics: [] as any[],
+  geocodeCache: [] as any[],
   ids: {
     users: 1,
     routes: 1,
@@ -56,6 +58,7 @@ const memory = {
     userIntegrations: 1,
     operationalEvents: 1,
     routeMetrics: 1,
+    geocodeCache: 1,
   },
 };
 
@@ -114,6 +117,7 @@ function hydrateMemory(data: any) {
   memory.userIntegrations = Array.isArray(data.userIntegrations) ? data.userIntegrations : [];
   memory.operationalEvents = Array.isArray(data.operationalEvents) ? data.operationalEvents : [];
   memory.routeMetrics = Array.isArray(data.routeMetrics) ? data.routeMetrics : [];
+  memory.geocodeCache = Array.isArray(data.geocodeCache) ? data.geocodeCache : [];
   memory.ids = {
     users: Number(data.ids?.users) || 1,
     routes: Number(data.ids?.routes) || 1,
@@ -124,6 +128,7 @@ function hydrateMemory(data: any) {
     userIntegrations: Number(data.ids?.userIntegrations) || 1,
     operationalEvents: Number(data.ids?.operationalEvents) || 1,
     routeMetrics: Number(data.ids?.routeMetrics) || 1,
+    geocodeCache: Number(data.ids?.geocodeCache) || 1,
   };
 }
 
@@ -201,6 +206,141 @@ export async function setPersistentValue(key: string, value: string) {
   const filePath = getLocalKvPath(redisKey);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, value, "utf8");
+}
+
+// ==================== GEOCODING CACHE ====================
+
+export type GeocodeCacheHit = {
+  cacheKey: string;
+  query: string;
+  provider: string;
+  resultCount: number;
+  results: unknown;
+  expiresAt: Date | string;
+};
+
+function parseGeocodeResults(value: unknown) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+export async function getGeocodeCache(cacheKey: string): Promise<GeocodeCacheHit | null> {
+  const now = new Date();
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cached = memory.geocodeCache.find(
+        (item) => item.cacheKey === cacheKey && new Date(item.expiresAt) > now
+      );
+      if (!cached) return null;
+      cached.hitCount = Number(cached.hitCount || 0) + 1;
+      await persistFallbackDb();
+      return {
+        cacheKey: cached.cacheKey,
+        query: cached.query,
+        provider: cached.provider,
+        resultCount: Number(cached.resultCount || 0),
+        results: parseGeocodeResults(cached.results),
+        expiresAt: cached.expiresAt,
+      };
+    }
+    return null;
+  }
+
+  const rows = await db
+    .select()
+    .from(geocodeCache)
+    .where(and(eq(geocodeCache.cacheKey, cacheKey), gte(geocodeCache.expiresAt, now)))
+    .limit(1);
+  const cached = rows[0];
+  if (!cached) return null;
+
+  await db
+    .update(geocodeCache)
+    .set({ hitCount: sql`${geocodeCache.hitCount} + 1` } as any)
+    .where(eq(geocodeCache.id, cached.id))
+    .catch((error: unknown) => {
+      console.warn("[Geocoding] Failed to increment cache hit count:", error);
+    });
+
+  return {
+    cacheKey: cached.cacheKey,
+    query: cached.query,
+    provider: cached.provider,
+    resultCount: Number(cached.resultCount || 0),
+    results: parseGeocodeResults(cached.results),
+    expiresAt: cached.expiresAt,
+  };
+}
+
+export async function setGeocodeCache(data: {
+  cacheKey: string;
+  query: string;
+  provider?: string;
+  results: unknown;
+  expiresAt: Date;
+}) {
+  const results = Array.isArray(data.results) ? data.results : [];
+  const payload = {
+    cacheKey: data.cacheKey.slice(0, 191),
+    query: data.query.slice(0, 700),
+    provider: (data.provider || "nominatim").slice(0, 64),
+    resultCount: results.length,
+    results,
+    expiresAt: data.expiresAt,
+  };
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existingIndex = memory.geocodeCache.findIndex(
+        (item) => item.cacheKey === payload.cacheKey
+      );
+      const next = {
+        id:
+          existingIndex >= 0
+            ? memory.geocodeCache[existingIndex].id
+            : memory.ids.geocodeCache++,
+        ...payload,
+        hitCount:
+          existingIndex >= 0
+            ? Number(memory.geocodeCache[existingIndex].hitCount || 0)
+            : 0,
+        createdAt:
+          existingIndex >= 0
+            ? memory.geocodeCache[existingIndex].createdAt
+            : new Date(),
+        updatedAt: new Date(),
+      };
+
+      if (existingIndex >= 0) {
+        memory.geocodeCache[existingIndex] = next;
+      } else {
+        memory.geocodeCache.push(next);
+      }
+      await persistFallbackDb();
+    }
+    return;
+  }
+
+  await db
+    .insert(geocodeCache)
+    .values(payload as any)
+    .onDuplicateKeyUpdate({
+      set: {
+        query: payload.query,
+        provider: payload.provider,
+        resultCount: payload.resultCount,
+        results: payload.results,
+        expiresAt: payload.expiresAt,
+        updatedAt: sql`CURRENT_TIMESTAMP`,
+      } as any,
+    });
 }
 
 async function loadRemoteDb() {
@@ -382,6 +522,9 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["route_metrics", "optimizationRuntimeMs"],
   ["route_metrics", "osrmUsed"],
   ["route_metrics", "issuesCorrectedCount"],
+  ["geocode_cache", "cacheKey"],
+  ["geocode_cache", "results"],
+  ["geocode_cache", "expiresAt"],
 ] as const;
 
 async function getDatabaseSchemaHealth() {

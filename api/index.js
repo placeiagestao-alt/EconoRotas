@@ -11,7 +11,7 @@ var __export = (target, all) => {
 // drizzle/schema.ts
 import { decimal, int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, json, foreignKey, uniqueIndex, index } from "drizzle-orm/mysql-core";
 import { relations } from "drizzle-orm";
-var users, routes, stops, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, routeMetrics, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations, routeMetricsRelations;
+var users, routes, stops, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, routeMetrics, geocodeCache, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations, routeMetricsRelations;
 var init_schema = __esm({
   "drizzle/schema.ts"() {
     "use strict";
@@ -208,6 +208,21 @@ var init_schema = __esm({
       auditStatusIdx: index("route_metrics_auditStatus_idx").on(table.auditStatus),
       osrmFallbackIdx: index("route_metrics_osrmFallback_idx").on(table.osrmFallback)
     }));
+    geocodeCache = mysqlTable("geocode_cache", {
+      id: int("id").autoincrement().primaryKey(),
+      cacheKey: varchar("cacheKey", { length: 191 }).notNull(),
+      query: varchar("query", { length: 700 }).notNull(),
+      provider: varchar("provider", { length: 64 }).default("nominatim").notNull(),
+      resultCount: int("resultCount").default(0).notNull(),
+      results: json("results").notNull(),
+      hitCount: int("hitCount").default(0).notNull(),
+      expiresAt: timestamp("expiresAt").notNull(),
+      createdAt: timestamp("createdAt").defaultNow().notNull(),
+      updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull()
+    }, (table) => ({
+      cacheKeyUnique: uniqueIndex("geocode_cache_cacheKey_unique").on(table.cacheKey),
+      expiresAtIdx: index("geocode_cache_expiresAt_idx").on(table.expiresAt)
+    }));
     usersRelations = relations(users, ({ many }) => ({
       routes: many(routes),
       routeSchedules: many(routeSchedules),
@@ -374,6 +389,7 @@ function hydrateMemory(data) {
   memory.userIntegrations = Array.isArray(data.userIntegrations) ? data.userIntegrations : [];
   memory.operationalEvents = Array.isArray(data.operationalEvents) ? data.operationalEvents : [];
   memory.routeMetrics = Array.isArray(data.routeMetrics) ? data.routeMetrics : [];
+  memory.geocodeCache = Array.isArray(data.geocodeCache) ? data.geocodeCache : [];
   memory.ids = {
     users: Number(data.ids?.users) || 1,
     routes: Number(data.ids?.routes) || 1,
@@ -383,7 +399,8 @@ function hydrateMemory(data) {
     chatHistory: Number(data.ids?.chatHistory) || 1,
     userIntegrations: Number(data.ids?.userIntegrations) || 1,
     operationalEvents: Number(data.ids?.operationalEvents) || 1,
-    routeMetrics: Number(data.ids?.routeMetrics) || 1
+    routeMetrics: Number(data.ids?.routeMetrics) || 1,
+    geocodeCache: Number(data.ids?.geocodeCache) || 1
   };
 }
 function loadLocalDb() {
@@ -443,6 +460,94 @@ async function setPersistentValue(key, value) {
   const filePath = getLocalKvPath(redisKey);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, value, "utf8");
+}
+function parseGeocodeResults(value) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+async function getGeocodeCache(cacheKey) {
+  const now = /* @__PURE__ */ new Date();
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cached2 = memory.geocodeCache.find(
+        (item) => item.cacheKey === cacheKey && new Date(item.expiresAt) > now
+      );
+      if (!cached2) return null;
+      cached2.hitCount = Number(cached2.hitCount || 0) + 1;
+      await persistFallbackDb();
+      return {
+        cacheKey: cached2.cacheKey,
+        query: cached2.query,
+        provider: cached2.provider,
+        resultCount: Number(cached2.resultCount || 0),
+        results: parseGeocodeResults(cached2.results),
+        expiresAt: cached2.expiresAt
+      };
+    }
+    return null;
+  }
+  const rows = await db.select().from(geocodeCache).where(and(eq(geocodeCache.cacheKey, cacheKey), gte(geocodeCache.expiresAt, now))).limit(1);
+  const cached = rows[0];
+  if (!cached) return null;
+  await db.update(geocodeCache).set({ hitCount: sql`${geocodeCache.hitCount} + 1` }).where(eq(geocodeCache.id, cached.id)).catch((error) => {
+    console.warn("[Geocoding] Failed to increment cache hit count:", error);
+  });
+  return {
+    cacheKey: cached.cacheKey,
+    query: cached.query,
+    provider: cached.provider,
+    resultCount: Number(cached.resultCount || 0),
+    results: parseGeocodeResults(cached.results),
+    expiresAt: cached.expiresAt
+  };
+}
+async function setGeocodeCache(data) {
+  const results = Array.isArray(data.results) ? data.results : [];
+  const payload = {
+    cacheKey: data.cacheKey.slice(0, 191),
+    query: data.query.slice(0, 700),
+    provider: (data.provider || "nominatim").slice(0, 64),
+    resultCount: results.length,
+    results,
+    expiresAt: data.expiresAt
+  };
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existingIndex = memory.geocodeCache.findIndex(
+        (item) => item.cacheKey === payload.cacheKey
+      );
+      const next = {
+        id: existingIndex >= 0 ? memory.geocodeCache[existingIndex].id : memory.ids.geocodeCache++,
+        ...payload,
+        hitCount: existingIndex >= 0 ? Number(memory.geocodeCache[existingIndex].hitCount || 0) : 0,
+        createdAt: existingIndex >= 0 ? memory.geocodeCache[existingIndex].createdAt : /* @__PURE__ */ new Date(),
+        updatedAt: /* @__PURE__ */ new Date()
+      };
+      if (existingIndex >= 0) {
+        memory.geocodeCache[existingIndex] = next;
+      } else {
+        memory.geocodeCache.push(next);
+      }
+      await persistFallbackDb();
+    }
+    return;
+  }
+  await db.insert(geocodeCache).values(payload).onDuplicateKeyUpdate({
+    set: {
+      query: payload.query,
+      provider: payload.provider,
+      resultCount: payload.resultCount,
+      results: payload.results,
+      expiresAt: payload.expiresAt,
+      updatedAt: sql`CURRENT_TIMESTAMP`
+    }
+  });
 }
 async function loadRemoteDb() {
   if (remoteDbLoaded) return;
@@ -2161,6 +2266,7 @@ var init_db = __esm({
       userIntegrations: [],
       operationalEvents: [],
       routeMetrics: [],
+      geocodeCache: [],
       ids: {
         users: 1,
         routes: 1,
@@ -2170,7 +2276,8 @@ var init_db = __esm({
         chatHistory: 1,
         userIntegrations: 1,
         operationalEvents: 1,
-        routeMetrics: 1
+        routeMetrics: 1,
+        geocodeCache: 1
       }
     };
     REQUIRED_SCHEMA_COLUMNS = [
@@ -2189,7 +2296,10 @@ var init_db = __esm({
       ["route_metrics", "qualityScore"],
       ["route_metrics", "optimizationRuntimeMs"],
       ["route_metrics", "osrmUsed"],
-      ["route_metrics", "issuesCorrectedCount"]
+      ["route_metrics", "issuesCorrectedCount"],
+      ["geocode_cache", "cacheKey"],
+      ["geocode_cache", "results"],
+      ["geocode_cache", "expiresAt"]
     ];
   }
 });
@@ -3158,8 +3268,14 @@ function registerStorageProxy(app2) {
 
 // server/_core/geocodingProxy.ts
 init_db();
+import { createHash } from "node:crypto";
 var NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 var CACHE_TTL_MS = 24 * 60 * 60 * 1e3;
+var databaseCacheTtlDays = Number(process.env.GEOCODING_DATABASE_CACHE_TTL_DAYS);
+var DATABASE_CACHE_TTL_MS = Math.max(
+  CACHE_TTL_MS,
+  (Number.isFinite(databaseCacheTtlDays) && databaseCacheTtlDays > 0 ? databaseCacheTtlDays : 30) * 24 * 60 * 60 * 1e3
+);
 var RATE_LIMIT_WINDOW_MS = 60 * 1e3;
 var RATE_LIMIT_MAX_REQUESTS = Math.max(
   1,
@@ -3178,6 +3294,9 @@ function getNominatimUserAgent() {
 }
 function getPersistentCacheKey(cacheKey) {
   return `geocoding:${Buffer.from(cacheKey).toString("base64url")}`;
+}
+function getDatabaseCacheKey(cacheKey) {
+  return createHash("sha256").update(cacheKey).digest("hex");
 }
 async function waitForExternalSearchSlot() {
   if (EXTERNAL_MIN_INTERVAL_MS <= 0) return;
@@ -3200,6 +3319,16 @@ async function getCached(cacheKey) {
     }
     cache.delete(cacheKey);
   }
+  const databaseCached = await getGeocodeCache(getDatabaseCacheKey(cacheKey)).catch(
+    (error) => {
+      console.warn("[Geocoding] Failed to read database cache:", error);
+      return null;
+    }
+  );
+  if (databaseCached) {
+    setMemoryCache(cacheKey, databaseCached.results);
+    return databaseCached.results;
+  }
   const persistentValue = await getPersistentValue(getPersistentCacheKey(cacheKey));
   if (!persistentValue) return void 0;
   try {
@@ -3213,6 +3342,15 @@ async function getCached(cacheKey) {
 }
 async function setCached(cacheKey, data) {
   setMemoryCache(cacheKey, data);
+  await setGeocodeCache({
+    cacheKey: getDatabaseCacheKey(cacheKey),
+    query: cacheKey,
+    provider: "nominatim",
+    results: Array.isArray(data) ? data : [],
+    expiresAt: new Date(Date.now() + DATABASE_CACHE_TTL_MS)
+  }).catch((error) => {
+    console.warn("[Geocoding] Failed to persist database cache:", error);
+  });
   await setPersistentValue(
     getPersistentCacheKey(cacheKey),
     JSON.stringify({ data, expiresAt: Date.now() + CACHE_TTL_MS })
@@ -3490,7 +3628,7 @@ import { TRPCError as TRPCError3 } from "@trpc/server";
 import { z as z2 } from "zod";
 
 // server/passwordAuth.ts
-import { randomBytes as randomBytes2, scrypt as scryptCallback, timingSafeEqual, createHash } from "node:crypto";
+import { randomBytes as randomBytes2, scrypt as scryptCallback, timingSafeEqual, createHash as createHash2 } from "node:crypto";
 import { promisify } from "node:util";
 var scrypt = promisify(scryptCallback);
 var KEY_LENGTH = 64;
@@ -3499,7 +3637,7 @@ function normalizeEmail2(email) {
   return email.trim().toLowerCase();
 }
 function buildPasswordOpenId(email) {
-  const digest = createHash("sha256").update(normalizeEmail2(email)).digest("hex");
+  const digest = createHash2("sha256").update(normalizeEmail2(email)).digest("hex");
   return `pwd_${digest.slice(0, 60)}`;
 }
 async function hashPassword(password) {

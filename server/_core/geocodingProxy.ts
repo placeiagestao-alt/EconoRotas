@@ -1,8 +1,25 @@
 import type { Express, Request } from "express";
-import { getPersistentValue, setPersistentValue } from "../db";
+import { createHash } from "node:crypto";
+import {
+  getGeocodeCache,
+  getPersistentValue,
+  setGeocodeCache,
+  setPersistentValue,
+} from "../db";
 
 const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const databaseCacheTtlDays = Number(process.env.GEOCODING_DATABASE_CACHE_TTL_DAYS);
+const DATABASE_CACHE_TTL_MS = Math.max(
+  CACHE_TTL_MS,
+  (Number.isFinite(databaseCacheTtlDays) && databaseCacheTtlDays > 0
+    ? databaseCacheTtlDays
+    : 30) *
+    24 *
+    60 *
+    60 *
+    1000
+);
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = Math.max(
   1,
@@ -27,6 +44,10 @@ function getNominatimUserAgent() {
 
 function getPersistentCacheKey(cacheKey: string) {
   return `geocoding:${Buffer.from(cacheKey).toString("base64url")}`;
+}
+
+function getDatabaseCacheKey(cacheKey: string) {
+  return createHash("sha256").update(cacheKey).digest("hex");
 }
 
 async function waitForExternalSearchSlot() {
@@ -55,6 +76,17 @@ async function getCached(cacheKey: string) {
     cache.delete(cacheKey);
   }
 
+  const databaseCached = await getGeocodeCache(getDatabaseCacheKey(cacheKey)).catch(
+    (error) => {
+      console.warn("[Geocoding] Failed to read database cache:", error);
+      return null;
+    }
+  );
+  if (databaseCached) {
+    setMemoryCache(cacheKey, databaseCached.results);
+    return databaseCached.results;
+  }
+
   const persistentValue = await getPersistentValue(getPersistentCacheKey(cacheKey));
   if (!persistentValue) return undefined;
 
@@ -71,6 +103,16 @@ async function getCached(cacheKey: string) {
 
 async function setCached(cacheKey: string, data: unknown) {
   setMemoryCache(cacheKey, data);
+
+  await setGeocodeCache({
+    cacheKey: getDatabaseCacheKey(cacheKey),
+    query: cacheKey,
+    provider: "nominatim",
+    results: Array.isArray(data) ? data : [],
+    expiresAt: new Date(Date.now() + DATABASE_CACHE_TTL_MS),
+  }).catch((error) => {
+    console.warn("[Geocoding] Failed to persist database cache:", error);
+  });
 
   await setPersistentValue(
     getPersistentCacheKey(cacheKey),

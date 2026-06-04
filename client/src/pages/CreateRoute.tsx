@@ -32,6 +32,11 @@ import { getCurrentPosition } from "@/services/maps/locationService";
 import { cn } from "@/lib/utils";
 import { buildApiUrl } from "@/lib/apiBase";
 import { saveLastRouteProgress } from "@/lib/routeProgress";
+import {
+  applyEditedVoiceStop,
+  applyFinalVoiceStop,
+  parseVoiceStop,
+} from "./createRouteVoiceStops";
 
 type ImileCapturePlugin = {
   openAccessibilitySettings: () => Promise<void>;
@@ -118,35 +123,6 @@ function toDateInputValue(date: Date) {
 function getSpeechRecognitionConstructor() {
   if (typeof window === "undefined") return undefined;
   return window.SpeechRecognition || window.webkitSpeechRecognition;
-}
-
-function parseVoiceStop(rawTranscript: string) {
-  let text = rawTranscript
-    .normalize("NFC")
-    .replace(/[.!?;]+$/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  const packageMatch = text.match(/\b(?:pacote|entrega)\s+([a-z0-9._-]+)\b/i);
-  const packageNumber = packageMatch?.[1];
-
-  text = text
-    .replace(/\b(?:nova\s+parada|novo\s+endereco|novo\s+endereço|adicionar\s+parada)\b/gi, "")
-    .replace(/\b(?:entrega|parada|endereco|endereço)\s+(?:na|no|em)\b/gi, "")
-    .replace(/\bpacote\s+[a-z0-9._-]+\b/gi, "")
-    .replace(/\bnumero\b/gi, "número")
-    .replace(/\s+número\s+/gi, ", ")
-    .replace(/\s+bairro\s+/gi, ", bairro ")
-    .replace(/\s+cidade\s+/gi, ", ")
-    .replace(/\s+/g, " ")
-    .replace(/\s+,/g, ",")
-    .replace(/,\s*,/g, ",")
-    .trim();
-
-  return {
-    address: text,
-    packageNumber,
-  };
 }
 
 function isNetworkFetchError(error: unknown) {
@@ -837,35 +813,13 @@ export default function CreateRoute() {
     setInvalidStopIndexes([]);
     setRespectImportedStopSequence(false);
     setStops((currentStops) => {
-      const replacementIndex = pendingVoiceStopIndexRef.current;
-      const nextStop: RouteStop = {
-        address: parsed.address,
-        latitude: 0,
-        longitude: 0,
-        packageNumber: parsed.packageNumber,
-        notes: `Inserido por voz: ${rawTranscript.trim()}`,
-      };
-
-      if (
-        replacementIndex !== null &&
-        replacementIndex >= 0 &&
-        replacementIndex < currentStops.length
-      ) {
-        updatePendingVoiceStopIndex(replacementIndex);
-        return currentStops.map((stop, index) =>
-          index === replacementIndex ? { ...stop, ...nextStop } : stop
-        );
-      }
-
-      const emptyIndex = currentStops.findIndex((stop) => !stop.address.trim());
-
-      if (emptyIndex >= 0) {
-        updatePendingVoiceStopIndex(emptyIndex);
-        return currentStops.map((stop, index) => (index === emptyIndex ? nextStop : stop));
-      }
-
-      updatePendingVoiceStopIndex(currentStops.length);
-      return [...currentStops, nextStop];
+      const result = applyFinalVoiceStop(
+        currentStops,
+        rawTranscript,
+        pendingVoiceStopIndexRef.current
+      );
+      updatePendingVoiceStopIndex(result.pendingVoiceStopIndex);
+      return result.stops;
     });
     setVoiceTranscript(parsed.address);
     void loadVoiceAddressSuggestions(parsed.address);
@@ -877,52 +831,27 @@ export default function CreateRoute() {
     setVoiceAddressSuggestions([]);
     setVoiceSuggestionError(null);
 
-    const normalizedAddress = address.trim();
-    if (normalizedAddress.length < 6) return;
-
     const voiceStopIndex = pendingVoiceStopIndexRef.current;
-    if (voiceStopIndex === null) {
+    if (voiceStopIndex === null && address.trim().length >= 6) {
       setInvalidStopIndexes([]);
       setRespectImportedStopSequence(false);
-      setStops((currentStops) => {
-        const emptyIndex = currentStops.findIndex((stop) => !stop.address.trim());
-        const targetIndex = emptyIndex >= 0 ? emptyIndex : currentStops.length;
-        updatePendingVoiceStopIndex(targetIndex);
-
-        const nextStop: RouteStop = {
-          address: normalizedAddress,
-          latitude: 0,
-          longitude: 0,
-          notes: "Inserido por voz com edicao manual",
-        };
-
-        if (emptyIndex >= 0) {
-          return currentStops.map((stop, index) =>
-            index === emptyIndex ? { ...stop, ...nextStop } : stop
-          );
-        }
-
-        return [...currentStops, nextStop];
-      });
-      return;
     }
 
-    setInvalidStopIndexes((current) =>
-      current.filter((item) => item !== voiceStopIndex)
-    );
-    setStops((currentStops) =>
-      currentStops.map((stop, index) =>
-        index === voiceStopIndex
-          ? {
-              ...stop,
-              address: normalizedAddress,
-              latitude: 0,
-              longitude: 0,
-              notes: stop.notes || "Inserido por voz com edicao manual",
-            }
-          : stop
-      )
-    );
+    if (voiceStopIndex !== null) {
+      setInvalidStopIndexes((current) =>
+        current.filter((item) => item !== voiceStopIndex)
+      );
+    }
+
+    setStops((currentStops) => {
+      const result = applyEditedVoiceStop(
+        currentStops,
+        address,
+        pendingVoiceStopIndexRef.current
+      );
+      updatePendingVoiceStopIndex(result.pendingVoiceStopIndex);
+      return result.stops;
+    });
   };
 
   const handleSearchEditedVoiceAddress = () => {

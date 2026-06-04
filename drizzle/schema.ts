@@ -254,6 +254,30 @@ export type RouteMetric = typeof routeMetrics.$inferSelect;
 export type InsertRouteMetric = typeof routeMetrics.$inferInsert;
 
 /**
+ * Geocode cache - shared address lookup memory for PWA, Android and site.
+ * Keeps corrected/known lookup results in the managed database so repeated
+ * addresses do not depend only on the external geocoder.
+ */
+export const geocodeCache = mysqlTable("geocode_cache", {
+  id: int("id").autoincrement().primaryKey(),
+  cacheKey: varchar("cacheKey", { length: 191 }).notNull(),
+  query: varchar("query", { length: 700 }).notNull(),
+  provider: varchar("provider", { length: 64 }).default("nominatim").notNull(),
+  resultCount: int("resultCount").default(0).notNull(),
+  results: json("results").notNull(),
+  hitCount: int("hitCount").default(0).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => ({
+  cacheKeyUnique: uniqueIndex("geocode_cache_cacheKey_unique").on(table.cacheKey),
+  expiresAtIdx: index("geocode_cache_expiresAt_idx").on(table.expiresAt),
+}));
+
+export type GeocodeCache = typeof geocodeCache.$inferSelect;
+export type InsertGeocodeCache = typeof geocodeCache.$inferInsert;
+
+/**
  * Relations
  */
 export const usersRelations = relations(users, ({ many }) => ({
