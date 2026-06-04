@@ -1215,6 +1215,48 @@ export default function CreateRoute() {
     toast.success(`${invalidIndexes.size} parada(s) com problema removida(s).`);
   };
 
+  const handleRelocateInvalidStops = async () => {
+    const issues = getStopIssues(stops);
+    const missingCoordinateIssues = issues.filter(
+      (issue) => issue.hasAddress && !issue.hasCoordinates
+    );
+
+    if (missingCoordinateIssues.length === 0) {
+      toast.message("Não há parada com endereço preenchido aguardando coordenada.");
+      return;
+    }
+
+    setIsResolvingCoordinates(true);
+    toast.message(
+      `Tentando localizar ${missingCoordinateIssues.length} parada(s) pendente(s)...`
+    );
+
+    try {
+      const result = await resolveMissingCoordinates(stops);
+      const nextIssues = getStopIssues(result.resolvedStops);
+
+      setStops(result.resolvedStops);
+      setInvalidStopIndexes(nextIssues.map((item) => item.index));
+
+      if (result.resolvedCount > 0) {
+        toast.success(`${result.resolvedCount} parada(s) localizada(s).`);
+      }
+
+      if (nextIssues.length > 0) {
+        toast.warning(
+          `${nextIssues.length} parada(s) ainda precisam de correção manual.`
+        );
+      } else {
+        toast.success("Todas as paradas pendentes foram localizadas.");
+      }
+    } catch (error: any) {
+      toast.error(error.message || "Não foi possível buscar as coordenadas.");
+    } finally {
+      setIsResolvingCoordinates(false);
+      setCoordinateResolveProgress(null);
+    }
+  };
+
   const invalidStopIssues = invalidStopIndexes
     .map((index) => {
       const stop = stops[index];
@@ -1931,6 +1973,15 @@ export default function CreateRoute() {
                       )}
                     </div>
                     <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="default"
+                        size="sm"
+                        onClick={handleRelocateInvalidStops}
+                        disabled={isResolvingCoordinates}
+                      >
+                        Tentar localizar novamente
+                      </Button>
                       <Button
                         type="button"
                         variant="outline"
