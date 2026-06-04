@@ -385,12 +385,36 @@ function reorderRouteByAuditIssue(
   }));
 }
 
-function assertRouteStopsReadyForOptimization(routeStops: any[]) {
+async function assertRouteStopsReadyForOptimization(
+  routeStops: any[],
+  context: { userId: number; routeId: number }
+) {
   const audit = auditRouteSequence(routeStopsToAuditableStops(routeStops));
   const blockingIssues = getBlockingAuditIssues(audit);
   if (blockingIssues.length === 0) return;
 
   const firstIssue = blockingIssues[0];
+  if (firstIssue.type === "low_geocoding_confidence") {
+    const issueMetadata = firstIssue as Record<string, unknown>;
+    await db.createOperationalEvent({
+      userId: context.userId,
+      routeId: context.routeId,
+      stopId: Number(issueMetadata.stopId) || null,
+      type: "geocoding_low_confidence",
+      severity: "warning",
+      source: "routes.optimize",
+      title: "Endereco com baixa confianca",
+      message: firstIssue.message,
+      metadata: {
+        issueType: firstIssue.type,
+        confidenceScore: issueMetadata.confidenceScore ?? null,
+        sequence: firstIssue.stopSequence ?? null,
+      },
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record low confidence event:", error);
+    });
+  }
+
   throw new TRPCError({
     code: "BAD_REQUEST",
     message: `${firstIssue.title}: ${firstIssue.message}`,
@@ -493,7 +517,7 @@ async function optimizeUserRoute(
     });
   }
 
-  assertRouteStopsReadyForOptimization(routeStops);
+  await assertRouteStopsReadyForOptimization(routeStops, { userId, routeId });
 
   const locations: Location[] = routeStops.map((stop: any) => ({
     latitude: parseFloat(String(stop.latitude ?? 0)),
@@ -1256,6 +1280,10 @@ export const appRouter = router({
       days: z.number().min(1).max(365).default(30),
     }))
       .query(({ input }) => db.getRouteMetricsDashboard(input.days)),
+    geocodingImpact: adminProcedure.query(() => db.getGeocodingImpactDashboard()),
+    geocodingExecutiveReport: adminProcedure.query(() =>
+      db.getGeocodingExecutiveReport()
+    ),
     events: adminProcedure.input(z.object({
       limit: z.number().min(1).max(200).default(100),
     }))
@@ -1597,6 +1625,11 @@ export const appRouter = router({
     update: protectedProcedure.input(stopUpdateSchema)
       .mutation(async ({ ctx, input }) => {
         await requireUserRoute(input.routeId, ctx.user.id);
+        const currentStops = await db.getRouteStops(input.routeId);
+        const currentStopRaw = currentStops.find(
+          (stop: any) => Number(stop.id) === Number(input.stopId)
+        );
+        const currentStop = currentStopRaw ? { ...currentStopRaw } : null;
         const updatedStop = await db.updateStop(input.routeId, input.stopId, {
           address: input.address.trim(),
           latitude: input.latitude,
@@ -1616,6 +1649,54 @@ export const appRouter = router({
         }
 
         await db.updateRoute(input.routeId, ctx.user.id, { status: "draft" });
+
+        if (currentStop) {
+          const previousAddress = String(currentStop.address || "").trim();
+          const nextAddress = String(updatedStop.address || "").trim();
+          const previousLatitude = Number(currentStop.latitude);
+          const previousLongitude = Number(currentStop.longitude);
+          const nextLatitude = Number(updatedStop.latitude);
+          const nextLongitude = Number(updatedStop.longitude);
+          const addressChanged = previousAddress !== nextAddress;
+          const coordinatesChanged =
+            Number.isFinite(previousLatitude) &&
+            Number.isFinite(previousLongitude) &&
+            Number.isFinite(nextLatitude) &&
+            Number.isFinite(nextLongitude) &&
+            (Math.abs(previousLatitude - nextLatitude) > 0.000001 ||
+              Math.abs(previousLongitude - nextLongitude) > 0.000001);
+
+          if (addressChanged || coordinatesChanged) {
+            await db.createAddressCorrection({
+              userId: ctx.user.id,
+              routeId: input.routeId,
+              stopId: input.stopId,
+              originalAddress: previousAddress || nextAddress,
+              correctedAddress: nextAddress || previousAddress,
+              latitude: Number.isFinite(nextLatitude) ? nextLatitude : null,
+              longitude: Number.isFinite(nextLongitude) ? nextLongitude : null,
+            });
+            await db.createOperationalEvent({
+              userId: ctx.user.id,
+              routeId: input.routeId,
+              stopId: input.stopId,
+              type: "geocoding_manual_correction",
+              severity: "info",
+              source: "stops.update",
+              title: "Correcao manual de endereco",
+              message: "Parada editada manualmente pelo usuario.",
+              metadata: {
+                provider_used: "manual",
+                addressChanged,
+                coordinatesChanged,
+                geocodingConfidenceScore:
+                  updatedStop.geocodingConfidenceScore ?? null,
+                geocodingMethod: updatedStop.geocodingMethod ?? null,
+              },
+            });
+          }
+        }
+
         return updatedStop;
       }),
     delete: protectedProcedure.input(z.object({

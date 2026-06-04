@@ -89,6 +89,49 @@ async function recordClientCacheMetrics(req: Request) {
   }).catch((error) => {
     console.warn("[Geocoding] Failed to record local cache metrics:", error);
   });
+
+  if (hits > 0) {
+    await recordGeocodingEvent({
+      type: "geocoding_cache_hit",
+      title: "Cache local reaproveitado",
+      message: `${hits} endereco(s) reaproveitado(s) no dispositivo.`,
+      metadata: {
+        provider_used: "cache_local",
+        geocoding_cache_hit_local: hits,
+      },
+    });
+  }
+
+  if (misses > 0) {
+    await recordGeocodingEvent({
+      type: "geocoding_cache_miss",
+      title: "Cache local sem correspondencia",
+      message: `${misses} endereco(s) precisaram consultar o backend.`,
+      metadata: {
+        provider_used: "cache_local",
+        geocoding_cache_miss_local: misses,
+      },
+    });
+  }
+}
+
+async function recordGeocodingEvent(data: {
+  type: "geocoding_cache_hit" | "geocoding_cache_miss" | "geocoding_provider_fallback";
+  title: string;
+  message: string;
+  severity?: "info" | "warning" | "error";
+  metadata: Record<string, unknown>;
+}) {
+  await createOperationalEvent({
+    type: data.type,
+    severity: data.severity ?? "info",
+    source: "geocoding.proxy",
+    title: data.title,
+    message: data.message,
+    metadata: data.metadata,
+  }).catch((error) => {
+    console.warn("[Geocoding] Failed to record geocoding event:", error);
+  });
 }
 
 function isCoordinateInBrazil(latitude: number, longitude: number) {
@@ -306,6 +349,17 @@ export function registerGeocodingProxy(app: Express) {
     const cached = await getCached(cacheKey);
 
     if (cached) {
+      await recordGeocodingEvent({
+        type: "geocoding_cache_hit",
+        title: "Cache global de endereco reaproveitado",
+        message: "Consulta atendida pelo cache compartilhado do backend.",
+        metadata: {
+          provider_used: "cache_backend",
+          geocoding_cache_hit_backend: 1,
+          queryLength: q.length,
+          resultCount: Array.isArray(cached) ? cached.length : 0,
+        },
+      });
       res.setHeader("X-EconoRotas-Geocoding-Cache", "hit");
       res.json(cached);
       return;
@@ -335,10 +389,33 @@ export function registerGeocodingProxy(app: Express) {
         `${NOMINATIM_SEARCH_URL}?${params.toString()}`
       );
       await setCached(cacheKey, data);
+      await recordGeocodingEvent({
+        type: "geocoding_cache_miss",
+        title: "Consulta externa de geocoding",
+        message: "Endereco consultado no provedor externo apos miss de cache.",
+        metadata: {
+          provider_used: "nominatim",
+          geocoding_cache_miss: 1,
+          queryLength: q.length,
+          resultCount: Array.isArray(data) ? data.length : 0,
+        },
+      });
       res.setHeader("X-EconoRotas-Geocoding-Cache", "miss");
       res.json(data);
     } catch (error) {
       const status = (error as Error & { status?: number }).status;
+      await recordGeocodingEvent({
+        type: "geocoding_provider_fallback",
+        severity: "warning",
+        title: "Falha no provedor de geocoding",
+        message: "Nominatim falhou e a consulta nao teve provedor alternativo configurado.",
+        metadata: {
+          provider_used: "nominatim",
+          fallbackProvider: null,
+          status: status ?? null,
+          error: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+        },
+      });
 
       if (status === 429) {
         res.setHeader(

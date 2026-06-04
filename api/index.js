@@ -11,7 +11,7 @@ var __export = (target, all) => {
 // drizzle/schema.ts
 import { decimal, int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, json, foreignKey, uniqueIndex, index } from "drizzle-orm/mysql-core";
 import { relations } from "drizzle-orm";
-var users, routes, stops, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, routeMetrics, geocodeCache, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations, routeMetricsRelations;
+var users, routes, stops, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, routeMetrics, geocodeCache, addressCorrections, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations, routeMetricsRelations, addressCorrectionsRelations;
 var init_schema = __esm({
   "drizzle/schema.ts"() {
     "use strict";
@@ -236,6 +236,26 @@ var init_schema = __esm({
       cacheKeyUnique: uniqueIndex("geocode_cache_cacheKey_unique").on(table.cacheKey),
       expiresAtIdx: index("geocode_cache_expiresAt_idx").on(table.expiresAt)
     }));
+    addressCorrections = mysqlTable("address_corrections", {
+      id: int("id").autoincrement().primaryKey(),
+      addressHash: varchar("address_hash", { length: 64 }).notNull(),
+      originalAddress: varchar("original_address", { length: 500 }).notNull(),
+      correctedAddress: varchar("corrected_address", { length: 500 }).notNull(),
+      latitude: decimal("latitude", { precision: 10, scale: 8 }),
+      longitude: decimal("longitude", { precision: 11, scale: 8 }),
+      userId: int("user_id"),
+      routeId: int("route_id"),
+      stopId: int("stop_id"),
+      city: varchar("city", { length: 128 }),
+      createdAt: timestamp("created_at").defaultNow().notNull()
+    }, (table) => ({
+      userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("set null"),
+      routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("set null"),
+      stopIdFk: foreignKey({ columns: [table.stopId], foreignColumns: [stops.id] }).onDelete("set null"),
+      addressHashIdx: index("address_corrections_address_hash_idx").on(table.addressHash),
+      createdAtIdx: index("address_corrections_created_at_idx").on(table.createdAt),
+      userIdIdx: index("address_corrections_user_id_idx").on(table.userId)
+    }));
     usersRelations = relations(users, ({ many }) => ({
       routes: many(routes),
       routeSchedules: many(routeSchedules),
@@ -243,7 +263,8 @@ var init_schema = __esm({
       chatHistory: many(chatHistory),
       userIntegrations: many(userIntegrations),
       operationalEvents: many(operationalEvents),
-      routeMetrics: many(routeMetrics)
+      routeMetrics: many(routeMetrics),
+      addressCorrections: many(addressCorrections)
     }));
     routesRelations = relations(routes, ({ one, many }) => ({
       user: one(users, { fields: [routes.userId], references: [users.id] }),
@@ -252,7 +273,8 @@ var init_schema = __esm({
       history: many(routeHistory),
       chats: many(chatHistory),
       operationalEvents: many(operationalEvents),
-      routeMetrics: many(routeMetrics)
+      routeMetrics: many(routeMetrics),
+      addressCorrections: many(addressCorrections)
     }));
     stopsRelations = relations(stops, ({ one }) => ({
       route: one(routes, { fields: [stops.routeId], references: [routes.id] })
@@ -279,6 +301,11 @@ var init_schema = __esm({
     routeMetricsRelations = relations(routeMetrics, ({ one }) => ({
       user: one(users, { fields: [routeMetrics.userId], references: [users.id] }),
       route: one(routes, { fields: [routeMetrics.routeId], references: [routes.id] })
+    }));
+    addressCorrectionsRelations = relations(addressCorrections, ({ one }) => ({
+      user: one(users, { fields: [addressCorrections.userId], references: [users.id] }),
+      route: one(routes, { fields: [addressCorrections.routeId], references: [routes.id] }),
+      stop: one(stops, { fields: [addressCorrections.stopId], references: [stops.id] })
     }));
   }
 });
@@ -450,6 +477,7 @@ import { eq, and, desc, asc, sql, gte } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import mysql from "mysql2/promise";
 function shouldPersistLocalDb() {
   return (!ENV.isProduction || ENV.allowEphemeralDb) && process.env.NODE_ENV !== "test" && process.env.VITEST !== "true";
@@ -490,6 +518,7 @@ function hydrateMemory(data) {
   memory.operationalEvents = Array.isArray(data.operationalEvents) ? data.operationalEvents : [];
   memory.routeMetrics = Array.isArray(data.routeMetrics) ? data.routeMetrics : [];
   memory.geocodeCache = Array.isArray(data.geocodeCache) ? data.geocodeCache : [];
+  memory.addressCorrections = Array.isArray(data.addressCorrections) ? data.addressCorrections : [];
   memory.ids = {
     users: Number(data.ids?.users) || 1,
     routes: Number(data.ids?.routes) || 1,
@@ -500,7 +529,8 @@ function hydrateMemory(data) {
     userIntegrations: Number(data.ids?.userIntegrations) || 1,
     operationalEvents: Number(data.ids?.operationalEvents) || 1,
     routeMetrics: Number(data.ids?.routeMetrics) || 1,
-    geocodeCache: Number(data.ids?.geocodeCache) || 1
+    geocodeCache: Number(data.ids?.geocodeCache) || 1,
+    addressCorrections: Number(data.ids?.addressCorrections) || 1
   };
 }
 function loadLocalDb() {
@@ -1773,6 +1803,57 @@ async function getLatestRouteOptimizationEvent(routeId, userId) {
   ).orderBy(desc(operationalEvents.createdAt)).limit(1);
   return result[0] ?? null;
 }
+function hashAddress(value) {
+  return createHash("sha256").update(value.replace(/\s+/g, " ").trim().toLowerCase()).digest("hex");
+}
+function extractCityFromAddress(address) {
+  const parts = address.split(",").map((part) => part.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    const stateLike = parts.findIndex((part) => /\bSP\b|\bSao Paulo\b/i.test(part));
+    if (stateLike > 0) return parts[stateLike - 1].slice(0, 128);
+    return parts[Math.max(0, parts.length - 2)].slice(0, 128);
+  }
+  return null;
+}
+async function createAddressCorrection(data) {
+  const originalAddress = data.originalAddress.replace(/\s+/g, " ").trim();
+  const correctedAddress = data.correctedAddress.replace(/\s+/g, " ").trim();
+  if (!originalAddress || !correctedAddress) {
+    return null;
+  }
+  const payload = {
+    addressHash: hashAddress(originalAddress),
+    originalAddress: originalAddress.slice(0, 500),
+    correctedAddress: correctedAddress.slice(0, 500),
+    latitude: data.latitude == null || !Number.isFinite(Number(data.latitude)) ? null : String(data.latitude),
+    longitude: data.longitude == null || !Number.isFinite(Number(data.longitude)) ? null : String(data.longitude),
+    userId: data.userId ?? null,
+    routeId: data.routeId ?? null,
+    stopId: data.stopId ?? null,
+    city: extractCityFromAddress(correctedAddress)
+  };
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const created = {
+        id: memory.ids.addressCorrections++,
+        ...payload,
+        latitude: payload.latitude == null ? null : Number(payload.latitude),
+        longitude: payload.longitude == null ? null : Number(payload.longitude),
+        createdAt: /* @__PURE__ */ new Date()
+      };
+      memory.addressCorrections.push(created);
+      await persistFallbackDb();
+      return created;
+    }
+    requireConfiguredDatabase();
+  }
+  const inserted = await db.insert(addressCorrections).values(payload).$returningId();
+  const insertedId = inserted[0]?.id;
+  if (!insertedId) return null;
+  const result = await db.select().from(addressCorrections).where(eq(addressCorrections.id, insertedId)).limit(1);
+  return result[0] ?? null;
+}
 function normalizeMetricNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -2129,6 +2210,224 @@ async function getRouteMetricsDashboard(days = 30) {
   const metrics = await db.select().from(routeMetrics).where(gte(routeMetrics.createdAt, cutoffDate)).orderBy(desc(routeMetrics.createdAt));
   return buildRouteMetricsSummary(metrics, safeDays);
 }
+async function getRouteMetricsRows(days) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1e3);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return memory.routeMetrics.filter(
+        (metric) => new Date(metric.createdAt).getTime() >= cutoff
+      );
+    }
+    requireConfiguredDatabase();
+  }
+  return db.select().from(routeMetrics).where(gte(routeMetrics.createdAt, cutoffDate)).orderBy(desc(routeMetrics.createdAt));
+}
+async function getOperationalEventsRows(days) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1e3);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return sortByDateDesc(
+        memory.operationalEvents.filter(
+          (event) => new Date(event.createdAt).getTime() >= cutoff
+        ),
+        "createdAt"
+      );
+    }
+    requireConfiguredDatabase();
+  }
+  return db.select().from(operationalEvents).where(gte(operationalEvents.createdAt, cutoffDate)).orderBy(desc(operationalEvents.createdAt)).limit(5e3);
+}
+async function getStopGeocodingRows(days) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1e3);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return memory.stops.filter(
+        (stop) => new Date(stop.createdAt).getTime() >= cutoff
+      );
+    }
+    requireConfiguredDatabase();
+  }
+  return db.select({
+    id: stops.id,
+    geocodingConfidenceScore: stops.geocodingConfidenceScore,
+    geocodingMethod: stops.geocodingMethod,
+    geocodingSuspect: stops.geocodingSuspect,
+    createdAt: stops.createdAt
+  }).from(stops).where(gte(stops.createdAt, cutoffDate)).limit(2e4);
+}
+async function getAddressCorrectionRows(days) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1e3);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return sortByDateDesc(
+        memory.addressCorrections.filter(
+          (correction) => new Date(correction.createdAt).getTime() >= cutoff
+        ),
+        "createdAt"
+      );
+    }
+    requireConfiguredDatabase();
+  }
+  return db.select().from(addressCorrections).where(gte(addressCorrections.createdAt, cutoffDate)).orderBy(desc(addressCorrections.createdAt)).limit(5e3);
+}
+function buildConfidenceBuckets(scores) {
+  return {
+    score_0_20: scores.filter((score) => score >= 0 && score <= 20).length,
+    score_21_40: scores.filter((score) => score >= 21 && score <= 40).length,
+    score_41_60: scores.filter((score) => score >= 41 && score <= 60).length,
+    score_61_80: scores.filter((score) => score >= 61 && score <= 80).length,
+    score_81_100: scores.filter((score) => score >= 81 && score <= 100).length
+  };
+}
+function getProviderFromMethod(method) {
+  if (method === "manual_coordinate") return "manual";
+  return "nominatim";
+}
+function incrementKey(target, key, amount = 1) {
+  target[key] = (target[key] || 0) + amount;
+}
+function buildProviderDistribution(events, stopRows) {
+  const providers = {};
+  for (const stop of stopRows) {
+    const provider = getProviderFromMethod(String(stop.geocodingMethod || ""));
+    incrementKey(providers, provider);
+  }
+  for (const event of events) {
+    const metadata = parseOperationalMetadata(event.metadata);
+    const provider = String(metadata.provider_used || metadata.providerUsed || "");
+    if (!provider) continue;
+    const amount = Number(metadata.geocoding_cache_hit_local || 0) || Number(metadata.geocoding_cache_hit_backend || 0) || Number(metadata.geocoding_cache_miss || 0) || 1;
+    incrementKey(providers, provider, amount);
+  }
+  const total = Object.values(providers).reduce((sum, value) => sum + value, 0);
+  return Object.entries(providers).sort((a, b) => b[1] - a[1]).map(([provider, count]) => ({
+    provider,
+    count,
+    rate: roundMetric(metricPercent(count, total))
+  }));
+}
+function buildManualCorrectionsSummary(corrections) {
+  const addressCounts = /* @__PURE__ */ new Map();
+  const cityCounts = /* @__PURE__ */ new Map();
+  for (const correction of corrections) {
+    const address = String(correction.originalAddress || "").slice(0, 160);
+    const city = correction.city || extractCityFromAddress(String(correction.correctedAddress || ""));
+    if (address) addressCounts.set(address, (addressCounts.get(address) || 0) + 1);
+    if (city) cityCounts.set(String(city), (cityCounts.get(String(city)) || 0) + 1);
+  }
+  const top = (entries) => entries.sort((a, b) => b[1] - a[1]).slice(0, 8).map(([value, count]) => ({ value, count }));
+  return {
+    count: corrections.length,
+    topAddresses: top(Array.from(addressCounts.entries())),
+    topCities: top(Array.from(cityCounts.entries()))
+  };
+}
+function buildGeocodingWindowSummary(args) {
+  const routeMetricsSummary = buildRouteMetricsSummary(args.metrics, args.days);
+  const stopScores = args.stops.map((stop) => Number(stop.geocodingConfidenceScore)).filter((score) => Number.isFinite(score) && score >= 0 && score <= 100);
+  const cache2 = buildGeocodingCacheDashboard(args.events);
+  const manualCorrections = buildManualCorrectionsSummary(args.corrections);
+  const fiscalLowConfidenceBlocks = args.events.filter((event) => {
+    const metadata = parseOperationalMetadata(event.metadata);
+    return event.type === "geocoding_low_confidence" || String(metadata.blockingIssueType || metadata.issueType || "") === "low_geocoding_confidence";
+  }).length;
+  return {
+    periodDays: args.days,
+    processedRoutes: routeMetricsSummary.routeMetricCount,
+    averageConfidence: routeMetricsSummary.geocodingConfidence.averageScore,
+    minConfidence: routeMetricsSummary.geocodingConfidence.minScore,
+    suspiciousStops: routeMetricsSummary.geocodingConfidence.suspiciousStopCount,
+    fiscalBlocks: routeMetricsSummary.routeOutcomes.blockedCount,
+    fiscalLowConfidenceBlocks,
+    autoCorrections: routeMetricsSummary.routeOutcomes.correctedCount,
+    averageOperationalScore: routeMetricsSummary.averageQualityScore,
+    confidenceDistribution: buildConfidenceBuckets(stopScores),
+    cache: cache2,
+    providers: buildProviderDistribution(args.events, args.stops),
+    manualCorrections,
+    fallbackRate: routeMetricsSummary.osrmFallbackRate,
+    routeMetrics: routeMetricsSummary
+  };
+}
+function buildImpactComparison(last7Days, last30Days) {
+  const compare = (current, baseline) => baseline > 0 ? roundMetric((current - baseline) / baseline * 100) : 0;
+  return {
+    processedRoutes: compare(last7Days.processedRoutes, last30Days.processedRoutes),
+    averageConfidence: compare(last7Days.averageConfidence, last30Days.averageConfidence),
+    minConfidence: compare(last7Days.minConfidence, last30Days.minConfidence),
+    suspiciousStops: compare(last7Days.suspiciousStops, last30Days.suspiciousStops),
+    fiscalBlocks: compare(last7Days.fiscalBlocks, last30Days.fiscalBlocks),
+    autoCorrections: compare(last7Days.autoCorrections, last30Days.autoCorrections),
+    averageOperationalScore: compare(
+      last7Days.averageOperationalScore,
+      last30Days.averageOperationalScore
+    ),
+    cacheHitRate: compare(last7Days.cache.hitRate, last30Days.cache.hitRate)
+  };
+}
+async function getGeocodingImpactDashboard() {
+  const [
+    metrics7,
+    metrics30,
+    events7,
+    events30,
+    stops7,
+    stops30,
+    corrections7,
+    corrections30
+  ] = await Promise.all([
+    getRouteMetricsRows(7),
+    getRouteMetricsRows(30),
+    getOperationalEventsRows(7),
+    getOperationalEventsRows(30),
+    getStopGeocodingRows(7),
+    getStopGeocodingRows(30),
+    getAddressCorrectionRows(7),
+    getAddressCorrectionRows(30)
+  ]);
+  const last7Days = buildGeocodingWindowSummary({
+    days: 7,
+    metrics: metrics7,
+    events: events7,
+    stops: stops7,
+    corrections: corrections7
+  });
+  const last30Days = buildGeocodingWindowSummary({
+    days: 30,
+    metrics: metrics30,
+    events: events30,
+    stops: stops30,
+    corrections: corrections30
+  });
+  return {
+    last7Days,
+    last30Days,
+    comparison: buildImpactComparison(last7Days, last30Days)
+  };
+}
+async function getGeocodingExecutiveReport() {
+  const impact = await getGeocodingImpactDashboard();
+  return {
+    averageConfidence: impact.last30Days.averageConfidence,
+    minConfidence: impact.last30Days.minConfidence,
+    suspiciousStops: impact.last30Days.suspiciousStops,
+    lowConfidenceBlocks: impact.last30Days.fiscalLowConfidenceBlocks,
+    cacheRate: impact.last30Days.cache.hitRate,
+    fallbackRate: impact.last30Days.fallbackRate,
+    manualCorrections: impact.last30Days.manualCorrections.count,
+    weeklyEvolution: impact.last7Days,
+    monthlyEvolution: impact.last30Days,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
 function parseOperationalMetadata(metadata) {
   if (!metadata) return {};
   if (typeof metadata === "string") {
@@ -2226,17 +2525,42 @@ function buildRouteQualityDashboardFromMetrics(routeMetricsSummary, eventFallbac
 function buildGeocodingCacheDashboard(events) {
   let localHits = 0;
   let localMisses = 0;
+  let backendHits = 0;
+  let misses = 0;
   for (const event of events) {
-    if (event.type !== "geocoding_cache_client_metrics") continue;
     const metadata = parseOperationalMetadata(event.metadata);
     localHits += Number(metadata.geocoding_cache_hit_local || 0);
     localMisses += Number(metadata.geocoding_cache_miss_local || 0);
+    backendHits += Number(metadata.geocoding_cache_hit_backend || 0);
+    misses += Number(metadata.geocoding_cache_miss || 0);
+    if (event.type === "geocoding_cache_hit") {
+      const provider = String(metadata.provider_used || "");
+      if (provider === "cache_local" && !metadata.geocoding_cache_hit_local) {
+        localHits += 1;
+      }
+      if (provider === "cache_backend" && !metadata.geocoding_cache_hit_backend) {
+        backendHits += 1;
+      }
+    }
+    if (event.type === "geocoding_cache_miss" && !metadata.geocoding_cache_miss) {
+      misses += 1;
+    }
   }
-  const total = localHits + localMisses;
+  const total = localHits + backendHits + misses;
+  const localTotal = localHits + localMisses;
   return {
     localHits,
     localMisses,
-    localReuseRate: roundMetric(metricPercent(localHits, total))
+    backendHits,
+    misses,
+    externalCalls: misses,
+    callsAvoided: localHits + backendHits,
+    hitRate: roundMetric(metricPercent(localHits + backendHits, total)),
+    backendReuseRate: roundMetric(metricPercent(backendHits, total)),
+    externalCallRate: roundMetric(metricPercent(misses, total)),
+    externalCallsSavedRate: roundMetric(metricPercent(localHits + backendHits, total)),
+    localReuseRate: roundMetric(metricPercent(localHits, total)),
+    localReuseRateFromClient: roundMetric(metricPercent(localHits, localTotal))
   };
 }
 async function getAdminOperationalDashboard() {
@@ -2262,6 +2586,8 @@ async function getAdminOperationalDashboard() {
         buildRouteQualityDashboard(events.slice(0, 200))
       );
       const geocodingCache2 = buildGeocodingCacheDashboard(events.slice(0, 500));
+      const geocodingImpact2 = await getGeocodingImpactDashboard();
+      const geocodingExecutiveReport2 = await getGeocodingExecutiveReport();
       return {
         stats: {
           usersTotal: memory.users.length,
@@ -2282,6 +2608,8 @@ async function getAdminOperationalDashboard() {
         routeQuality: routeQuality2,
         routeMetrics: routeMetrics2,
         geocodingCache: geocodingCache2,
+        geocodingImpact: geocodingImpact2,
+        geocodingExecutiveReport: geocodingExecutiveReport2,
         recentUsers: recentUsers2,
         recentRoutes: recentRoutes2,
         recentEvents: events.slice(0, 12)
@@ -2315,6 +2643,8 @@ async function getAdminOperationalDashboard() {
     buildRouteQualityDashboard(recentOperationalEvents)
   );
   const geocodingCache = buildGeocodingCacheDashboard(recentOperationalEvents);
+  const geocodingImpact = await getGeocodingImpactDashboard();
+  const geocodingExecutiveReport = await getGeocodingExecutiveReport();
   const recentUsers = await db.select({
     id: users.id,
     name: users.name,
@@ -2349,6 +2679,8 @@ async function getAdminOperationalDashboard() {
     routeQuality,
     routeMetrics: routeMetricsSummary,
     geocodingCache,
+    geocodingImpact,
+    geocodingExecutiveReport,
     recentUsers,
     recentRoutes,
     recentEvents: recentOperationalEvents.slice(0, 12)
@@ -2457,6 +2789,7 @@ var init_db = __esm({
       operationalEvents: [],
       routeMetrics: [],
       geocodeCache: [],
+      addressCorrections: [],
       ids: {
         users: 1,
         routes: 1,
@@ -2467,7 +2800,8 @@ var init_db = __esm({
         userIntegrations: 1,
         operationalEvents: 1,
         routeMetrics: 1,
-        geocodeCache: 1
+        geocodeCache: 1,
+        addressCorrections: 1
       }
     };
     REQUIRED_SCHEMA_COLUMNS = [
@@ -2495,7 +2829,11 @@ var init_db = __esm({
       ["route_metrics", "suspiciousGeocodingCount"],
       ["geocode_cache", "cacheKey"],
       ["geocode_cache", "results"],
-      ["geocode_cache", "expiresAt"]
+      ["geocode_cache", "expiresAt"],
+      ["address_corrections", "address_hash"],
+      ["address_corrections", "original_address"],
+      ["address_corrections", "corrected_address"],
+      ["address_corrections", "user_id"]
     ];
   }
 });
@@ -3464,7 +3802,7 @@ function registerStorageProxy(app2) {
 
 // server/_core/geocodingProxy.ts
 init_db();
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 
 // shared/addressCache.ts
 function normalizeAddressText(value) {
@@ -3572,6 +3910,40 @@ async function recordClientCacheMetrics(req) {
   }).catch((error) => {
     console.warn("[Geocoding] Failed to record local cache metrics:", error);
   });
+  if (hits > 0) {
+    await recordGeocodingEvent({
+      type: "geocoding_cache_hit",
+      title: "Cache local reaproveitado",
+      message: `${hits} endereco(s) reaproveitado(s) no dispositivo.`,
+      metadata: {
+        provider_used: "cache_local",
+        geocoding_cache_hit_local: hits
+      }
+    });
+  }
+  if (misses > 0) {
+    await recordGeocodingEvent({
+      type: "geocoding_cache_miss",
+      title: "Cache local sem correspondencia",
+      message: `${misses} endereco(s) precisaram consultar o backend.`,
+      metadata: {
+        provider_used: "cache_local",
+        geocoding_cache_miss_local: misses
+      }
+    });
+  }
+}
+async function recordGeocodingEvent(data) {
+  await createOperationalEvent({
+    type: data.type,
+    severity: data.severity ?? "info",
+    source: "geocoding.proxy",
+    title: data.title,
+    message: data.message,
+    metadata: data.metadata
+  }).catch((error) => {
+    console.warn("[Geocoding] Failed to record geocoding event:", error);
+  });
 }
 function isCoordinateInBrazil(latitude, longitude) {
   return latitude >= -34 && latitude <= 6 && longitude >= -74 && longitude <= -34;
@@ -3583,7 +3955,7 @@ function getPersistentCacheKey(cacheKey) {
   return `geocoding:${Buffer.from(cacheKey).toString("base64url")}`;
 }
 function getDatabaseCacheKey(cacheKey) {
-  return createHash("sha256").update(cacheKey).digest("hex");
+  return createHash2("sha256").update(cacheKey).digest("hex");
 }
 async function waitForExternalSearchSlot() {
   if (EXTERNAL_MIN_INTERVAL_MS <= 0) return;
@@ -3704,7 +4076,7 @@ async function requireAuthenticatedGeocodeUser(req) {
 }
 function buildConfirmedAddressResult(data) {
   return {
-    place_id: `confirmed:${createHash("sha1").update(`${data.address}|${data.latitude}|${data.longitude}`).digest("hex")}`,
+    place_id: `confirmed:${createHash2("sha1").update(`${data.address}|${data.latitude}|${data.longitude}`).digest("hex")}`,
     licence: "EconoRota user-confirmed address memory",
     osm_type: "user_confirmed",
     osm_id: 0,
@@ -3738,6 +4110,17 @@ function registerGeocodingProxy(app2) {
     const cacheKey = getSearchCacheKey(q, limit);
     const cached = await getCached(cacheKey);
     if (cached) {
+      await recordGeocodingEvent({
+        type: "geocoding_cache_hit",
+        title: "Cache global de endereco reaproveitado",
+        message: "Consulta atendida pelo cache compartilhado do backend.",
+        metadata: {
+          provider_used: "cache_backend",
+          geocoding_cache_hit_backend: 1,
+          queryLength: q.length,
+          resultCount: Array.isArray(cached) ? cached.length : 0
+        }
+      });
       res.setHeader("X-EconoRotas-Geocoding-Cache", "hit");
       res.json(cached);
       return;
@@ -3764,10 +4147,33 @@ function registerGeocodingProxy(app2) {
         `${NOMINATIM_SEARCH_URL}?${params.toString()}`
       );
       await setCached(cacheKey, data);
+      await recordGeocodingEvent({
+        type: "geocoding_cache_miss",
+        title: "Consulta externa de geocoding",
+        message: "Endereco consultado no provedor externo apos miss de cache.",
+        metadata: {
+          provider_used: "nominatim",
+          geocoding_cache_miss: 1,
+          queryLength: q.length,
+          resultCount: Array.isArray(data) ? data.length : 0
+        }
+      });
       res.setHeader("X-EconoRotas-Geocoding-Cache", "miss");
       res.json(data);
     } catch (error) {
       const status = error.status;
+      await recordGeocodingEvent({
+        type: "geocoding_provider_fallback",
+        severity: "warning",
+        title: "Falha no provedor de geocoding",
+        message: "Nominatim falhou e a consulta nao teve provedor alternativo configurado.",
+        metadata: {
+          provider_used: "nominatim",
+          fallbackProvider: null,
+          status: status ?? null,
+          error: error instanceof Error ? error.message.slice(0, 200) : "unknown"
+        }
+      });
       if (status === 429) {
         res.setHeader(
           "Retry-After",
@@ -3990,7 +4396,7 @@ import { TRPCError as TRPCError3 } from "@trpc/server";
 import { z as z2 } from "zod";
 
 // server/passwordAuth.ts
-import { randomBytes as randomBytes2, scrypt as scryptCallback, timingSafeEqual, createHash as createHash2 } from "node:crypto";
+import { randomBytes as randomBytes2, scrypt as scryptCallback, timingSafeEqual, createHash as createHash3 } from "node:crypto";
 import { promisify } from "node:util";
 var scrypt = promisify(scryptCallback);
 var KEY_LENGTH = 64;
@@ -3999,7 +4405,7 @@ function normalizeEmail2(email) {
   return email.trim().toLowerCase();
 }
 function buildPasswordOpenId(email) {
-  const digest = createHash2("sha256").update(normalizeEmail2(email)).digest("hex");
+  const digest = createHash3("sha256").update(normalizeEmail2(email)).digest("hex");
   return `pwd_${digest.slice(0, 60)}`;
 }
 async function hashPassword(password) {
@@ -6520,11 +6926,31 @@ function reorderRouteByAuditIssue(route, issue) {
     notes: waypoint.notes
   }));
 }
-function assertRouteStopsReadyForOptimization(routeStops) {
+async function assertRouteStopsReadyForOptimization(routeStops, context) {
   const audit = auditRouteSequence(routeStopsToAuditableStops(routeStops));
   const blockingIssues = getBlockingAuditIssues(audit);
   if (blockingIssues.length === 0) return;
   const firstIssue = blockingIssues[0];
+  if (firstIssue.type === "low_geocoding_confidence") {
+    const issueMetadata = firstIssue;
+    await createOperationalEvent({
+      userId: context.userId,
+      routeId: context.routeId,
+      stopId: Number(issueMetadata.stopId) || null,
+      type: "geocoding_low_confidence",
+      severity: "warning",
+      source: "routes.optimize",
+      title: "Endereco com baixa confianca",
+      message: firstIssue.message,
+      metadata: {
+        issueType: firstIssue.type,
+        confidenceScore: issueMetadata.confidenceScore ?? null,
+        sequence: firstIssue.stopSequence ?? null
+      }
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record low confidence event:", error);
+    });
+  }
   throw new TRPCError3({
     code: "BAD_REQUEST",
     message: `${firstIssue.title}: ${firstIssue.message}`
@@ -6587,7 +7013,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       message: "A rota precisa ter pelo menos 2 paradas para otimizar."
     });
   }
-  assertRouteStopsReadyForOptimization(routeStops);
+  await assertRouteStopsReadyForOptimization(routeStops, { userId, routeId });
   const locations = routeStops.map((stop) => ({
     latitude: parseFloat(String(stop.latitude ?? 0)),
     longitude: parseFloat(String(stop.longitude ?? 0)),
@@ -7235,6 +7661,10 @@ var appRouter = router({
     routeMetrics: adminProcedure.input(z2.object({
       days: z2.number().min(1).max(365).default(30)
     })).query(({ input }) => getRouteMetricsDashboard(input.days)),
+    geocodingImpact: adminProcedure.query(() => getGeocodingImpactDashboard()),
+    geocodingExecutiveReport: adminProcedure.query(
+      () => getGeocodingExecutiveReport()
+    ),
     events: adminProcedure.input(z2.object({
       limit: z2.number().min(1).max(200).default(100)
     })).query(({ input }) => getRecentOperationalEvents(input.limit)),
@@ -7540,6 +7970,11 @@ var appRouter = router({
     }),
     update: protectedProcedure.input(stopUpdateSchema).mutation(async ({ ctx, input }) => {
       await requireUserRoute(input.routeId, ctx.user.id);
+      const currentStops = await getRouteStops(input.routeId);
+      const currentStopRaw = currentStops.find(
+        (stop) => Number(stop.id) === Number(input.stopId)
+      );
+      const currentStop = currentStopRaw ? { ...currentStopRaw } : null;
       const updatedStop = await updateStop(input.routeId, input.stopId, {
         address: input.address.trim(),
         latitude: input.latitude,
@@ -7557,6 +7992,44 @@ var appRouter = router({
         });
       }
       await updateRoute(input.routeId, ctx.user.id, { status: "draft" });
+      if (currentStop) {
+        const previousAddress = String(currentStop.address || "").trim();
+        const nextAddress = String(updatedStop.address || "").trim();
+        const previousLatitude = Number(currentStop.latitude);
+        const previousLongitude = Number(currentStop.longitude);
+        const nextLatitude = Number(updatedStop.latitude);
+        const nextLongitude = Number(updatedStop.longitude);
+        const addressChanged = previousAddress !== nextAddress;
+        const coordinatesChanged = Number.isFinite(previousLatitude) && Number.isFinite(previousLongitude) && Number.isFinite(nextLatitude) && Number.isFinite(nextLongitude) && (Math.abs(previousLatitude - nextLatitude) > 1e-6 || Math.abs(previousLongitude - nextLongitude) > 1e-6);
+        if (addressChanged || coordinatesChanged) {
+          await createAddressCorrection({
+            userId: ctx.user.id,
+            routeId: input.routeId,
+            stopId: input.stopId,
+            originalAddress: previousAddress || nextAddress,
+            correctedAddress: nextAddress || previousAddress,
+            latitude: Number.isFinite(nextLatitude) ? nextLatitude : null,
+            longitude: Number.isFinite(nextLongitude) ? nextLongitude : null
+          });
+          await createOperationalEvent({
+            userId: ctx.user.id,
+            routeId: input.routeId,
+            stopId: input.stopId,
+            type: "geocoding_manual_correction",
+            severity: "info",
+            source: "stops.update",
+            title: "Correcao manual de endereco",
+            message: "Parada editada manualmente pelo usuario.",
+            metadata: {
+              provider_used: "manual",
+              addressChanged,
+              coordinatesChanged,
+              geocodingConfidenceScore: updatedStop.geocodingConfidenceScore ?? null,
+              geocodingMethod: updatedStop.geocodingMethod ?? null
+            }
+          });
+        }
+      }
       return updatedStop;
     }),
     delete: protectedProcedure.input(z2.object({
@@ -8069,6 +8542,19 @@ async function getStorageHealthSnapshot(source) {
     mode
   };
 }
+async function requireAdminApiRequest(req, res) {
+  try {
+    const user = await sdk.authenticateRequest(req);
+    if (user.role !== "admin" || !isAdminEmail(user.email, ENV.adminEmails)) {
+      res.status(403).json({ error: "Acesso restrito ao administrador." });
+      return null;
+    }
+    return user;
+  } catch {
+    res.status(401).json({ error: "Entre como administrador." });
+    return null;
+  }
+}
 function createApp(options = {}) {
   validateProductionEnvironment();
   const app2 = express2();
@@ -8142,6 +8628,16 @@ export default function EconoRotasAssetRefresh() { return null; }
       requiredManagedDatabase: ENV.requireManagedDatabase,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
+  });
+  app2.get("/api/admin/geocoding-impact", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+    res.json(await getGeocodingImpactDashboard());
+  });
+  app2.get("/api/admin/geocoding-executive-report", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+    res.json(await getGeocodingExecutiveReport());
   });
   app2.get("/api/app-update/android", (_req, res) => {
     const latestVersion = ENV.androidUpdateLatestVersion.trim();

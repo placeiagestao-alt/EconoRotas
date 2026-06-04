@@ -2,6 +2,7 @@ import { eq, and, desc, asc, sql, gte } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import mysql from "mysql2/promise";
 import type { PoolOptions, RowDataPacket } from "mysql2/promise";
 import {
@@ -17,6 +18,7 @@ import {
   operationalEvents,
   routeMetrics,
   geocodeCache,
+  addressCorrections,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 import {
@@ -53,6 +55,7 @@ const memory = {
   operationalEvents: [] as any[],
   routeMetrics: [] as any[],
   geocodeCache: [] as any[],
+  addressCorrections: [] as any[],
   ids: {
     users: 1,
     routes: 1,
@@ -64,6 +67,7 @@ const memory = {
     operationalEvents: 1,
     routeMetrics: 1,
     geocodeCache: 1,
+    addressCorrections: 1,
   },
 };
 
@@ -123,6 +127,7 @@ function hydrateMemory(data: any) {
   memory.operationalEvents = Array.isArray(data.operationalEvents) ? data.operationalEvents : [];
   memory.routeMetrics = Array.isArray(data.routeMetrics) ? data.routeMetrics : [];
   memory.geocodeCache = Array.isArray(data.geocodeCache) ? data.geocodeCache : [];
+  memory.addressCorrections = Array.isArray(data.addressCorrections) ? data.addressCorrections : [];
   memory.ids = {
     users: Number(data.ids?.users) || 1,
     routes: Number(data.ids?.routes) || 1,
@@ -134,6 +139,7 @@ function hydrateMemory(data: any) {
     operationalEvents: Number(data.ids?.operationalEvents) || 1,
     routeMetrics: Number(data.ids?.routeMetrics) || 1,
     geocodeCache: Number(data.ids?.geocodeCache) || 1,
+    addressCorrections: Number(data.ids?.addressCorrections) || 1,
   };
 }
 
@@ -536,6 +542,10 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["geocode_cache", "cacheKey"],
   ["geocode_cache", "results"],
   ["geocode_cache", "expiresAt"],
+  ["address_corrections", "address_hash"],
+  ["address_corrections", "original_address"],
+  ["address_corrections", "corrected_address"],
+  ["address_corrections", "user_id"],
 ] as const;
 
 async function getDatabaseSchemaHealth() {
@@ -1986,6 +1996,95 @@ export async function getLatestRouteOptimizationEvent(routeId: number, userId: n
   return result[0] ?? null;
 }
 
+// ==================== ADDRESS CORRECTIONS ====================
+
+function hashAddress(value: string) {
+  return createHash("sha256")
+    .update(value.replace(/\s+/g, " ").trim().toLowerCase())
+    .digest("hex");
+}
+
+function extractCityFromAddress(address: string) {
+  const parts = address
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) {
+    const stateLike = parts.findIndex((part) => /\bSP\b|\bSao Paulo\b/i.test(part));
+    if (stateLike > 0) return parts[stateLike - 1].slice(0, 128);
+    return parts[Math.max(0, parts.length - 2)].slice(0, 128);
+  }
+
+  return null;
+}
+
+export async function createAddressCorrection(data: {
+  userId?: number | null;
+  routeId?: number | null;
+  stopId?: number | null;
+  originalAddress: string;
+  correctedAddress: string;
+  latitude?: number | null;
+  longitude?: number | null;
+}) {
+  const originalAddress = data.originalAddress.replace(/\s+/g, " ").trim();
+  const correctedAddress = data.correctedAddress.replace(/\s+/g, " ").trim();
+  if (!originalAddress || !correctedAddress) {
+    return null;
+  }
+
+  const payload = {
+    addressHash: hashAddress(originalAddress),
+    originalAddress: originalAddress.slice(0, 500),
+    correctedAddress: correctedAddress.slice(0, 500),
+    latitude:
+      data.latitude == null || !Number.isFinite(Number(data.latitude))
+        ? null
+        : String(data.latitude),
+    longitude:
+      data.longitude == null || !Number.isFinite(Number(data.longitude))
+        ? null
+        : String(data.longitude),
+    userId: data.userId ?? null,
+    routeId: data.routeId ?? null,
+    stopId: data.stopId ?? null,
+    city: extractCityFromAddress(correctedAddress),
+  };
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const created = {
+        id: memory.ids.addressCorrections++,
+        ...payload,
+        latitude: payload.latitude == null ? null : Number(payload.latitude),
+        longitude: payload.longitude == null ? null : Number(payload.longitude),
+        createdAt: new Date(),
+      };
+      memory.addressCorrections.push(created);
+      await persistFallbackDb();
+      return created;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const inserted = await db
+    .insert(addressCorrections)
+    .values(payload as any)
+    .$returningId();
+  const insertedId = inserted[0]?.id;
+  if (!insertedId) return null;
+
+  const result = await db
+    .select()
+    .from(addressCorrections)
+    .where(eq(addressCorrections.id, insertedId))
+    .limit(1);
+
+  return result[0] ?? null;
+}
+
 // ==================== ROUTE METRICS ====================
 
 export type CreateRouteMetricInput = {
@@ -2434,6 +2533,292 @@ export async function getRouteMetricsDashboard(days = 30) {
   return buildRouteMetricsSummary(metrics, safeDays);
 }
 
+async function getRouteMetricsRows(days: number) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return memory.routeMetrics.filter(
+        (metric) => new Date(metric.createdAt).getTime() >= cutoff
+      );
+    }
+    requireConfiguredDatabase();
+  }
+
+  return db
+    .select()
+    .from(routeMetrics)
+    .where(gte(routeMetrics.createdAt, cutoffDate))
+    .orderBy(desc(routeMetrics.createdAt));
+}
+
+async function getOperationalEventsRows(days: number) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return sortByDateDesc(
+        memory.operationalEvents.filter(
+          (event) => new Date(event.createdAt).getTime() >= cutoff
+        ),
+        "createdAt"
+      );
+    }
+    requireConfiguredDatabase();
+  }
+
+  return db
+    .select()
+    .from(operationalEvents)
+    .where(gte(operationalEvents.createdAt, cutoffDate))
+    .orderBy(desc(operationalEvents.createdAt))
+    .limit(5000);
+}
+
+async function getStopGeocodingRows(days: number) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return memory.stops.filter(
+        (stop) => new Date(stop.createdAt).getTime() >= cutoff
+      );
+    }
+    requireConfiguredDatabase();
+  }
+
+  return db
+    .select({
+      id: stops.id,
+      geocodingConfidenceScore: stops.geocodingConfidenceScore,
+      geocodingMethod: stops.geocodingMethod,
+      geocodingSuspect: stops.geocodingSuspect,
+      createdAt: stops.createdAt,
+    })
+    .from(stops)
+    .where(gte(stops.createdAt, cutoffDate))
+    .limit(20000);
+}
+
+async function getAddressCorrectionRows(days: number) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return sortByDateDesc(
+        memory.addressCorrections.filter(
+          (correction) => new Date(correction.createdAt).getTime() >= cutoff
+        ),
+        "createdAt"
+      );
+    }
+    requireConfiguredDatabase();
+  }
+
+  return db
+    .select()
+    .from(addressCorrections)
+    .where(gte(addressCorrections.createdAt, cutoffDate))
+    .orderBy(desc(addressCorrections.createdAt))
+    .limit(5000);
+}
+
+function buildConfidenceBuckets(scores: number[]) {
+  return {
+    score_0_20: scores.filter((score) => score >= 0 && score <= 20).length,
+    score_21_40: scores.filter((score) => score >= 21 && score <= 40).length,
+    score_41_60: scores.filter((score) => score >= 41 && score <= 60).length,
+    score_61_80: scores.filter((score) => score >= 61 && score <= 80).length,
+    score_81_100: scores.filter((score) => score >= 81 && score <= 100).length,
+  };
+}
+
+function getProviderFromMethod(method: string) {
+  if (method === "manual_coordinate") return "manual";
+  return "nominatim";
+}
+
+function incrementKey(target: Record<string, number>, key: string, amount = 1) {
+  target[key] = (target[key] || 0) + amount;
+}
+
+function buildProviderDistribution(events: any[], stopRows: any[]) {
+  const providers: Record<string, number> = {};
+
+  for (const stop of stopRows) {
+    const provider = getProviderFromMethod(String(stop.geocodingMethod || ""));
+    incrementKey(providers, provider);
+  }
+
+  for (const event of events) {
+    const metadata = parseOperationalMetadata(event.metadata);
+    const provider = String(metadata.provider_used || metadata.providerUsed || "");
+    if (!provider) continue;
+    const amount =
+      Number(metadata.geocoding_cache_hit_local || 0) ||
+      Number(metadata.geocoding_cache_hit_backend || 0) ||
+      Number(metadata.geocoding_cache_miss || 0) ||
+      1;
+    incrementKey(providers, provider, amount);
+  }
+
+  const total = Object.values(providers).reduce((sum, value) => sum + value, 0);
+  return Object.entries(providers)
+    .sort((a, b) => b[1] - a[1])
+    .map(([provider, count]) => ({
+      provider,
+      count,
+      rate: roundMetric(metricPercent(count, total)),
+    }));
+}
+
+function buildManualCorrectionsSummary(corrections: any[]) {
+  const addressCounts = new Map<string, number>();
+  const cityCounts = new Map<string, number>();
+
+  for (const correction of corrections) {
+    const address = String(correction.originalAddress || "").slice(0, 160);
+    const city = correction.city || extractCityFromAddress(String(correction.correctedAddress || ""));
+    if (address) addressCounts.set(address, (addressCounts.get(address) || 0) + 1);
+    if (city) cityCounts.set(String(city), (cityCounts.get(String(city)) || 0) + 1);
+  }
+
+  const top = (entries: [string, number][]) =>
+    entries
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([value, count]) => ({ value, count }));
+
+  return {
+    count: corrections.length,
+    topAddresses: top(Array.from(addressCounts.entries())),
+    topCities: top(Array.from(cityCounts.entries())),
+  };
+}
+
+function buildGeocodingWindowSummary(args: {
+  days: number;
+  metrics: any[];
+  events: any[];
+  stops: any[];
+  corrections: any[];
+}) {
+  const routeMetricsSummary = buildRouteMetricsSummary(args.metrics, args.days);
+  const stopScores = args.stops
+    .map((stop) => Number(stop.geocodingConfidenceScore))
+    .filter((score) => Number.isFinite(score) && score >= 0 && score <= 100);
+  const cache = buildGeocodingCacheDashboard(args.events);
+  const manualCorrections = buildManualCorrectionsSummary(args.corrections);
+  const fiscalLowConfidenceBlocks = args.events.filter((event) => {
+    const metadata = parseOperationalMetadata(event.metadata);
+    return (
+      event.type === "geocoding_low_confidence" ||
+      String(metadata.blockingIssueType || metadata.issueType || "") ===
+        "low_geocoding_confidence"
+    );
+  }).length;
+
+  return {
+    periodDays: args.days,
+    processedRoutes: routeMetricsSummary.routeMetricCount,
+    averageConfidence: routeMetricsSummary.geocodingConfidence.averageScore,
+    minConfidence: routeMetricsSummary.geocodingConfidence.minScore,
+    suspiciousStops: routeMetricsSummary.geocodingConfidence.suspiciousStopCount,
+    fiscalBlocks: routeMetricsSummary.routeOutcomes.blockedCount,
+    fiscalLowConfidenceBlocks,
+    autoCorrections: routeMetricsSummary.routeOutcomes.correctedCount,
+    averageOperationalScore: routeMetricsSummary.averageQualityScore,
+    confidenceDistribution: buildConfidenceBuckets(stopScores),
+    cache,
+    providers: buildProviderDistribution(args.events, args.stops),
+    manualCorrections,
+    fallbackRate: routeMetricsSummary.osrmFallbackRate,
+    routeMetrics: routeMetricsSummary,
+  };
+}
+
+function buildImpactComparison(last7Days: any, last30Days: any) {
+  const compare = (current: number, baseline: number) =>
+    baseline > 0 ? roundMetric(((current - baseline) / baseline) * 100) : 0;
+
+  return {
+    processedRoutes: compare(last7Days.processedRoutes, last30Days.processedRoutes),
+    averageConfidence: compare(last7Days.averageConfidence, last30Days.averageConfidence),
+    minConfidence: compare(last7Days.minConfidence, last30Days.minConfidence),
+    suspiciousStops: compare(last7Days.suspiciousStops, last30Days.suspiciousStops),
+    fiscalBlocks: compare(last7Days.fiscalBlocks, last30Days.fiscalBlocks),
+    autoCorrections: compare(last7Days.autoCorrections, last30Days.autoCorrections),
+    averageOperationalScore: compare(
+      last7Days.averageOperationalScore,
+      last30Days.averageOperationalScore
+    ),
+    cacheHitRate: compare(last7Days.cache.hitRate, last30Days.cache.hitRate),
+  };
+}
+
+export async function getGeocodingImpactDashboard() {
+  const [
+    metrics7,
+    metrics30,
+    events7,
+    events30,
+    stops7,
+    stops30,
+    corrections7,
+    corrections30,
+  ] = await Promise.all([
+    getRouteMetricsRows(7),
+    getRouteMetricsRows(30),
+    getOperationalEventsRows(7),
+    getOperationalEventsRows(30),
+    getStopGeocodingRows(7),
+    getStopGeocodingRows(30),
+    getAddressCorrectionRows(7),
+    getAddressCorrectionRows(30),
+  ]);
+
+  const last7Days = buildGeocodingWindowSummary({
+    days: 7,
+    metrics: metrics7,
+    events: events7,
+    stops: stops7,
+    corrections: corrections7,
+  });
+  const last30Days = buildGeocodingWindowSummary({
+    days: 30,
+    metrics: metrics30,
+    events: events30,
+    stops: stops30,
+    corrections: corrections30,
+  });
+
+  return {
+    last7Days,
+    last30Days,
+    comparison: buildImpactComparison(last7Days, last30Days),
+  };
+}
+
+export async function getGeocodingExecutiveReport() {
+  const impact = await getGeocodingImpactDashboard();
+  return {
+    averageConfidence: impact.last30Days.averageConfidence,
+    minConfidence: impact.last30Days.minConfidence,
+    suspiciousStops: impact.last30Days.suspiciousStops,
+    lowConfidenceBlocks: impact.last30Days.fiscalLowConfidenceBlocks,
+    cacheRate: impact.last30Days.cache.hitRate,
+    fallbackRate: impact.last30Days.fallbackRate,
+    manualCorrections: impact.last30Days.manualCorrections.count,
+    weeklyEvolution: impact.last7Days,
+    monthlyEvolution: impact.last30Days,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
 function parseOperationalMetadata(metadata: unknown): Record<string, any> {
   if (!metadata) return {};
   if (typeof metadata === "string") {
@@ -2556,19 +2941,45 @@ function buildRouteQualityDashboardFromMetrics(
 function buildGeocodingCacheDashboard(events: any[]) {
   let localHits = 0;
   let localMisses = 0;
+  let backendHits = 0;
+  let misses = 0;
 
   for (const event of events) {
-    if (event.type !== "geocoding_cache_client_metrics") continue;
     const metadata = parseOperationalMetadata(event.metadata);
     localHits += Number(metadata.geocoding_cache_hit_local || 0);
     localMisses += Number(metadata.geocoding_cache_miss_local || 0);
+    backendHits += Number(metadata.geocoding_cache_hit_backend || 0);
+    misses += Number(metadata.geocoding_cache_miss || 0);
+
+    if (event.type === "geocoding_cache_hit") {
+      const provider = String(metadata.provider_used || "");
+      if (provider === "cache_local" && !metadata.geocoding_cache_hit_local) {
+        localHits += 1;
+      }
+      if (provider === "cache_backend" && !metadata.geocoding_cache_hit_backend) {
+        backendHits += 1;
+      }
+    }
+    if (event.type === "geocoding_cache_miss" && !metadata.geocoding_cache_miss) {
+      misses += 1;
+    }
   }
 
-  const total = localHits + localMisses;
+  const total = localHits + backendHits + misses;
+  const localTotal = localHits + localMisses;
   return {
     localHits,
     localMisses,
+    backendHits,
+    misses,
+    externalCalls: misses,
+    callsAvoided: localHits + backendHits,
+    hitRate: roundMetric(metricPercent(localHits + backendHits, total)),
+    backendReuseRate: roundMetric(metricPercent(backendHits, total)),
+    externalCallRate: roundMetric(metricPercent(misses, total)),
+    externalCallsSavedRate: roundMetric(metricPercent(localHits + backendHits, total)),
     localReuseRate: roundMetric(metricPercent(localHits, total)),
+    localReuseRateFromClient: roundMetric(metricPercent(localHits, localTotal)),
   };
 }
 
@@ -2596,6 +3007,8 @@ export async function getAdminOperationalDashboard() {
         buildRouteQualityDashboard(events.slice(0, 200))
       );
       const geocodingCache = buildGeocodingCacheDashboard(events.slice(0, 500));
+      const geocodingImpact = await getGeocodingImpactDashboard();
+      const geocodingExecutiveReport = await getGeocodingExecutiveReport();
 
       return {
         stats: {
@@ -2624,6 +3037,8 @@ export async function getAdminOperationalDashboard() {
         routeQuality,
         routeMetrics,
         geocodingCache,
+        geocodingImpact,
+        geocodingExecutiveReport,
         recentUsers,
         recentRoutes,
         recentEvents: events.slice(0, 12),
@@ -2677,6 +3092,8 @@ export async function getAdminOperationalDashboard() {
     buildRouteQualityDashboard(recentOperationalEvents)
   );
   const geocodingCache = buildGeocodingCacheDashboard(recentOperationalEvents);
+  const geocodingImpact = await getGeocodingImpactDashboard();
+  const geocodingExecutiveReport = await getGeocodingExecutiveReport();
 
   const recentUsers = await db
     .select({
@@ -2723,6 +3140,8 @@ export async function getAdminOperationalDashboard() {
     routeQuality,
     routeMetrics: routeMetricsSummary,
     geocodingCache,
+    geocodingImpact,
+    geocodingExecutiveReport,
     recentUsers,
     recentRoutes,
     recentEvents: recentOperationalEvents.slice(0, 12),

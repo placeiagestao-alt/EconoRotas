@@ -291,6 +291,33 @@ export type GeocodeCache = typeof geocodeCache.$inferSelect;
 export type InsertGeocodeCache = typeof geocodeCache.$inferInsert;
 
 /**
+ * Address corrections - approved manual fixes for operational geocoding memory.
+ */
+export const addressCorrections = mysqlTable("address_corrections", {
+  id: int("id").autoincrement().primaryKey(),
+  addressHash: varchar("address_hash", { length: 64 }).notNull(),
+  originalAddress: varchar("original_address", { length: 500 }).notNull(),
+  correctedAddress: varchar("corrected_address", { length: 500 }).notNull(),
+  latitude: decimal("latitude", { precision: 10, scale: 8 }),
+  longitude: decimal("longitude", { precision: 11, scale: 8 }),
+  userId: int("user_id"),
+  routeId: int("route_id"),
+  stopId: int("stop_id"),
+  city: varchar("city", { length: 128 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("set null"),
+  routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("set null"),
+  stopIdFk: foreignKey({ columns: [table.stopId], foreignColumns: [stops.id] }).onDelete("set null"),
+  addressHashIdx: index("address_corrections_address_hash_idx").on(table.addressHash),
+  createdAtIdx: index("address_corrections_created_at_idx").on(table.createdAt),
+  userIdIdx: index("address_corrections_user_id_idx").on(table.userId),
+}));
+
+export type AddressCorrection = typeof addressCorrections.$inferSelect;
+export type InsertAddressCorrection = typeof addressCorrections.$inferInsert;
+
+/**
  * Relations
  */
 export const usersRelations = relations(users, ({ many }) => ({
@@ -301,6 +328,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   userIntegrations: many(userIntegrations),
   operationalEvents: many(operationalEvents),
   routeMetrics: many(routeMetrics),
+  addressCorrections: many(addressCorrections),
 }));
 
 export const routesRelations = relations(routes, ({ one, many }) => ({
@@ -311,6 +339,7 @@ export const routesRelations = relations(routes, ({ one, many }) => ({
   chats: many(chatHistory),
   operationalEvents: many(operationalEvents),
   routeMetrics: many(routeMetrics),
+  addressCorrections: many(addressCorrections),
 }));
 
 export const stopsRelations = relations(stops, ({ one }) => ({
@@ -344,4 +373,10 @@ export const operationalEventsRelations = relations(operationalEvents, ({ one })
 export const routeMetricsRelations = relations(routeMetrics, ({ one }) => ({
   user: one(users, { fields: [routeMetrics.userId], references: [users.id] }),
   route: one(routes, { fields: [routeMetrics.routeId], references: [routes.id] }),
+}));
+
+export const addressCorrectionsRelations = relations(addressCorrections, ({ one }) => ({
+  user: one(users, { fields: [addressCorrections.userId], references: [users.id] }),
+  route: one(routes, { fields: [addressCorrections.routeId], references: [routes.id] }),
+  stop: one(stops, { fields: [addressCorrections.stopId], references: [stops.id] }),
 }));

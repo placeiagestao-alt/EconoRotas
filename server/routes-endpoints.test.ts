@@ -98,6 +98,78 @@ describe("Route endpoints", () => {
     expect(metrics.geocodingConfidence.suspiciousStopRate).toBeGreaterThanOrEqual(0);
   });
 
+  it("exposes geocoding impact analytics for admin dashboards", async () => {
+    await db.createOperationalEvent({
+      type: "geocoding_cache_hit",
+      severity: "info",
+      source: "test",
+      title: "Cache hit",
+      metadata: {
+        provider_used: "cache_backend",
+        geocoding_cache_hit_backend: 2,
+      },
+    });
+    await db.createOperationalEvent({
+      type: "geocoding_cache_miss",
+      severity: "info",
+      source: "test",
+      title: "Cache miss",
+      metadata: {
+        provider_used: "nominatim",
+        geocoding_cache_miss: 1,
+      },
+    });
+
+    const impact = await db.getGeocodingImpactDashboard();
+
+    expect(impact.last7Days).toBeDefined();
+    expect(impact.last30Days).toBeDefined();
+    expect(impact.last30Days.cache.backendHits).toBeGreaterThanOrEqual(2);
+    expect(impact.last30Days.cache.misses).toBeGreaterThanOrEqual(1);
+    expect(impact.last30Days.cache.hitRate).toBeGreaterThanOrEqual(0);
+    expect(impact.last30Days.providers.length).toBeGreaterThan(0);
+    expect(impact.last30Days.confidenceDistribution.score_81_100).toBeGreaterThanOrEqual(0);
+  });
+
+  it("records manual address corrections when a stop is edited", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8262));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Rota com correcao manual",
+      mode: "balanced",
+      stops: [
+        {
+          address: "Rua Original A, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+        },
+        {
+          address: "Rua Original B, Presidente Prudente - SP",
+          latitude: -22.1217,
+          longitude: -51.3899,
+          sequence: 1,
+        },
+      ],
+    });
+    const [firstStop] = await caller.stops.list({ routeId: result.route.id });
+
+    await caller.stops.update({
+      routeId: result.route.id,
+      stopId: firstStop.id,
+      address: "Rua Corrigida, 100, Presidente Prudente - SP",
+      latitude: -22.1227,
+      longitude: -51.3909,
+      sequence: Number(firstStop.sequence),
+      notes: firstStop.notes ?? undefined,
+    });
+
+    const report = await db.getGeocodingExecutiveReport();
+
+    expect(report.manualCorrections).toBeGreaterThanOrEqual(1);
+    expect(report.monthlyEvolution.manualCorrections.topAddresses.length).toBeGreaterThan(0);
+  });
+
   it("blocks optimization when a stop has low geocoding confidence", async () => {
     const caller = appRouter.createCaller(createAuthContext(8261));
 

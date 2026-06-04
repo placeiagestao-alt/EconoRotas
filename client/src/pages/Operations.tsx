@@ -63,6 +63,20 @@ function modeLabel(mode: string) {
 }
 
 function confidenceDistributionItems(distribution: any) {
+  if (
+    distribution &&
+    "score_0_20" in distribution &&
+    "score_81_100" in distribution
+  ) {
+    return [
+      { label: "0-20", value: distribution?.score_0_20 ?? 0 },
+      { label: "21-40", value: distribution?.score_21_40 ?? 0 },
+      { label: "41-60", value: distribution?.score_41_60 ?? 0 },
+      { label: "61-80", value: distribution?.score_61_80 ?? 0 },
+      { label: "81-100", value: distribution?.score_81_100 ?? 0 },
+    ];
+  }
+
   return [
     { label: "90-100", value: distribution?.excellent ?? 0 },
     { label: "75-89", value: distribution?.good ?? 0 },
@@ -70,6 +84,73 @@ function confidenceDistributionItems(distribution: any) {
     { label: "< 60", value: distribution?.suspicious ?? 0 },
     { label: "Sem score", value: distribution?.notClassified ?? 0 },
   ];
+}
+
+function formatPercent(value: unknown) {
+  const number = Number(value || 0);
+  const sign = number > 0 ? "+" : "";
+  return `${sign}${number.toFixed(1)}%`;
+}
+
+function ImpactMetricRow({
+  label,
+  value7,
+  value30,
+  variation,
+  suffix = "",
+}: {
+  label: string;
+  value7: unknown;
+  value30: unknown;
+  variation: unknown;
+  suffix?: string;
+}) {
+  return (
+    <div className="grid grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr] items-center gap-2 border-b border-border/70 py-2 text-sm last:border-0">
+      <span className="font-medium">{label}</span>
+      <span>
+        {Number(value7 || 0).toFixed(suffix === "%" ? 1 : 0)}
+        {suffix}
+      </span>
+      <span>
+        {Number(value30 || 0).toFixed(suffix === "%" ? 1 : 0)}
+        {suffix}
+      </span>
+      <span
+        className={
+          Number(variation || 0) >= 0 ? "text-emerald-700" : "text-red-700"
+        }
+      >
+        {formatPercent(variation)}
+      </span>
+    </div>
+  );
+}
+
+function MiniBar({
+  label,
+  value,
+  max,
+}: {
+  label: string;
+  value: number;
+  max: number;
+}) {
+  const width = max > 0 ? Math.max(4, Math.round((value / max) * 100)) : 0;
+  return (
+    <div className="space-y-1">
+      <div className="flex justify-between text-xs text-muted-foreground">
+        <span>{label}</span>
+        <span>{value}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-primary"
+          style={{ width: `${width}%` }}
+        />
+      </div>
+    </div>
+  );
 }
 
 export default function Operations() {
@@ -91,6 +172,20 @@ export default function Operations() {
   const stats = data?.stats;
   const routeMetrics = (data as any)?.routeMetrics;
   const geocodingCache = (data as any)?.geocodingCache;
+  const geocodingImpact = (data as any)?.geocodingImpact;
+  const executiveReport = (data as any)?.geocodingExecutiveReport;
+  const impact7 = geocodingImpact?.last7Days;
+  const impact30 = geocodingImpact?.last30Days;
+  const impactComparison = geocodingImpact?.comparison;
+  const confidenceItems = confidenceDistributionItems(
+    impact30?.confidenceDistribution ??
+      routeMetrics?.geocodingConfidence?.scoreDistribution
+  );
+  const maxConfidenceBucket = Math.max(
+    0,
+    ...confidenceItems.map((item) => Number(item.value || 0))
+  );
+  const providerItems = impact30?.providers ?? [];
 
   return (
     <DashboardLayout>
@@ -122,6 +217,205 @@ export default function Operations() {
             <StatCard title="Alertas de rota 24h" value={stats?.routeWarnings24h ?? 0} icon={MapPinned} />
           </div>
         )}
+
+        {!dashboardQuery.isLoading && geocodingImpact ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Gauge className="h-5 w-5 text-primary" />
+                Impacto do geocoding
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <StatCard
+                  title="Cache hit rate"
+                  value={Math.round(impact30?.cache?.hitRate ?? 0)}
+                  suffix="%"
+                  icon={ShieldCheck}
+                />
+                <StatCard
+                  title="Chamadas evitadas"
+                  value={impact30?.cache?.callsAvoided ?? 0}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Correcoes manuais 30d"
+                  value={impact30?.manualCorrections?.count ?? 0}
+                  icon={AlertTriangle}
+                />
+                <StatCard
+                  title="Bloqueios baixa confianca"
+                  value={impact30?.fiscalLowConfidenceBlocks ?? 0}
+                  icon={ShieldCheck}
+                />
+              </div>
+
+              <div className="rounded-lg border border-border/80 p-4">
+                <div className="mb-2 grid grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr] gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <span>Metrica</span>
+                  <span>7 dias</span>
+                  <span>30 dias</span>
+                  <span>Variacao</span>
+                </div>
+                <ImpactMetricRow
+                  label="Rotas processadas"
+                  value7={impact7?.processedRoutes}
+                  value30={impact30?.processedRoutes}
+                  variation={impactComparison?.processedRoutes}
+                />
+                <ImpactMetricRow
+                  label="Confianca media"
+                  value7={impact7?.averageConfidence}
+                  value30={impact30?.averageConfidence}
+                  variation={impactComparison?.averageConfidence}
+                />
+                <ImpactMetricRow
+                  label="Menor confianca"
+                  value7={impact7?.minConfidence}
+                  value30={impact30?.minConfidence}
+                  variation={impactComparison?.minConfidence}
+                />
+                <ImpactMetricRow
+                  label="Paradas suspeitas"
+                  value7={impact7?.suspiciousStops}
+                  value30={impact30?.suspiciousStops}
+                  variation={impactComparison?.suspiciousStops}
+                />
+                <ImpactMetricRow
+                  label="Bloqueios fiscal"
+                  value7={impact7?.fiscalBlocks}
+                  value30={impact30?.fiscalBlocks}
+                  variation={impactComparison?.fiscalBlocks}
+                />
+                <ImpactMetricRow
+                  label="Correcoes automaticas"
+                  value7={impact7?.autoCorrections}
+                  value30={impact30?.autoCorrections}
+                  variation={impactComparison?.autoCorrections}
+                />
+                <ImpactMetricRow
+                  label="Score operacional"
+                  value7={impact7?.averageOperationalScore}
+                  value30={impact30?.averageOperationalScore}
+                  variation={impactComparison?.averageOperationalScore}
+                />
+                <ImpactMetricRow
+                  label="Taxa de cache"
+                  value7={impact7?.cache?.hitRate}
+                  value30={impact30?.cache?.hitRate}
+                  variation={impactComparison?.cacheHitRate}
+                  suffix="%"
+                />
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-3">
+                <div className="rounded-lg border border-border/80 p-4">
+                  <p className="text-sm font-medium">Distribuicao de confianca</p>
+                  <div className="mt-3 space-y-3">
+                    {confidenceItems.map((item) => (
+                      <MiniBar
+                        key={item.label}
+                        label={item.label}
+                        value={Number(item.value || 0)}
+                        max={maxConfidenceBucket}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border/80 p-4">
+                  <p className="text-sm font-medium">Cache e consultas externas</p>
+                  <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Local</p>
+                      <p className="text-2xl font-semibold">
+                        {impact30?.cache?.localHits ?? 0}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Backend</p>
+                      <p className="text-2xl font-semibold">
+                        {impact30?.cache?.backendHits ?? 0}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Misses</p>
+                      <p className="text-2xl font-semibold">
+                        {impact30?.cache?.misses ?? 0}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Externas</p>
+                      <p className="text-2xl font-semibold">
+                        {impact30?.cache?.externalCallRate ?? 0}%
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border/80 p-4">
+                  <p className="text-sm font-medium">Provedor usado</p>
+                  <div className="mt-3 space-y-3">
+                    {providerItems.length ? (
+                      providerItems.map((item: any) => (
+                        <MiniBar
+                          key={item.provider}
+                          label={`${item.provider} (${item.rate}%)`}
+                          value={Number(item.count || 0)}
+                          max={Math.max(
+                            1,
+                            ...providerItems.map((provider: any) =>
+                              Number(provider.count || 0)
+                            )
+                          )}
+                        />
+                      ))
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Sem eventos de provedor ainda.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-2">
+                <div className="rounded-lg border border-border/80 p-4">
+                  <p className="text-sm font-medium">Correcoes manuais</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    7 dias: {impact7?.manualCorrections?.count ?? 0} · 30 dias:{" "}
+                    {impact30?.manualCorrections?.count ?? 0}
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    {(impact30?.manualCorrections?.topAddresses ?? [])
+                      .slice(0, 5)
+                      .map((item: any) => (
+                        <div
+                          key={item.value}
+                          className="flex justify-between gap-3 text-sm"
+                        >
+                          <span className="line-clamp-1">{item.value}</span>
+                          <span className="font-medium">{item.count}</span>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border/80 p-4">
+                  <p className="text-sm font-medium">Relatorio executivo</p>
+                  <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                    <span>Confianca media</span>
+                    <strong>{executiveReport?.averageConfidence ?? 0}/100</strong>
+                    <span>Taxa de cache</span>
+                    <strong>{executiveReport?.cacheRate ?? 0}%</strong>
+                    <span>Taxa fallback</span>
+                    <strong>{executiveReport?.fallbackRate ?? 0}%</strong>
+                    <span>Correcoes manuais</span>
+                    <strong>{executiveReport?.manualCorrections ?? 0}</strong>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
 
         {dashboardQuery.isLoading ? (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">

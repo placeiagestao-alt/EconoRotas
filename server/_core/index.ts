@@ -16,12 +16,15 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { ENV } from "./env";
 import { sdk } from "./sdk";
+import { isAdminEmail } from "./adminAccess";
 import { serveStatic } from "./static";
 import { recordHealthObservation } from "./monitoring";
 import { getOsrmHealth } from "../osrm";
 import {
   ensurePersistentFallbackDbLoaded,
   getDatabaseHealth,
+  getGeocodingExecutiveReport,
+  getGeocodingImpactDashboard,
   getPersistentFallbackDbHealth,
   getPersistentValue,
   hasPersistentFallbackDbConfigured,
@@ -214,6 +217,20 @@ async function getStorageHealthSnapshot(source: string) {
   };
 }
 
+async function requireAdminApiRequest(req: express.Request, res: express.Response) {
+  try {
+    const user = await sdk.authenticateRequest(req);
+    if (user.role !== "admin" || !isAdminEmail(user.email, ENV.adminEmails)) {
+      res.status(403).json({ error: "Acesso restrito ao administrador." });
+      return null;
+    }
+    return user;
+  } catch {
+    res.status(401).json({ error: "Entre como administrador." });
+    return null;
+  }
+}
+
 export function createApp(options: { serveClient?: boolean } = {}): Express {
   validateProductionEnvironment();
 
@@ -306,6 +323,18 @@ export default function EconoRotasAssetRefresh() { return null; }
       requiredManagedDatabase: ENV.requireManagedDatabase,
       timestamp: new Date().toISOString(),
     });
+  });
+  app.get("/api/admin/geocoding-impact", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    res.json(await getGeocodingImpactDashboard());
+  });
+  app.get("/api/admin/geocoding-executive-report", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    res.json(await getGeocodingExecutiveReport());
   });
   app.get("/api/app-update/android", (_req, res) => {
     const latestVersion = ENV.androidUpdateLatestVersion.trim();
