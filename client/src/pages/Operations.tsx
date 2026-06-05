@@ -56,6 +56,31 @@ function StatCard({
   );
 }
 
+function formatMs(value: unknown) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return "0 ms";
+  if (number >= 1000) return `${(number / 1000).toFixed(1)} s`;
+  return `${Math.round(number)} ms`;
+}
+
+function PerformanceStageRow({
+  label,
+  metric,
+}: {
+  label: string;
+  metric: any;
+}) {
+  return (
+    <div className="grid grid-cols-[1.2fr_0.7fr_0.7fr_0.7fr_0.7fr] gap-2 border-t border-border/70 py-2 text-sm">
+      <span className="font-medium">{label}</span>
+      <span>{formatMs(metric?.averageMs)}</span>
+      <span>{formatMs(metric?.p50Ms)}</span>
+      <span>{formatMs(metric?.p95Ms)}</span>
+      <span>{formatMs(metric?.p99Ms)}</span>
+    </div>
+  );
+}
+
 function modeLabel(mode: string) {
   if (mode === "shortest_distance") return "Menor distancia";
   if (mode === "shortest_time") return "Menor tempo";
@@ -171,6 +196,7 @@ export default function Operations() {
   const data = dashboardQuery.data;
   const stats = data?.stats;
   const routeMetrics = (data as any)?.routeMetrics;
+  const optimizationJobs = (data as any)?.optimizationJobs;
   const geocodingCache = (data as any)?.geocodingCache;
   const geocodingImpact = (data as any)?.geocodingImpact;
   const executiveReport = (data as any)?.geocodingExecutiveReport;
@@ -217,6 +243,93 @@ export default function Operations() {
             <StatCard title="Alertas de rota 24h" value={stats?.routeWarnings24h ?? 0} icon={MapPinned} />
           </div>
         )}
+
+        {!dashboardQuery.isLoading && routeMetrics?.performance ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Gauge className="h-5 w-5 text-primary" />
+                Performance da otimizaÃ§Ã£o
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+                <StatCard
+                  title="Jobs em fila"
+                  value={optimizationJobs?.queued ?? 0}
+                  icon={Activity}
+                />
+                <StatCard
+                  title="Jobs falhos"
+                  value={optimizationJobs?.failed ?? 0}
+                  icon={AlertTriangle}
+                />
+                <StatCard
+                  title="OSRM chamadas"
+                  value={routeMetrics?.performance?.osrm?.callCount ?? 0}
+                  icon={MapPinned}
+                />
+                <StatCard
+                  title="Falha OSRM"
+                  value={Math.round(routeMetrics?.performance?.osrm?.failureRate ?? 0)}
+                  suffix="%"
+                  icon={AlertTriangle}
+                />
+                <StatCard
+                  title="P95 total"
+                  value={Math.round(
+                    (routeMetrics?.performance?.stages?.totalRuntimeMs?.p95Ms ?? 0) /
+                      1000
+                  )}
+                  suffix="s"
+                  icon={Gauge}
+                />
+              </div>
+
+              <div className="rounded-lg border border-border/80 p-4">
+                <div className="grid grid-cols-[1.2fr_0.7fr_0.7fr_0.7fr_0.7fr] gap-2 pb-2 text-xs font-medium uppercase text-muted-foreground">
+                  <span>Etapa</span>
+                  <span>Media</span>
+                  <span>P50</span>
+                  <span>P95</span>
+                  <span>P99</span>
+                </div>
+                <PerformanceStageRow
+                  label="Banco - leitura"
+                  metric={routeMetrics.performance.stages.dbFetchMs}
+                />
+                <PerformanceStageRow
+                  label="Clusterizacao"
+                  metric={routeMetrics.performance.stages.clusteringMs}
+                />
+                <PerformanceStageRow
+                  label="OSRM"
+                  metric={routeMetrics.performance.stages.osrmMs}
+                />
+                <PerformanceStageRow
+                  label="Otimizador"
+                  metric={routeMetrics.performance.stages.optimizerMs}
+                />
+                <PerformanceStageRow
+                  label="Fiscal"
+                  metric={routeMetrics.performance.stages.auditMs}
+                />
+                <PerformanceStageRow
+                  label="Correcao"
+                  metric={routeMetrics.performance.stages.correctionMs}
+                />
+                <PerformanceStageRow
+                  label="Banco - gravacao"
+                  metric={routeMetrics.performance.stages.dbSaveMs}
+                />
+                <PerformanceStageRow
+                  label="Total"
+                  metric={routeMetrics.performance.stages.totalRuntimeMs}
+                />
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
 
         {!dashboardQuery.isLoading && geocodingImpact ? (
           <Card>

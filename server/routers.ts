@@ -17,6 +17,7 @@ import {
 import { sdk } from "./_core/sdk";
 import {
   calculateDistance,
+  clusterStops,
   estimateTravelTime,
   optimizeRoute,
   validateLocations,
@@ -46,6 +47,10 @@ import {
   summarizeGeocodingConfidence,
   type GeocodingMethod,
 } from "../shared/geocodingConfidence";
+import {
+  enqueueOptimizationJob,
+  isOptimizationQueueConfigured,
+} from "./optimizationQueue";
 
 const IMILE_PROVIDER = "imile_rider_delivery";
 const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
@@ -485,7 +490,7 @@ async function requireUserRoute(routeId: number, userId: number) {
   return route;
 }
 
-async function optimizeUserRoute(
+export async function optimizeUserRoute(
   routeId: number,
   userId: number,
   requestedMode?: "shortest_distance" | "shortest_time" | "balanced",
@@ -494,14 +499,43 @@ async function optimizeUserRoute(
     excludeStopIds?: number[];
     startLocation?: Location;
     localityMode?: "balanced" | "local" | "strict";
+    allowLargeSync?: boolean;
   }
 ) {
   const optimizationStartedAt = Date.now();
+  const runtimeBreakdown = {
+    dbFetchMs: 0,
+    clusteringMs: 0,
+    osrmMs: 0,
+    optimizerMs: 0,
+    auditMs: 0,
+    correctionMs: 0,
+    dbSaveMs: 0,
+    totalRuntimeMs: 0,
+    osrmCallCount: 0,
+    osrmFailureCount: 0,
+    osrmTotalMs: 0,
+    osrmAverageMs: 0,
+  };
+  const telemetry = {
+    recordOsrmCall(durationMs: number, success: boolean) {
+      const safeDuration = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0;
+      runtimeBreakdown.osrmCallCount += 1;
+      runtimeBreakdown.osrmTotalMs += safeDuration;
+      runtimeBreakdown.osrmMs += safeDuration;
+      if (!success) runtimeBreakdown.osrmFailureCount += 1;
+      runtimeBreakdown.osrmAverageMs = Math.round(
+        runtimeBreakdown.osrmTotalMs / Math.max(1, runtimeBreakdown.osrmCallCount)
+      );
+    },
+  };
+  const dbFetchStartedAt = Date.now();
   const route = await requireUserRoute(routeId, userId);
   const excludedStopIds = new Set(options?.excludeStopIds ?? []);
   const routeStops = (await db.getRouteStops(routeId)).filter(
     (stop: any) => !excludedStopIds.has(Number(stop.id))
   );
+  runtimeBreakdown.dbFetchMs = Date.now() - dbFetchStartedAt;
 
   if (routeStops.length === 0) {
     throw new TRPCError({
@@ -514,6 +548,81 @@ async function optimizeUserRoute(
     throw new TRPCError({
       code: "BAD_REQUEST",
       message: "A rota precisa ter pelo menos 2 paradas para otimizar.",
+    });
+  }
+
+  if (!options?.allowLargeSync && routeStops.length > ENV.maxSyncStops) {
+    const job = await db.createOptimizationJob({
+      routeId,
+      userId,
+      status: "queued",
+      metadata: {
+        stopCount: routeStops.length,
+        maxSyncStops: ENV.maxSyncStops,
+        routeMode: requestedMode || route.mode,
+        localityMode: options?.localityMode ?? null,
+        respectInputSequence: Boolean(options?.respectInputSequence),
+        excludeStopIds: options?.excludeStopIds ?? [],
+        requiresExternalWorker: true,
+      },
+    });
+    let queueProviderJobId: string | null = null;
+    let queueError: string | null = null;
+    if (job?.id && isOptimizationQueueConfigured()) {
+      try {
+        const providerJob = await enqueueOptimizationJob({
+          optimizationJobId: Number(job.id),
+          routeId,
+          userId,
+          mode: requestedMode || route.mode,
+          localityMode: options?.localityMode,
+          respectInputSequence: Boolean(options?.respectInputSequence),
+          excludeStopIds: options?.excludeStopIds ?? [],
+        });
+        queueProviderJobId = providerJob?.id ? String(providerJob.id) : null;
+      } catch (error) {
+        queueError =
+          error instanceof Error ? error.message : "Falha ao publicar na fila.";
+        if (job?.id) {
+          await db.updateOptimizationJob(Number(job.id), {
+            status: "failed",
+            finishedAt: new Date(),
+            errorMessage: queueError,
+          }).catch(() => undefined);
+        }
+      }
+    }
+    await db.createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "route_requires_queue",
+      severity: "warning",
+      source: "routes.optimize",
+      title: "Rota grande exige fila",
+      message: `A rota tem ${routeStops.length} paradas e excede o limite sincrono de ${ENV.maxSyncStops}.`,
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        jobId: job?.id ?? null,
+        queueProviderJobId,
+        queueConfigured: isOptimizationQueueConfigured(),
+        queueError,
+        stopCount: routeStops.length,
+        maxSyncStops: ENV.maxSyncStops,
+      },
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record queue requirement event:", error);
+    });
+
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message:
+        isOptimizationQueueConfigured()
+          ? "Rota grande enviada para fila de otimizacao."
+          : "Rota grande exige fila de otimizacao. Configure Redis/BullMQ e worker para processar rotas acima do limite sincrono.",
     });
   }
 
@@ -571,6 +680,9 @@ async function optimizeUserRoute(
   }
 
   const mode = requestedMode || route.mode;
+  const clusteringStartedAt = Date.now();
+  clusterStops(locations, { localityMode: options?.localityMode });
+  runtimeBreakdown.clusteringMs = Date.now() - clusteringStartedAt;
   async function buildOptimizationAttempt(attempt: {
     localityMode?: "balanced" | "local" | "strict";
     respectInputSequence?: boolean;
@@ -582,10 +694,12 @@ async function optimizeUserRoute(
       startLocation,
       endLocation,
       localityMode: attempt.localityMode,
+      telemetry,
     };
     let optimizedWithRoadMetrics: OptimizedRoute | null = null;
     let auditSource = "geo-default";
 
+    const optimizerStartedAt = Date.now();
     if (attempt.respectInputSequence) {
       optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
         attemptLocations,
@@ -608,17 +722,76 @@ async function optimizeUserRoute(
       auditSource = optimizedWithRoadMetrics ? "road-default" : "geo-default";
     }
 
+    if (
+      !optimizedWithRoadMetrics &&
+      attemptLocations.length > ENV.maxGeographicFallbackStops
+    ) {
+      await db.createOperationalEvent({
+        userId,
+        routeId,
+        stopId: null,
+        type: "geographic_fallback_blocked",
+        severity: "error",
+        source: "routes.optimize",
+        title: "Fallback geografico bloqueado",
+        message: `OSRM indisponivel para ${attemptLocations.length} paradas. Fallback geografico acima de ${ENV.maxGeographicFallbackStops} paradas foi bloqueado.`,
+        runtime: null,
+        url: null,
+        userAgent: null,
+        appVersion: null,
+        metadata: {
+          stopCount: attemptLocations.length,
+          maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
+          osrmBaseUrl: ENV.osrmBaseUrl,
+          auditSource,
+        },
+      }).catch((error) => {
+        console.warn("[Routes] Failed to record blocked geographic fallback:", error);
+      });
+      await db.createOperationalEvent({
+        userId,
+        routeId,
+        stopId: null,
+        type: "osrm_required_for_large_route",
+        severity: "error",
+        source: "routes.optimize",
+        title: "OSRM necessario para rota grande",
+        message:
+          "Rotas grandes precisam de matriz por rua para evitar roteirizacao geografica lenta ou incoerente.",
+        runtime: null,
+        url: null,
+        userAgent: null,
+        appVersion: null,
+        metadata: {
+          stopCount: attemptLocations.length,
+          maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
+          osrmBaseUrl: ENV.osrmBaseUrl,
+        },
+      }).catch((error) => {
+        console.warn("[Routes] Failed to record OSRM required event:", error);
+      });
+
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message:
+          "OSRM indisponivel para rota grande. Fallback geografico bloqueado para evitar timeout e sequencia incoerente.",
+      });
+    }
+
     const optimized = optimizedWithRoadMetrics
       ?? (attempt.respectInputSequence
         ? buildSequentialRoute(attemptLocations, roadMetricOptions)
         : attempt.orderedLocations
           ? buildSequentialRoute(attemptLocations, roadMetricOptions)
           : optimizeRoute(attemptLocations, mode, 0, roadMetricOptions));
+    runtimeBreakdown.optimizerMs += Date.now() - optimizerStartedAt;
+    const auditStartedAt = Date.now();
     const audit = auditOptimizedRoute(optimized, {
       startLocation,
       usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
       respectInputSequence: Boolean(attempt.respectInputSequence),
     });
+    runtimeBreakdown.auditMs += Date.now() - auditStartedAt;
 
     return {
       optimized,
@@ -649,6 +822,7 @@ async function optimizeUserRoute(
   }> = [];
 
   if (postOptimizationBlockingReason && isSequenceCoherenceIssue(postOptimizationBlockingReason.issue)) {
+    const correctionStartedAt = Date.now();
     const firstBlockingIssue = postOptimizationBlockingReason.issue;
     optimizationAttempt = await buildOptimizationAttempt({
       localityMode: "strict",
@@ -707,6 +881,7 @@ async function optimizeUserRoute(
         optimizationAttempt.audit
       );
     }
+    runtimeBreakdown.correctionMs += Date.now() - correctionStartedAt;
   }
 
   if (correctionAttempts.length > 0 && firstBlockingReason) {
@@ -754,6 +929,18 @@ async function optimizeUserRoute(
       routeId,
       qualityScore: attemptAudit.score,
       optimizationRuntimeMs: Date.now() - optimizationStartedAt,
+      dbFetchMs: runtimeBreakdown.dbFetchMs,
+      clusteringMs: runtimeBreakdown.clusteringMs,
+      osrmMs: runtimeBreakdown.osrmMs,
+      optimizerMs: runtimeBreakdown.optimizerMs,
+      auditMs: runtimeBreakdown.auditMs,
+      correctionMs: runtimeBreakdown.correctionMs,
+      dbSaveMs: runtimeBreakdown.dbSaveMs,
+      totalRuntimeMs: Date.now() - optimizationStartedAt,
+      osrmCallCount: runtimeBreakdown.osrmCallCount,
+      osrmFailureCount: runtimeBreakdown.osrmFailureCount,
+      osrmTotalMs: runtimeBreakdown.osrmTotalMs,
+      osrmAverageMs: runtimeBreakdown.osrmAverageMs,
       osrmUsed: optimizationAttempt.usedRoadMetrics,
       osrmFallback: !optimizationAttempt.usedRoadMetrics,
       clusterCount: attemptAudit.clusterMetrics.clusterCount,
@@ -879,6 +1066,7 @@ async function optimizeUserRoute(
     });
   }
 
+  const dbSaveStartedAt = Date.now();
   await db.updateRoute(routeId, userId, {
     totalDistance: optimized.totalDistance,
     totalTime: optimized.totalTime,
@@ -897,6 +1085,7 @@ async function optimizeUserRoute(
     notes: replaceImilePackageInNotes(wp.notes, wp.sequence),
   }));
   await db.createStops(routeId, updatedStops);
+  runtimeBreakdown.dbSaveMs += Date.now() - dbSaveStartedAt;
 
   await recordRouteMetricForAttempt(null);
 

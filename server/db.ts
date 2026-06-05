@@ -17,6 +17,7 @@ import {
   userIntegrations,
   operationalEvents,
   routeMetrics,
+  optimizationJobs,
   geocodeCache,
   addressCorrections,
 } from "../drizzle/schema";
@@ -54,6 +55,7 @@ const memory = {
   userIntegrations: [] as any[],
   operationalEvents: [] as any[],
   routeMetrics: [] as any[],
+  optimizationJobs: [] as any[],
   geocodeCache: [] as any[],
   addressCorrections: [] as any[],
   ids: {
@@ -66,6 +68,7 @@ const memory = {
     userIntegrations: 1,
     operationalEvents: 1,
     routeMetrics: 1,
+    optimizationJobs: 1,
     geocodeCache: 1,
     addressCorrections: 1,
   },
@@ -126,6 +129,7 @@ function hydrateMemory(data: any) {
   memory.userIntegrations = Array.isArray(data.userIntegrations) ? data.userIntegrations : [];
   memory.operationalEvents = Array.isArray(data.operationalEvents) ? data.operationalEvents : [];
   memory.routeMetrics = Array.isArray(data.routeMetrics) ? data.routeMetrics : [];
+  memory.optimizationJobs = Array.isArray(data.optimizationJobs) ? data.optimizationJobs : [];
   memory.geocodeCache = Array.isArray(data.geocodeCache) ? data.geocodeCache : [];
   memory.addressCorrections = Array.isArray(data.addressCorrections) ? data.addressCorrections : [];
   memory.ids = {
@@ -138,6 +142,7 @@ function hydrateMemory(data: any) {
     userIntegrations: Number(data.ids?.userIntegrations) || 1,
     operationalEvents: Number(data.ids?.operationalEvents) || 1,
     routeMetrics: Number(data.ids?.routeMetrics) || 1,
+    optimizationJobs: Number(data.ids?.optimizationJobs) || 1,
     geocodeCache: Number(data.ids?.geocodeCache) || 1,
     addressCorrections: Number(data.ids?.addressCorrections) || 1,
   };
@@ -539,6 +544,20 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["route_metrics", "averageGeocodingConfidence"],
   ["route_metrics", "minGeocodingConfidence"],
   ["route_metrics", "suspiciousGeocodingCount"],
+  ["route_metrics", "dbFetchMs"],
+  ["route_metrics", "clusteringMs"],
+  ["route_metrics", "osrmMs"],
+  ["route_metrics", "optimizerMs"],
+  ["route_metrics", "auditMs"],
+  ["route_metrics", "correctionMs"],
+  ["route_metrics", "dbSaveMs"],
+  ["route_metrics", "totalRuntimeMs"],
+  ["route_metrics", "osrmCallCount"],
+  ["route_metrics", "osrmFailureCount"],
+  ["route_metrics", "osrmTotalMs"],
+  ["route_metrics", "osrmAverageMs"],
+  ["optimization_jobs", "route_id"],
+  ["optimization_jobs", "status"],
   ["geocode_cache", "cacheKey"],
   ["geocode_cache", "results"],
   ["geocode_cache", "expiresAt"],
@@ -2087,6 +2106,158 @@ export async function createAddressCorrection(data: {
 
 // ==================== ROUTE METRICS ====================
 
+export type OptimizationJobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type CreateOptimizationJobInput = {
+  routeId: number;
+  userId?: number | null;
+  status?: OptimizationJobStatus;
+  errorMessage?: string | null;
+  runtimeMs?: number | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export async function createOptimizationJob(data: CreateOptimizationJobInput) {
+  const payload = {
+    routeId: data.routeId,
+    userId: data.userId ?? null,
+    status: data.status ?? "queued",
+    runtimeMs: data.runtimeMs ?? null,
+    errorMessage: data.errorMessage ?? null,
+    metadata: data.metadata ?? null,
+  };
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const created = {
+        id: memory.ids.optimizationJobs++,
+        ...payload,
+        createdAt: new Date(),
+        startedAt: payload.status === "running" ? new Date() : null,
+        finishedAt:
+          payload.status === "completed" ||
+          payload.status === "failed" ||
+          payload.status === "cancelled"
+            ? new Date()
+            : null,
+      };
+      memory.optimizationJobs.push(created);
+      await persistFallbackDb();
+      return created;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const inserted = await db
+    .insert(optimizationJobs)
+    .values(payload as any)
+    .$returningId();
+  const insertedId = inserted[0]?.id;
+  if (!insertedId) return null;
+
+  const result = await db
+    .select()
+    .from(optimizationJobs)
+    .where(eq(optimizationJobs.id, insertedId))
+    .limit(1);
+
+  return result[0] ?? null;
+}
+
+export async function updateOptimizationJob(
+  id: number,
+  patch: {
+    status?: OptimizationJobStatus;
+    startedAt?: Date | null;
+    finishedAt?: Date | null;
+    runtimeMs?: number | null;
+    errorMessage?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }
+) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const job = memory.optimizationJobs.find((item) => Number(item.id) === id);
+      if (!job) return null;
+      Object.assign(job, patch);
+      await persistFallbackDb();
+      return job;
+    }
+    requireConfiguredDatabase();
+  }
+
+  await db
+    .update(optimizationJobs)
+    .set(patch as any)
+    .where(eq(optimizationJobs.id, id));
+
+  const result = await db
+    .select()
+    .from(optimizationJobs)
+    .where(eq(optimizationJobs.id, id))
+    .limit(1);
+
+  return result[0] ?? null;
+}
+
+export async function getOptimizationJobsDashboard(days = 30) {
+  const safeDays = Math.min(Math.max(Math.round(days), 1), 365);
+  const cutoffDate = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
+  const rows = await (async () => {
+    const db = await getDb();
+    if (!db) {
+      if (await shouldUseMemoryDb()) {
+        const cutoff = cutoffDate.getTime();
+        return memory.optimizationJobs.filter(
+          (job) => new Date(job.createdAt).getTime() >= cutoff
+        );
+      }
+      requireConfiguredDatabase();
+    }
+
+    return db
+      .select()
+      .from(optimizationJobs)
+      .where(gte(optimizationJobs.createdAt, cutoffDate))
+      .orderBy(desc(optimizationJobs.createdAt))
+      .limit(2000);
+  })();
+
+  const byStatus = rows.reduce((acc: Record<string, number>, job: any) => {
+    acc[job.status] = (acc[job.status] || 0) + 1;
+    return acc;
+  }, {});
+  const runtimeValues = rows
+    .map((job: any) => Number(job.runtimeMs || 0))
+    .filter((value: number) => value > 0);
+
+  return {
+    periodDays: safeDays,
+    total: rows.length,
+    byStatus,
+    queued: byStatus.queued || 0,
+    running: byStatus.running || 0,
+    completed: byStatus.completed || 0,
+    failed: byStatus.failed || 0,
+    cancelled: byStatus.cancelled || 0,
+    runtime: {
+      averageMs: roundMetric(metricAverage(runtimeValues)),
+      p50Ms: roundMetric(metricPercentile(runtimeValues, 50)),
+      p95Ms: roundMetric(metricPercentile(runtimeValues, 95)),
+      p99Ms: roundMetric(metricPercentile(runtimeValues, 99)),
+      maxMs: Math.max(0, ...runtimeValues),
+    },
+    recent: rows.slice(0, 20),
+  };
+}
+
 export type CreateRouteMetricInput = {
   userId?: number | null;
   routeId?: number | null;
@@ -2104,6 +2275,18 @@ export type CreateRouteMetricInput = {
   averageGeocodingConfidence?: number;
   minGeocodingConfidence?: number;
   suspiciousGeocodingCount?: number;
+  dbFetchMs?: number;
+  clusteringMs?: number;
+  osrmMs?: number;
+  optimizerMs?: number;
+  auditMs?: number;
+  correctionMs?: number;
+  dbSaveMs?: number;
+  totalRuntimeMs?: number;
+  osrmCallCount?: number;
+  osrmFailureCount?: number;
+  osrmTotalMs?: number;
+  osrmAverageMs?: number;
   issuesDetectedCount: number;
   issuesCorrectedCount: number;
   issuesBlockedCount: number;
@@ -2127,6 +2310,18 @@ function metricAverage(values: number[]) {
   return values.length
     ? values.reduce((total, value) => total + value, 0) / values.length
     : 0;
+}
+
+function metricPercentile(values: number[], percentile: number) {
+  const sorted = values
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1)
+  );
+  return sorted[index] ?? 0;
 }
 
 function metricPercent(part: number, total: number) {
@@ -2223,6 +2418,20 @@ export async function createRouteMetric(data: CreateRouteMetricInput) {
     suspiciousGeocodingCount: Math.round(
       normalizeMetricNumber(data.suspiciousGeocodingCount)
     ),
+    dbFetchMs: Math.round(normalizeMetricNumber(data.dbFetchMs)),
+    clusteringMs: Math.round(normalizeMetricNumber(data.clusteringMs)),
+    osrmMs: Math.round(normalizeMetricNumber(data.osrmMs)),
+    optimizerMs: Math.round(normalizeMetricNumber(data.optimizerMs)),
+    auditMs: Math.round(normalizeMetricNumber(data.auditMs)),
+    correctionMs: Math.round(normalizeMetricNumber(data.correctionMs)),
+    dbSaveMs: Math.round(normalizeMetricNumber(data.dbSaveMs)),
+    totalRuntimeMs: Math.round(
+      normalizeMetricNumber(data.totalRuntimeMs, data.optimizationRuntimeMs)
+    ),
+    osrmCallCount: Math.round(normalizeMetricNumber(data.osrmCallCount)),
+    osrmFailureCount: Math.round(normalizeMetricNumber(data.osrmFailureCount)),
+    osrmTotalMs: Math.round(normalizeMetricNumber(data.osrmTotalMs)),
+    osrmAverageMs: Math.round(normalizeMetricNumber(data.osrmAverageMs)),
     issuesDetectedCount: Math.round(
       normalizeMetricNumber(data.issuesDetectedCount)
     ),
@@ -2366,6 +2575,43 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
     Number(getMetricRouteMetadata(metric).largestPartitionSize || 0)
   );
   const routeModes = ["shortest_distance", "shortest_time", "balanced"] as const;
+  const stageNames = [
+    "dbFetchMs",
+    "clusteringMs",
+    "osrmMs",
+    "optimizerMs",
+    "auditMs",
+    "correctionMs",
+    "dbSaveMs",
+    "totalRuntimeMs",
+  ] as const;
+  const performanceStages = Object.fromEntries(
+    stageNames.map((stage) => {
+      const values = metrics.map((metric) => Number(metric[stage] || 0));
+      return [
+        stage,
+        {
+          averageMs: roundMetric(metricAverage(values)),
+          p50Ms: roundMetric(metricPercentile(values, 50)),
+          p95Ms: roundMetric(metricPercentile(values, 95)),
+          p99Ms: roundMetric(metricPercentile(values, 99)),
+          maxMs: Math.max(0, ...values),
+        },
+      ];
+    })
+  );
+  const osrmCallCount = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.osrmCallCount || 0),
+    0
+  );
+  const osrmFailureCount = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.osrmFailureCount || 0),
+    0
+  );
+  const osrmTotalMs = metrics.reduce(
+    (totalMs, metric) => totalMs + Number(metric.osrmTotalMs || 0),
+    0
+  );
   const modePerformance = routeModes.map((mode) => {
     const modeMetrics = metrics.filter((metric) => metric.routeMode === mode);
     const modeTotal = modeMetrics.length;
@@ -2504,6 +2750,16 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
       averagePartitionCount: roundMetric(metricAverage(partitionCounts)),
       maxPartitionCount: Math.max(0, ...partitionCounts),
       largestPartitionSize: Math.max(0, ...largestPartitionSizes),
+    },
+    performance: {
+      stages: performanceStages,
+      osrm: {
+        callCount: osrmCallCount,
+        failureCount: osrmFailureCount,
+        failureRate: roundMetric(metricPercent(osrmFailureCount, osrmCallCount)),
+        totalMs: Math.round(osrmTotalMs),
+        averageMs: Math.round(osrmCallCount > 0 ? osrmTotalMs / osrmCallCount : 0),
+      },
     },
     modePerformance,
   };
@@ -3009,6 +3265,7 @@ export async function getAdminOperationalDashboard() {
       const geocodingCache = buildGeocodingCacheDashboard(events.slice(0, 500));
       const geocodingImpact = await getGeocodingImpactDashboard();
       const geocodingExecutiveReport = await getGeocodingExecutiveReport();
+      const optimizationJobsSummary = await getOptimizationJobsDashboard(30);
 
       return {
         stats: {
@@ -3036,6 +3293,7 @@ export async function getAdminOperationalDashboard() {
         },
         routeQuality,
         routeMetrics,
+        optimizationJobs: optimizationJobsSummary,
         geocodingCache,
         geocodingImpact,
         geocodingExecutiveReport,
@@ -3094,6 +3352,7 @@ export async function getAdminOperationalDashboard() {
   const geocodingCache = buildGeocodingCacheDashboard(recentOperationalEvents);
   const geocodingImpact = await getGeocodingImpactDashboard();
   const geocodingExecutiveReport = await getGeocodingExecutiveReport();
+  const optimizationJobsSummary = await getOptimizationJobsDashboard(30);
 
   const recentUsers = await db
     .select({
@@ -3139,6 +3398,7 @@ export async function getAdminOperationalDashboard() {
     },
     routeQuality,
     routeMetrics: routeMetricsSummary,
+    optimizationJobs: optimizationJobsSummary,
     geocodingCache,
     geocodingImpact,
     geocodingExecutiveReport,

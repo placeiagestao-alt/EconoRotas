@@ -241,6 +241,18 @@ export const routeMetrics = mysqlTable("route_metrics", {
   averageGeocodingConfidence: int("averageGeocodingConfidence").default(0).notNull(),
   minGeocodingConfidence: int("minGeocodingConfidence").default(0).notNull(),
   suspiciousGeocodingCount: int("suspiciousGeocodingCount").default(0).notNull(),
+  dbFetchMs: int("dbFetchMs").default(0).notNull(),
+  clusteringMs: int("clusteringMs").default(0).notNull(),
+  osrmMs: int("osrmMs").default(0).notNull(),
+  optimizerMs: int("optimizerMs").default(0).notNull(),
+  auditMs: int("auditMs").default(0).notNull(),
+  correctionMs: int("correctionMs").default(0).notNull(),
+  dbSaveMs: int("dbSaveMs").default(0).notNull(),
+  totalRuntimeMs: int("totalRuntimeMs").default(0).notNull(),
+  osrmCallCount: int("osrmCallCount").default(0).notNull(),
+  osrmFailureCount: int("osrmFailureCount").default(0).notNull(),
+  osrmTotalMs: int("osrmTotalMs").default(0).notNull(),
+  osrmAverageMs: int("osrmAverageMs").default(0).notNull(),
   issuesDetectedCount: int("issuesDetectedCount").default(0).notNull(),
   issuesCorrectedCount: int("issuesCorrectedCount").default(0).notNull(),
   issuesBlockedCount: int("issuesBlockedCount").default(0).notNull(),
@@ -265,6 +277,37 @@ export const routeMetrics = mysqlTable("route_metrics", {
 
 export type RouteMetric = typeof routeMetrics.$inferSelect;
 export type InsertRouteMetric = typeof routeMetrics.$inferInsert;
+
+/**
+ * Optimization jobs - async processing control for large routes.
+ */
+export const optimizationJobs = mysqlTable("optimization_jobs", {
+  id: int("id").autoincrement().primaryKey(),
+  routeId: int("route_id").notNull(),
+  userId: int("user_id"),
+  status: mysqlEnum("status", [
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+  ]).default("queued").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+  runtimeMs: int("runtime_ms"),
+  errorMessage: text("error_message"),
+  metadata: json("metadata"),
+}, (table) => ({
+  routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("cascade"),
+  userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("set null"),
+  routeIdIdx: index("optimization_jobs_route_id_idx").on(table.routeId),
+  statusIdx: index("optimization_jobs_status_idx").on(table.status),
+  createdAtIdx: index("optimization_jobs_created_at_idx").on(table.createdAt),
+}));
+
+export type OptimizationJob = typeof optimizationJobs.$inferSelect;
+export type InsertOptimizationJob = typeof optimizationJobs.$inferInsert;
 
 /**
  * Geocode cache - shared address lookup memory for PWA, Android and site.
@@ -329,6 +372,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   operationalEvents: many(operationalEvents),
   routeMetrics: many(routeMetrics),
   addressCorrections: many(addressCorrections),
+  optimizationJobs: many(optimizationJobs),
 }));
 
 export const routesRelations = relations(routes, ({ one, many }) => ({
@@ -340,6 +384,7 @@ export const routesRelations = relations(routes, ({ one, many }) => ({
   operationalEvents: many(operationalEvents),
   routeMetrics: many(routeMetrics),
   addressCorrections: many(addressCorrections),
+  optimizationJobs: many(optimizationJobs),
 }));
 
 export const stopsRelations = relations(stops, ({ one }) => ({
@@ -379,4 +424,9 @@ export const addressCorrectionsRelations = relations(addressCorrections, ({ one 
   user: one(users, { fields: [addressCorrections.userId], references: [users.id] }),
   route: one(routes, { fields: [addressCorrections.routeId], references: [routes.id] }),
   stop: one(stops, { fields: [addressCorrections.stopId], references: [stops.id] }),
+}));
+
+export const optimizationJobsRelations = relations(optimizationJobs, ({ one }) => ({
+  user: one(users, { fields: [optimizationJobs.userId], references: [users.id] }),
+  route: one(routes, { fields: [optimizationJobs.routeId], references: [routes.id] }),
 }));

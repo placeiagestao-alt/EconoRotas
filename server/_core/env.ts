@@ -18,6 +18,11 @@ function isDockerOrLocalDatabaseUrl(value: string) {
   }
 }
 
+function readPositiveInt(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
+}
+
 export const ENV = {
   appId: process.env.VITE_APP_ID ?? "",
   cookieSecret: process.env.JWT_SECRET ?? "",
@@ -72,6 +77,12 @@ export const ENV = {
   osrmRequestTimeoutMs: Number(process.env.OSRM_REQUEST_TIMEOUT_MS || 8000),
   osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3000),
   osrmRequired: process.env.OSRM_REQUIRED === "true",
+  maxSyncStops: readPositiveInt(process.env.MAX_SYNC_STOPS, 250),
+  maxGeographicFallbackStops: readPositiveInt(
+    process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS,
+    100
+  ),
+  bullmqRedisUrl: process.env.BULLMQ_REDIS_URL ?? process.env.REDIS_URL ?? "",
   integrationCredentialsSecret:
     process.env.INTEGRATION_CREDENTIALS_SECRET ?? process.env.JWT_SECRET ?? "",
 };

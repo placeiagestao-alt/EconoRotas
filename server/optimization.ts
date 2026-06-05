@@ -39,6 +39,9 @@ export interface RouteOptimizationOptions {
   localityMode?: "balanced" | "local" | "strict";
   partitionLargeRoutes?: boolean;
   maxPartitionSize?: number;
+  telemetry?: {
+    recordOsrmCall?: (durationMs: number, success: boolean) => void;
+  };
 }
 
 export type StopCluster = {
@@ -778,6 +781,103 @@ function calculateDriverFriendlyScore(
   );
 }
 
+function chooseNextGeographicPartition(
+  partitions: RoutePartition[],
+  currentLocation: Location
+) {
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+
+  partitions.forEach((partition, index) => {
+    const distance = calculateDistance(currentLocation, partition.centroid);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  });
+
+  return bestIndex;
+}
+
+function optimizePartitionedOpenRoute(
+  locations: Location[],
+  mode: RouteMode = "balanced",
+  options: RouteOptimizationOptions = {}
+): OptimizedRoute | null {
+  const partitions = partitionStopsForOptimization(locations, {
+    ...options,
+    maxPartitionSize: options.maxPartitionSize ?? 70,
+  });
+  if (partitions.length <= 1) return null;
+
+  const remaining = [...partitions];
+  const largestPartitionSize = Math.max(
+    0,
+    ...partitions.map((partition) => partition.stops.length)
+  );
+  const finalSequence: number[] = [];
+  const finalWaypoints: OptimizedRoute["waypoints"] = [];
+  let totalDistance = 0;
+  let totalTime = 0;
+  let currentLocation = options.startLocation ?? remaining[0].centroid;
+
+  while (remaining.length > 0) {
+    const partitionIndex = chooseNextGeographicPartition(remaining, currentLocation);
+    const [partition] = remaining.splice(partitionIndex, 1);
+    const isLastPartition = remaining.length === 0;
+    const partitionLocations = partition.stops.map((stop) => ({
+      latitude: stop.latitude,
+      longitude: stop.longitude,
+      address: stop.address,
+      notes: stop.notes,
+      geocodingConfidenceScore: stop.geocodingConfidenceScore,
+      geocodingMethod: stop.geocodingMethod,
+      geocodingSuspect: stop.geocodingSuspect,
+    }));
+    const optimizedPartition = optimizeOpenRoute(partitionLocations, mode, 0, {
+      ...options,
+      startLocation: currentLocation,
+      endLocation: isLastPartition ? options.endLocation : undefined,
+      partitionLargeRoutes: false,
+    });
+
+    totalDistance += optimizedPartition.totalDistance;
+    totalTime += optimizedPartition.totalTime;
+
+    for (const localIndex of optimizedPartition.sequence) {
+      const originalStop = partition.stops[localIndex];
+      if (!originalStop) return null;
+      finalSequence.push(originalStop.originalIndex);
+      finalWaypoints.push({
+        latitude: originalStop.latitude,
+        longitude: originalStop.longitude,
+        address: originalStop.address,
+        notes: originalStop.notes,
+        geocodingConfidenceScore: originalStop.geocodingConfidenceScore,
+        geocodingMethod: originalStop.geocodingMethod,
+        geocodingSuspect: originalStop.geocodingSuspect,
+        sequence: finalWaypoints.length,
+      });
+    }
+
+    const lastWaypoint = finalWaypoints[finalWaypoints.length - 1];
+    if (lastWaypoint) currentLocation = lastWaypoint;
+  }
+
+  return {
+    sequence: finalSequence,
+    totalDistance: Math.round(totalDistance * 100) / 100,
+    totalTime: Math.round(totalTime),
+    waypoints: finalWaypoints,
+    metadata: {
+      partitioned: true,
+      partitionCount: partitions.length,
+      maxPartitionSize: options.maxPartitionSize ?? 70,
+      largestPartitionSize,
+    },
+  };
+}
+
 function optimizeOpenRoute(
   locations: Location[],
   mode: RouteMode = "balanced",
@@ -786,6 +886,11 @@ function optimizeOpenRoute(
 ) {
   if (locations.length === 0) {
     return buildOptimizedRoute(locations, [], options);
+  }
+
+  if (options.partitionLargeRoutes !== false && locations.length > 120) {
+    const partitioned = optimizePartitionedOpenRoute(locations, mode, options);
+    if (partitioned) return partitioned;
   }
 
   const startIndexes = options.startLocation

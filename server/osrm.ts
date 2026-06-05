@@ -205,6 +205,10 @@ async function fetchRoadMatrix(
     return null;
   }
 
+  const startedAt = Date.now();
+  const record = (success: boolean) => {
+    options.telemetry?.recordOsrmCall?.(Date.now() - startedAt, success);
+  };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
 
@@ -214,21 +218,32 @@ async function fetchRoadMatrix(
       headers: { Accept: "application/json" },
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      record(false);
+      return null;
+    }
 
     const data = (await response.json()) as OsrmTableResponse;
-    if (data.code !== "Ok") return null;
+    if (data.code !== "Ok") {
+      record(false);
+      return null;
+    }
 
     const distancesKm = normalizeMatrix(data.distances, 1000);
     const durationsMinutes = normalizeMatrix(data.durations, 60);
-    if (!distancesKm || !durationsMinutes) return null;
+    if (!distancesKm || !durationsMinutes) {
+      record(false);
+      return null;
+    }
 
+    record(true);
     return {
       matrix: { nodes, distancesKm, durationsMinutes },
       startNodeIndex,
       endNodeIndex,
     };
   } catch {
+    record(false);
     return null;
   } finally {
     clearTimeout(timeout);
