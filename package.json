@@ -16,6 +16,7 @@
     "worker:optimization": "tsx server/optimizationWorker.ts",
     "check": "tsc --noEmit",
     "check:production": "node scripts/check-production.mjs",
+    "check:optimization-infra": "tsx scripts/check-optimization-infra.ts",
     "format": "prettier --write .",
     "test": "vitest run",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",

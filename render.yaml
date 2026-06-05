@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: econorota-optimization-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile.worker
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: BULLMQ_REDIS_URL
+        sync: false
+      - key: REQUIRE_MANAGED_DATABASE
+        value: "true"

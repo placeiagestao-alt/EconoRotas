@@ -296,7 +296,12 @@ export const optimizationJobs = mysqlTable("optimization_jobs", {
   startedAt: timestamp("started_at"),
   finishedAt: timestamp("finished_at"),
   runtimeMs: int("runtime_ms"),
+  queueWaitMs: int("queue_wait_ms"),
+  attemptCount: int("attempt_count").default(0).notNull(),
+  maxAttempts: int("max_attempts").default(3).notNull(),
+  providerJobId: varchar("provider_job_id", { length: 191 }),
   errorMessage: text("error_message"),
+  stackTrace: text("stack_trace"),
   metadata: json("metadata"),
 }, (table) => ({
   routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("cascade"),

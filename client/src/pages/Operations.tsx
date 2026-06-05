@@ -34,7 +34,7 @@ function StatCard({
   icon: Icon,
 }: {
   title: string;
-  value: number;
+  value: number | string;
   suffix?: string;
   icon: typeof Users;
 }) {
@@ -197,6 +197,7 @@ export default function Operations() {
   const stats = data?.stats;
   const routeMetrics = (data as any)?.routeMetrics;
   const optimizationJobs = (data as any)?.optimizationJobs;
+  const optimizationQueue = (data as any)?.optimizationQueue;
   const geocodingCache = (data as any)?.geocodingCache;
   const geocodingImpact = (data as any)?.geocodingImpact;
   const executiveReport = (data as any)?.geocodingExecutiveReport;
@@ -253,16 +254,51 @@ export default function Operations() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-5">
-              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
                 <StatCard
                   title="Jobs em fila"
-                  value={optimizationJobs?.queued ?? 0}
+                  value={optimizationQueue?.counts?.waiting ?? optimizationJobs?.queued ?? 0}
                   icon={Activity}
                 />
                 <StatCard
-                  title="Jobs falhos"
-                  value={optimizationJobs?.failed ?? 0}
+                  title="Executando"
+                  value={optimizationQueue?.counts?.active ?? optimizationJobs?.running ?? 0}
+                  icon={Activity}
+                />
+                <StatCard
+                  title="Workers"
+                  value={optimizationQueue?.workerCount ?? 0}
+                  icon={ShieldCheck}
+                />
+                <StatCard
+                  title="Falhos"
+                  value={optimizationQueue?.counts?.failed ?? optimizationJobs?.failed ?? 0}
                   icon={AlertTriangle}
+                />
+                <StatCard
+                  title="Sucesso fila"
+                  value={Math.round(optimizationJobs?.successRate ?? 0)}
+                  suffix="%"
+                  icon={ShieldCheck}
+                />
+                <StatCard
+                  title="Retry ativo"
+                  value={optimizationJobs?.retrying ?? 0}
+                  icon={Activity}
+                />
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+                <StatCard
+                  title="Fila media"
+                  value={Math.round((optimizationJobs?.queueWait?.averageMs ?? 0) / 1000)}
+                  suffix="s"
+                  icon={Gauge}
+                />
+                <StatCard
+                  title="Redis fila"
+                  value={optimizationQueue?.reachable ? "OK" : "OFF"}
+                  icon={ShieldCheck}
                 />
                 <StatCard
                   title="OSRM chamadas"

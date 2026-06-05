@@ -49,6 +49,7 @@ import {
 } from "../shared/geocodingConfidence";
 import {
   enqueueOptimizationJob,
+  getOptimizationQueueHealth,
   isOptimizationQueueConfigured,
 } from "./optimizationQueue";
 
@@ -580,6 +581,12 @@ export async function optimizeUserRoute(
           excludeStopIds: options?.excludeStopIds ?? [],
         });
         queueProviderJobId = providerJob?.id ? String(providerJob.id) : null;
+        if (queueProviderJobId && job?.id) {
+          await db.updateOptimizationJob(Number(job.id), {
+            providerJobId: queueProviderJobId,
+            maxAttempts: 3,
+          }).catch(() => undefined);
+        }
       } catch (error) {
         queueError =
           error instanceof Error ? error.message : "Falha ao publicar na fila.";
@@ -592,6 +599,32 @@ export async function optimizeUserRoute(
         }
       }
     }
+    await db.createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "optimization_job_created",
+      severity: isOptimizationQueueConfigured() && !queueError ? "info" : "warning",
+      source: "optimization.queue",
+      title: "Job de otimizacao criado",
+      message: isOptimizationQueueConfigured() && !queueError
+        ? "Rota grande criada na fila de otimizacao."
+        : "Rota grande registrada, mas a fila ainda nao esta operacional.",
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        optimizationJobId: job?.id ?? null,
+        providerJobId: queueProviderJobId,
+        queueConfigured: isOptimizationQueueConfigured(),
+        queueError,
+        stopCount: routeStops.length,
+        maxSyncStops: ENV.maxSyncStops,
+      },
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record optimization job event:", error);
+    });
     await db.createOperationalEvent({
       userId,
       routeId,
@@ -1464,7 +1497,14 @@ export const appRouter = router({
   }),
 
   admin: router({
-    dashboard: adminProcedure.query(() => db.getAdminOperationalDashboard()),
+    dashboard: adminProcedure.query(async () => {
+      const dashboard = await db.getAdminOperationalDashboard();
+      const optimizationQueue = await getOptimizationQueueHealth();
+      return {
+        ...dashboard,
+        optimizationQueue,
+      };
+    }),
     routeMetrics: adminProcedure.input(z.object({
       days: z.number().min(1).max(365).default(30),
     }))

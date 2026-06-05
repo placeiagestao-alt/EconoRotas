@@ -32,6 +32,8 @@ function createAuthContext(userId: number, role: "user" | "admin" = "user"): Trp
 describe("Route endpoints", () => {
   afterEach(() => {
     ENV.osrmRequired = false;
+    ENV.maxSyncStops = 250;
+    ENV.bullmqRedisUrl = "";
   });
 
   it("creates stops and optimizes route in one backend operation", async () => {
@@ -235,6 +237,51 @@ describe("Route endpoints", () => {
 
     const storedRoute = await caller.routes.get({ id: route.id });
     expect(storedRoute?.status).toBe("draft");
+  });
+
+  it("queues large routes instead of optimizing them synchronously", async () => {
+    ENV.maxSyncStops = 2;
+    ENV.bullmqRedisUrl = "";
+    const caller = appRouter.createCaller(createAuthContext(8270));
+
+    const route = await caller.routes.create({
+      name: "Rota grande para fila",
+      mode: "balanced",
+    });
+    await caller.stops.create({
+      routeId: route.id,
+      stops: [
+        {
+          address: "Rua Fila A, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+        },
+        {
+          address: "Rua Fila B, Presidente Prudente - SP",
+          latitude: -22.1217,
+          longitude: -51.3899,
+          sequence: 1,
+        },
+        {
+          address: "Rua Fila C, Presidente Prudente - SP",
+          latitude: -22.1227,
+          longitude: -51.3909,
+          sequence: 2,
+        },
+      ],
+    });
+
+    await expect(caller.routes.optimize({ id: route.id })).rejects.toThrow(
+      "Rota grande exige fila"
+    );
+
+    const jobs = await db.getOptimizationJobsDashboard(30);
+    expect(jobs.queued).toBeGreaterThanOrEqual(1);
+    expect(jobs.total).toBeGreaterThanOrEqual(1);
+
+    const dashboard = await db.getAdminOperationalDashboard();
+    expect(dashboard.optimizationJobs.queued).toBeGreaterThanOrEqual(1);
   });
 
   it("estimates commercial impact from corrected route metrics", async () => {

@@ -20,6 +20,7 @@ import { isAdminEmail } from "./adminAccess";
 import { serveStatic } from "./static";
 import { recordHealthObservation } from "./monitoring";
 import { getOsrmHealth } from "../osrm";
+import { getOptimizationQueueHealth } from "../optimizationQueue";
 import {
   ensurePersistentFallbackDbLoaded,
   getDatabaseHealth,
@@ -174,6 +175,7 @@ function validateProductionEnvironment() {
 async function getStorageHealthSnapshot(source: string) {
   const database = await getDatabaseHealth();
   const osrm = await getOsrmHealth();
+  const queue = await getOptimizationQueueHealth();
   if (!database.connected) {
     try {
       await ensurePersistentFallbackDbLoaded();
@@ -213,6 +215,7 @@ async function getStorageHealthSnapshot(source: string) {
     storageAvailable,
     systemAvailable,
     osrm,
+    queue,
     mode,
   };
 }
@@ -289,7 +292,7 @@ export default function EconoRotasAssetRefresh() { return null; }
 `);
   });
   app.get("/api/health", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, mode } =
+    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, queue, mode } =
       await getStorageHealthSnapshot("api.health");
 
     res.status(systemAvailable ? 200 : 500).json({
@@ -300,6 +303,7 @@ export default function EconoRotasAssetRefresh() { return null; }
       database,
       fallbackStore,
       osrm,
+      queue,
       requiredManagedDatabase: ENV.requireManagedDatabase,
       warning: ENV.hasInvalidProductionDatabaseUrl
         ? "DATABASE_URL aponta para host local/Docker e não funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis."
@@ -308,7 +312,7 @@ export default function EconoRotasAssetRefresh() { return null; }
     });
   });
   app.get("/api/monitor/ping", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, mode } =
+    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, queue, mode } =
       await getStorageHealthSnapshot("api.monitor.ping");
 
     res.status(systemAvailable ? 200 : 500).json({
@@ -320,6 +324,7 @@ export default function EconoRotasAssetRefresh() { return null; }
       database,
       fallbackStore,
       osrm,
+      queue,
       requiredManagedDatabase: ENV.requireManagedDatabase,
       timestamp: new Date().toISOString(),
     });

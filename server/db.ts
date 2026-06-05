@@ -558,6 +558,11 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["route_metrics", "osrmAverageMs"],
   ["optimization_jobs", "route_id"],
   ["optimization_jobs", "status"],
+  ["optimization_jobs", "queue_wait_ms"],
+  ["optimization_jobs", "attempt_count"],
+  ["optimization_jobs", "max_attempts"],
+  ["optimization_jobs", "provider_job_id"],
+  ["optimization_jobs", "stack_trace"],
   ["geocode_cache", "cacheKey"],
   ["geocode_cache", "results"],
   ["geocode_cache", "expiresAt"],
@@ -2119,6 +2124,11 @@ export type CreateOptimizationJobInput = {
   status?: OptimizationJobStatus;
   errorMessage?: string | null;
   runtimeMs?: number | null;
+  queueWaitMs?: number | null;
+  attemptCount?: number;
+  maxAttempts?: number;
+  providerJobId?: string | null;
+  stackTrace?: string | null;
   metadata?: Record<string, unknown> | null;
 };
 
@@ -2128,7 +2138,12 @@ export async function createOptimizationJob(data: CreateOptimizationJobInput) {
     userId: data.userId ?? null,
     status: data.status ?? "queued",
     runtimeMs: data.runtimeMs ?? null,
+    queueWaitMs: data.queueWaitMs ?? null,
+    attemptCount: data.attemptCount ?? 0,
+    maxAttempts: data.maxAttempts ?? 3,
+    providerJobId: data.providerJobId ?? null,
     errorMessage: data.errorMessage ?? null,
+    stackTrace: data.stackTrace ?? null,
     metadata: data.metadata ?? null,
   };
 
@@ -2177,7 +2192,12 @@ export async function updateOptimizationJob(
     startedAt?: Date | null;
     finishedAt?: Date | null;
     runtimeMs?: number | null;
+    queueWaitMs?: number | null;
+    attemptCount?: number;
+    maxAttempts?: number;
+    providerJobId?: string | null;
     errorMessage?: string | null;
+    stackTrace?: string | null;
     metadata?: Record<string, unknown> | null;
   }
 ) {
@@ -2237,6 +2257,24 @@ export async function getOptimizationJobsDashboard(days = 30) {
   const runtimeValues = rows
     .map((job: any) => Number(job.runtimeMs || 0))
     .filter((value: number) => value > 0);
+  const queueWaitValues = rows
+    .map((job: any) => {
+      const explicit = Number(job.queueWaitMs || 0);
+      if (explicit > 0) return explicit;
+      const startedAt = job.startedAt ? new Date(job.startedAt).getTime() : 0;
+      const createdAt = job.createdAt ? new Date(job.createdAt).getTime() : 0;
+      return startedAt > createdAt ? startedAt - createdAt : 0;
+    })
+    .filter((value: number) => value > 0);
+  const attempted = rows.filter((job: any) =>
+    ["completed", "failed", "cancelled"].includes(String(job.status))
+  ).length;
+  const completed = byStatus.completed || 0;
+  const failed = byStatus.failed || 0;
+  const retrying = rows.filter(
+    (job: any) =>
+      Number(job.attemptCount || 0) > 1 && String(job.status) !== "completed"
+  ).length;
 
   return {
     periodDays: safeDays,
@@ -2247,6 +2285,16 @@ export async function getOptimizationJobsDashboard(days = 30) {
     completed: byStatus.completed || 0,
     failed: byStatus.failed || 0,
     cancelled: byStatus.cancelled || 0,
+    successRate: roundMetric(metricPercent(completed, attempted)),
+    failureRate: roundMetric(metricPercent(failed, attempted)),
+    retrying,
+    queueWait: {
+      averageMs: roundMetric(metricAverage(queueWaitValues)),
+      p50Ms: roundMetric(metricPercentile(queueWaitValues, 50)),
+      p95Ms: roundMetric(metricPercentile(queueWaitValues, 95)),
+      p99Ms: roundMetric(metricPercentile(queueWaitValues, 99)),
+      maxMs: Math.max(0, ...queueWaitValues),
+    },
     runtime: {
       averageMs: roundMetric(metricAverage(runtimeValues)),
       p50Ms: roundMetric(metricPercentile(runtimeValues, 50)),

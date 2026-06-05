@@ -248,7 +248,12 @@ var init_schema = __esm({
       startedAt: timestamp("started_at"),
       finishedAt: timestamp("finished_at"),
       runtimeMs: int("runtime_ms"),
+      queueWaitMs: int("queue_wait_ms"),
+      attemptCount: int("attempt_count").default(0).notNull(),
+      maxAttempts: int("max_attempts").default(3).notNull(),
+      providerJobId: varchar("provider_job_id", { length: 191 }),
       errorMessage: text("error_message"),
+      stackTrace: text("stack_trace"),
       metadata: json("metadata")
     }, (table) => ({
       routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("cascade"),
@@ -1914,7 +1919,12 @@ async function createOptimizationJob(data) {
     userId: data.userId ?? null,
     status: data.status ?? "queued",
     runtimeMs: data.runtimeMs ?? null,
+    queueWaitMs: data.queueWaitMs ?? null,
+    attemptCount: data.attemptCount ?? 0,
+    maxAttempts: data.maxAttempts ?? 3,
+    providerJobId: data.providerJobId ?? null,
     errorMessage: data.errorMessage ?? null,
+    stackTrace: data.stackTrace ?? null,
     metadata: data.metadata ?? null
   };
   const db = await getDb();
@@ -1976,6 +1986,21 @@ async function getOptimizationJobsDashboard(days = 30) {
     return acc;
   }, {});
   const runtimeValues = rows.map((job) => Number(job.runtimeMs || 0)).filter((value) => value > 0);
+  const queueWaitValues = rows.map((job) => {
+    const explicit = Number(job.queueWaitMs || 0);
+    if (explicit > 0) return explicit;
+    const startedAt = job.startedAt ? new Date(job.startedAt).getTime() : 0;
+    const createdAt = job.createdAt ? new Date(job.createdAt).getTime() : 0;
+    return startedAt > createdAt ? startedAt - createdAt : 0;
+  }).filter((value) => value > 0);
+  const attempted = rows.filter(
+    (job) => ["completed", "failed", "cancelled"].includes(String(job.status))
+  ).length;
+  const completed = byStatus.completed || 0;
+  const failed = byStatus.failed || 0;
+  const retrying = rows.filter(
+    (job) => Number(job.attemptCount || 0) > 1 && String(job.status) !== "completed"
+  ).length;
   return {
     periodDays: safeDays,
     total: rows.length,
@@ -1985,6 +2010,16 @@ async function getOptimizationJobsDashboard(days = 30) {
     completed: byStatus.completed || 0,
     failed: byStatus.failed || 0,
     cancelled: byStatus.cancelled || 0,
+    successRate: roundMetric(metricPercent(completed, attempted)),
+    failureRate: roundMetric(metricPercent(failed, attempted)),
+    retrying,
+    queueWait: {
+      averageMs: roundMetric(metricAverage(queueWaitValues)),
+      p50Ms: roundMetric(metricPercentile(queueWaitValues, 50)),
+      p95Ms: roundMetric(metricPercentile(queueWaitValues, 95)),
+      p99Ms: roundMetric(metricPercentile(queueWaitValues, 99)),
+      maxMs: Math.max(0, ...queueWaitValues)
+    },
     runtime: {
       averageMs: roundMetric(metricAverage(runtimeValues)),
       p50Ms: roundMetric(metricPercentile(runtimeValues, 50)),
@@ -3058,6 +3093,11 @@ var init_db = __esm({
       ["route_metrics", "osrmAverageMs"],
       ["optimization_jobs", "route_id"],
       ["optimization_jobs", "status"],
+      ["optimization_jobs", "queue_wait_ms"],
+      ["optimization_jobs", "attempt_count"],
+      ["optimization_jobs", "max_attempts"],
+      ["optimization_jobs", "provider_job_id"],
+      ["optimization_jobs", "stack_trace"],
       ["geocode_cache", "cacheKey"],
       ["geocode_cache", "results"],
       ["geocode_cache", "expiresAt"],
@@ -6999,7 +7039,8 @@ init_geocodingConfidence();
 init_env();
 init_db();
 import { Queue, Worker } from "bullmq";
-var OPTIMIZATION_QUEUE_NAME = "econorota:optimization";
+var OPTIMIZATION_QUEUE_NAME = "econorota-optimization";
+var RETRY_BACKOFF_MS = [6e4, 3e5, 9e5];
 var queue = null;
 function getConnectionOptions() {
   if (!ENV.bullmqRedisUrl) return null;
@@ -7024,8 +7065,8 @@ function getOptimizationQueue() {
     queue = new Queue(OPTIMIZATION_QUEUE_NAME, {
       connection,
       defaultJobOptions: {
-        attempts: 2,
-        backoff: { type: "exponential", delay: 5e3 },
+        attempts: 3,
+        backoff: { type: "fixed", delay: RETRY_BACKOFF_MS[0] },
         removeOnComplete: 500,
         removeOnFail: 1e3
       }
@@ -7033,11 +7074,61 @@ function getOptimizationQueue() {
   }
   return queue;
 }
+async function getOptimizationQueueHealth() {
+  if (!isOptimizationQueueConfigured()) {
+    return {
+      configured: false,
+      reachable: false,
+      queueName: OPTIMIZATION_QUEUE_NAME,
+      counts: null,
+      error: null
+    };
+  }
+  try {
+    const optimizationQueue = getOptimizationQueue();
+    if (!optimizationQueue) {
+      return {
+        configured: true,
+        reachable: false,
+        queueName: OPTIMIZATION_QUEUE_NAME,
+        counts: null,
+        error: "Fila nao inicializada."
+      };
+    }
+    await optimizationQueue.waitUntilReady();
+    const counts = await optimizationQueue.getJobCounts(
+      "waiting",
+      "active",
+      "completed",
+      "failed",
+      "delayed"
+    );
+    const workers = await optimizationQueue.getWorkers().catch(() => []);
+    return {
+      configured: true,
+      reachable: true,
+      queueName: OPTIMIZATION_QUEUE_NAME,
+      counts,
+      workerCount: workers.length,
+      error: null
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      reachable: false,
+      queueName: OPTIMIZATION_QUEUE_NAME,
+      counts: null,
+      error: error instanceof Error ? error.message : "Falha ao consultar fila."
+    };
+  }
+}
 async function enqueueOptimizationJob(payload) {
   const optimizationQueue = getOptimizationQueue();
   if (!optimizationQueue) return null;
   return optimizationQueue.add("optimize-route", payload, {
-    jobId: `route-${payload.routeId}-job-${payload.optimizationJobId}`
+    jobId: `route-${payload.routeId}-job-${payload.optimizationJobId}`,
+    attempts: 3,
+    backoff: { type: "fixed", delay: RETRY_BACKOFF_MS[0] }
   });
 }
 
@@ -7448,6 +7539,12 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
           excludeStopIds: options?.excludeStopIds ?? []
         });
         queueProviderJobId = providerJob?.id ? String(providerJob.id) : null;
+        if (queueProviderJobId && job?.id) {
+          await updateOptimizationJob(Number(job.id), {
+            providerJobId: queueProviderJobId,
+            maxAttempts: 3
+          }).catch(() => void 0);
+        }
       } catch (error) {
         queueError = error instanceof Error ? error.message : "Falha ao publicar na fila.";
         if (job?.id) {
@@ -7459,6 +7556,30 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         }
       }
     }
+    await createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "optimization_job_created",
+      severity: isOptimizationQueueConfigured() && !queueError ? "info" : "warning",
+      source: "optimization.queue",
+      title: "Job de otimizacao criado",
+      message: isOptimizationQueueConfigured() && !queueError ? "Rota grande criada na fila de otimizacao." : "Rota grande registrada, mas a fila ainda nao esta operacional.",
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        optimizationJobId: job?.id ?? null,
+        providerJobId: queueProviderJobId,
+        queueConfigured: isOptimizationQueueConfigured(),
+        queueError,
+        stopCount: routeStops.length,
+        maxSyncStops: ENV.maxSyncStops
+      }
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record optimization job event:", error);
+    });
     await createOperationalEvent({
       userId,
       routeId,
@@ -8205,7 +8326,14 @@ var appRouter = router({
     })
   }),
   admin: router({
-    dashboard: adminProcedure.query(() => getAdminOperationalDashboard()),
+    dashboard: adminProcedure.query(async () => {
+      const dashboard = await getAdminOperationalDashboard();
+      const optimizationQueue = await getOptimizationQueueHealth();
+      return {
+        ...dashboard,
+        optimizationQueue
+      };
+    }),
     routeMetrics: adminProcedure.input(z2.object({
       days: z2.number().min(1).max(365).default(30)
     })).query(({ input }) => getRouteMetricsDashboard(input.days)),
@@ -9060,6 +9188,7 @@ function validateProductionEnvironment() {
 async function getStorageHealthSnapshot(source) {
   const database = await getDatabaseHealth();
   const osrm = await getOsrmHealth();
+  const queue2 = await getOptimizationQueueHealth();
   if (!database.connected) {
     try {
       await ensurePersistentFallbackDbLoaded();
@@ -9087,6 +9216,7 @@ async function getStorageHealthSnapshot(source) {
     storageAvailable,
     systemAvailable,
     osrm,
+    queue: queue2,
     mode
   };
 }
@@ -9148,7 +9278,7 @@ export default function EconoRotasAssetRefresh() { return null; }
 `);
   });
   app2.get("/api/health", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, mode } = await getStorageHealthSnapshot("api.health");
+    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, queue: queue2, mode } = await getStorageHealthSnapshot("api.health");
     res.status(systemAvailable ? 200 : 500).json({
       ok: systemAvailable,
       app: "EconoRota",
@@ -9157,13 +9287,14 @@ export default function EconoRotasAssetRefresh() { return null; }
       database,
       fallbackStore,
       osrm,
+      queue: queue2,
       requiredManagedDatabase: ENV.requireManagedDatabase,
       warning: ENV.hasInvalidProductionDatabaseUrl ? "DATABASE_URL aponta para host local/Docker e n\xE3o funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis." : void 0,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
   });
   app2.get("/api/monitor/ping", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, mode } = await getStorageHealthSnapshot("api.monitor.ping");
+    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, queue: queue2, mode } = await getStorageHealthSnapshot("api.monitor.ping");
     res.status(systemAvailable ? 200 : 500).json({
       ok: systemAvailable,
       monitor: true,
@@ -9173,6 +9304,7 @@ export default function EconoRotasAssetRefresh() { return null; }
       database,
       fallbackStore,
       osrm,
+      queue: queue2,
       requiredManagedDatabase: ENV.requireManagedDatabase,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
