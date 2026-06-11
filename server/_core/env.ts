@@ -84,7 +84,11 @@ export const ENV = {
     process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS,
     100
   ),
-  bullmqRedisUrl: process.env.BULLMQ_REDIS_URL ?? process.env.REDIS_URL ?? "",
+  bullmqRedisUrl:
+    process.env.BULLMQ_REDIS_URL ??
+    process.env.ECONOROTAS_REDIS_URL ??
+    process.env.REDIS_URL ??
+    "",
   backupLastCompletedAt: process.env.BACKUP_LAST_COMPLETED_AT ?? "",
   backupStatus: process.env.BACKUP_STATUS ?? "",
   restoreTestLastPassedAt: process.env.RESTORE_TEST_LAST_PASSED_AT ?? "",
