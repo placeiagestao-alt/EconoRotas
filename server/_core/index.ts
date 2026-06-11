@@ -20,15 +20,24 @@ import { isAdminEmail } from "./adminAccess";
 import { serveStatic } from "./static";
 import { recordHealthObservation } from "./monitoring";
 import { getOsrmHealth } from "../osrm";
-import { getOptimizationQueueHealth } from "../optimizationQueue";
+import { getOptimizationQueueHealth, getOptimizationWorkersDashboard } from "../optimizationQueue";
+import { getMultiVehicleReadinessDashboard } from "../multiVehicleReadiness";
 import {
   ensurePersistentFallbackDbLoaded,
+  getAdminDashboardEvents,
+  getAdminOperationalDashboard,
   getDatabaseHealth,
+  getDisasterReadinessDashboard,
   getGeocodingExecutiveReport,
   getGeocodingImpactDashboard,
+  getGoLive500Dashboard,
+  getOperationExecutionReport,
+  getPerformanceBenchmarkDashboard,
+  getQueueIntegrityDashboard,
   getPersistentFallbackDbHealth,
   getPersistentValue,
   hasPersistentFallbackDbConfigured,
+  refreshAdminDashboardMetrics,
   setPersistentValue,
 } from "../db";
 
@@ -314,6 +323,18 @@ export default function EconoRotasAssetRefresh() { return null; }
   app.get("/api/monitor/ping", async (_req, res) => {
     const { database, fallbackStore, storageAvailable, systemAvailable, osrm, queue, mode } =
       await getStorageHealthSnapshot("api.monitor.ping");
+    let adminDashboardRefresh: { ok: boolean; error?: string } = { ok: false };
+    if (systemAvailable) {
+      try {
+        await refreshAdminDashboardMetrics();
+        adminDashboardRefresh = { ok: true };
+      } catch (error) {
+        adminDashboardRefresh = {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
 
     res.status(systemAvailable ? 200 : 500).json({
       ok: systemAvailable,
@@ -325,9 +346,42 @@ export default function EconoRotasAssetRefresh() { return null; }
       fallbackStore,
       osrm,
       queue,
+      adminDashboardRefresh,
       requiredManagedDatabase: ENV.requireManagedDatabase,
       timestamp: new Date().toISOString(),
     });
+  });
+  app.get("/api/admin/dashboard", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    const dashboard = await getAdminOperationalDashboard();
+    const optimizationQueue = await getOptimizationQueueHealth();
+    const optimizationWorkers = await getOptimizationWorkersDashboard();
+    const queueIntegrity = await getQueueIntegrityDashboard();
+    const disasterReadiness = await getDisasterReadinessDashboard();
+    const performanceBenchmarks = await getPerformanceBenchmarkDashboard();
+    const multiVehicleReadiness = await getMultiVehicleReadinessDashboard();
+    const goLive500 = await getGoLive500Dashboard();
+
+    res.json({
+      ...dashboard,
+      optimizationQueue,
+      optimizationWorkers,
+      queueIntegrity,
+      disasterReadiness,
+      performanceBenchmarks,
+      multiVehicleReadiness,
+      goLive500,
+    });
+  });
+  app.get("/api/admin/events", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    const page = Number(req.query.page || 1);
+    const limit = Number(req.query.limit || 30);
+    res.json(await getAdminDashboardEvents(page, limit));
   });
   app.get("/api/admin/geocoding-impact", async (req, res) => {
     const user = await requireAdminApiRequest(req, res);
@@ -340,6 +394,48 @@ export default function EconoRotasAssetRefresh() { return null; }
     if (!user) return;
 
     res.json(await getGeocodingExecutiveReport());
+  });
+  app.get("/api/admin/operation-execution-report", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    res.json(await getOperationExecutionReport());
+  });
+  app.get("/api/admin/workers", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    res.json(await getOptimizationWorkersDashboard());
+  });
+  app.get("/api/admin/queue-integrity", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    res.json(await getQueueIntegrityDashboard());
+  });
+  app.get("/api/admin/disaster-readiness", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    res.json(await getDisasterReadinessDashboard());
+  });
+  app.get("/api/admin/performance-benchmarks", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    res.json(await getPerformanceBenchmarkDashboard());
+  });
+  app.get("/api/admin/go-live-500", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    res.json(await getGoLive500Dashboard());
+  });
+  app.get("/api/admin/multi-vehicle-readiness", async (req, res) => {
+    const user = await requireAdminApiRequest(req, res);
+    if (!user) return;
+
+    res.json(await getMultiVehicleReadinessDashboard());
   });
   app.get("/api/app-update/android", (_req, res) => {
     const latestVersion = ENV.androidUpdateLatestVersion.trim();

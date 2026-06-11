@@ -1,0 +1,211 @@
+{
+  "generatedAt": "2026-06-07T11:15:12.232Z",
+  "health": {
+    "ok": true,
+    "db": true,
+    "schema": true,
+    "osrm": {
+      "enabled": true,
+      "required": false,
+      "configured": true,
+      "reachable": true,
+      "baseUrl": "https://router.project-osrm.org",
+      "timeoutMs": 3000,
+      "error": null
+    },
+    "queue": {
+      "configured": true,
+      "reachable": true,
+      "queueName": "econorota-optimization",
+      "counts": {
+        "waiting": 0,
+        "active": 0,
+        "completed": 4,
+        "failed": 3,
+        "delayed": 1,
+        "paused": 0
+      },
+      "workerCount": 1,
+      "workerHeartbeatCount": 1,
+      "error": null
+    }
+  },
+  "osrm": {
+    "last7Days": {
+      "metricRows": 67,
+      "calls": 2112,
+      "failures": 1745,
+      "failureRatePct": 82.62,
+      "avgLatencyMs": 405,
+      "p50LatencyMs": 302,
+      "p95LatencyMs": 908,
+      "p99LatencyMs": 2206
+    },
+    "last30Days": {
+      "metricRows": 67,
+      "calls": 2112,
+      "failures": 1745,
+      "failureRatePct": 82.62,
+      "avgLatencyMs": 405,
+      "p50LatencyMs": 302,
+      "p95LatencyMs": 908,
+      "p99LatencyMs": 2206
+    }
+  },
+  "microclusterization30d": [
+    {
+      "faixa": "ate_100",
+      "routes": 44,
+      "macroAvg": "0.2500",
+      "microAvg": "0.2500",
+      "largestAvg": "17.0909",
+      "largestMax": 100,
+      "stopAvg": "67.9318"
+    },
+    {
+      "faixa": "201_500",
+      "routes": 18,
+      "macroAvg": "0.0000",
+      "microAvg": "0.0000",
+      "largestAvg": "0.0000",
+      "largestMax": 0,
+      "stopAvg": "330.5556"
+    },
+    {
+      "faixa": "501_1000",
+      "routes": 5,
+      "macroAvg": "0.0000",
+      "microAvg": "0.0000",
+      "largestAvg": "0.0000",
+      "largestMax": 0,
+      "stopAvg": "1000.0000"
+    }
+  ],
+  "matrixCache30d": {
+    "hits": 32,
+    "misses": 9,
+    "hitRatePct": 78.05,
+    "estimatedExternalCallsAvoided": 32,
+    "matrices": 41,
+    "generationMs": 36179
+  },
+  "worker30d": {
+    "jobs": 3,
+    "byStatus": {
+      "failed": 1,
+      "completed": 1,
+      "queued": 1
+    },
+    "queueWaitMs": {
+      "avg": 87925,
+      "p50": 61,
+      "p95": 175789,
+      "p99": 175789
+    },
+    "executionMs": {
+      "avg": 0,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0
+    },
+    "workerMemoryMb": {
+      "avg": 0,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0
+    },
+    "peakMemoryMb": {
+      "avg": 0,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0
+    }
+  },
+  "operationalFlow": [
+    {
+      "stopCount": 50,
+      "startedAt": "2026-06-07T11:13:51.579Z",
+      "routeId": 57,
+      "routeStatusAfterCreateAndOptimize": "optimized",
+      "warning": null,
+      "optimizationReturned": true,
+      "savedRouteStatus": "optimized",
+      "savedStopCount": 50,
+      "auditStatus": "attention",
+      "auditQuality": "poor",
+      "auditScore": 0,
+      "auditIssueCount": 52,
+      "blockingIssueTypes": [],
+      "startWouldBeEnabled": true,
+      "fiscalDidNotBlockValidCoordinates": true,
+      "canUpdateAsStartedEquivalent": false,
+      "cleanedRoute": true,
+      "runtimeMs": 9728
+    },
+    {
+      "stopCount": 100,
+      "startedAt": "2026-06-07T11:14:01.307Z",
+      "routeId": 58,
+      "routeStatusAfterCreateAndOptimize": "optimized",
+      "warning": null,
+      "optimizationReturned": true,
+      "savedRouteStatus": "optimized",
+      "savedStopCount": 100,
+      "auditStatus": "attention",
+      "auditQuality": "poor",
+      "auditScore": 0,
+      "auditIssueCount": 173,
+      "blockingIssueTypes": [],
+      "startWouldBeEnabled": true,
+      "fiscalDidNotBlockValidCoordinates": true,
+      "canUpdateAsStartedEquivalent": false,
+      "cleanedRoute": true,
+      "runtimeMs": 10167
+    },
+    {
+      "stopCount": 250,
+      "startedAt": "2026-06-07T11:14:11.474Z",
+      "routeId": 59,
+      "routeStatusAfterCreateAndOptimize": "draft",
+      "warning": "A rota foi salva como rascunho, mas não foi possível otimizar agora. OSRM indisponivel para rota grande. Fallback geografico bloqueado para evitar timeout e sequencia incoerente.",
+      "optimizationReturned": false,
+      "savedRouteStatus": "draft",
+      "savedStopCount": 250,
+      "auditStatus": "attention",
+      "auditQuality": "poor",
+      "auditScore": 0,
+      "auditIssueCount": 14,
+      "blockingIssueTypes": [],
+      "startWouldBeEnabled": false,
+      "fiscalDidNotBlockValidCoordinates": true,
+      "cleanedRoute": true,
+      "runtimeMs": 7101
+    },
+    {
+      "stopCount": 500,
+      "startedAt": "2026-06-07T11:14:18.575Z",
+      "routeId": 60,
+      "routeStatusAfterCreateAndOptimize": "draft",
+      "warning": "A rota foi salva como rascunho, mas não foi possível otimizar agora. Rota grande enviada para fila de otimizacao.",
+      "optimizationReturned": false,
+      "savedRouteStatus": "draft",
+      "savedStopCount": 500,
+      "auditStatus": "attention",
+      "auditQuality": "poor",
+      "auditScore": 0,
+      "auditIssueCount": 20,
+      "blockingIssueTypes": [],
+      "startWouldBeEnabled": false,
+      "fiscalDidNotBlockValidCoordinates": true,
+      "cleanedRoute": true,
+      "runtimeMs": 5143
+    }
+  ],
+  "leftoverAuditRoutes": [],
+  "goNoGo": {
+    "readyForOwnOsrm": true,
+    "readyForOsrmRequiredTrue": false,
+    "readyFor2000Benchmark": false,
+    "knownBlocker": "osrm.econorotas.com ainda nao esta operacional; router.project-osrm.org falha em rota grande e 500+ depende da fila/worker."
+  }
+}

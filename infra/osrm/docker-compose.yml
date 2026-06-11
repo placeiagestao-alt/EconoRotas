@@ -1,0 +1,22 @@
+services:
+  osrm-brazil:
+    image: osrm/osrm-backend:latest
+    container_name: econorota-osrm-brazil
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/data
+    command: osrm-routed --algorithm mld /data/brazil-latest.osrm
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-qO-",
+          "http://127.0.0.1:5000/route/v1/driving/-51.407,-22.121;-51.406,-22.122?overview=false",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

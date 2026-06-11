@@ -44,6 +44,13 @@ import {
 } from "@/services/maps/geocodingService";
 import type { GeocodingMethod } from "@shared/geocodingConfidence";
 import {
+  normalizeStopMetadata,
+  normalizeStopSourceProvider,
+  parseLegacyStopNotes,
+  type StopMetadata,
+  type StopSourceProvider,
+} from "@shared/stopMetadata";
+import {
   calculateDistanceKm,
   getCurrentPosition,
   type Coordinate,
@@ -65,6 +72,10 @@ type Stop = {
   longitude: number;
   sequence: number;
   packageNumber?: string;
+  sourceProvider?: StopSourceProvider;
+  originalStop?: number | null;
+  isUnsequencedStop?: boolean;
+  metadata?: StopMetadata;
   notes?: string;
   isSequentialImile?: boolean;
 };
@@ -96,18 +107,10 @@ const DEFAULT_DELIVERY_STATE: DeliveryState = {
 const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",
   "invalid_coordinates",
-  "empty_address",
-  "generic_address",
-  "duplicate_sequence",
-  "region_revisited",
-  "premature_region_exit",
-  "route_crossing",
 ]);
 const STRUCTURAL_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",
   "invalid_coordinates",
-  "empty_address",
-  "generic_address",
 ]);
 const EMPTY_ROUTE_POINT: RoutePoint = { address: "", latitude: 0, longitude: 0 };
 const FAR_FROM_STOP_ALERT_KM = 0.5;
@@ -126,10 +129,7 @@ function isBlockingAuditIssue(issue: any) {
   if (!issue?.type) return false;
   if (BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type)) return true;
 
-  return (
-    issue.type === "nearby_stop_skipped" &&
-    (issue.severity === "critical" || issue.severity === "high")
-  ) || issue.type === "route_crossing";
+  return false;
 }
 
 function isStructuralAuditIssue(issue: any) {
@@ -159,28 +159,12 @@ function toNumber(value: unknown) {
 }
 
 function parseStopNotes(notes?: string | null) {
-  const raw = notes?.trim();
-  if (!raw) return { packageNumber: undefined as string | undefined, notes: undefined as string | undefined };
-
-  const parts = raw
-    .split("|")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  let packageNumber: string | undefined;
-  const remaining: string[] = [];
-
-  for (const part of parts) {
-    const match = part.match(/^(Pacote|STOP)\s*:\s*(.+)$/i);
-    if (match?.[2] && !packageNumber) {
-      packageNumber = match[2].trim();
-      continue;
-    }
-    remaining.push(part);
-  }
+  const parsed = parseLegacyStopNotes(notes);
 
   return {
-    packageNumber,
-    notes: remaining.length ? remaining.join(" | ") : undefined,
+    packageNumber: parsed.metadata.packageNumber,
+    notes: parsed.notes,
+    metadata: parsed.metadata,
   };
 }
 
@@ -201,17 +185,8 @@ function isImileRouteText(value?: string | null) {
   return /\b(iMile|Rider Delivery|captura iMile)\b/i.test(value || "");
 }
 
-function getSequentialStopPackageNumber(index: number) {
-  return String(index + 1).padStart(2, "0");
-}
-
 function buildStopNotes(packageNumber: string, notes: string) {
-  const parts = [
-    packageNumber.trim() ? `Pacote: ${packageNumber.trim()}` : "",
-    notes.trim(),
-  ].filter(Boolean);
-
-  return parts.length ? parts.join(" | ") : null;
+  return notes.trim() || null;
 }
 
 function normalizeText(value: string) {
@@ -264,6 +239,19 @@ function openStopInMap(stop?: Stop) {
 
 function getStopDisplayLabel(_stop: Stop, fallbackIndex: number) {
   return String(fallbackIndex + 1);
+}
+
+function getShopeeStopLabel(stop: Stop) {
+  if (stop.sourceProvider !== "shopee") return undefined;
+  if (Number(stop.originalStop) > 0) return `STOP ${Number(stop.originalStop)}`;
+  if (stop.isUnsequencedStop) return "Sem STOP";
+  return undefined;
+}
+
+function getPackageLabel(stop: Stop) {
+  const packageNumber = stop.metadata?.packageNumber || stop.packageNumber;
+  if (!packageNumber || packageNumber === "0") return undefined;
+  return `Pacote: ${packageNumber}`;
 }
 
 function getStopNumberTextClass(label: string) {
@@ -439,28 +427,38 @@ export default function RouteDetail() {
         rawStops.some((stop: any) => isImileStopNotes(String(stop.notes || "")));
 
       return rawStops
-        .map((stop: any) => ({
-          ...parseStopNotes(stop.notes),
-          id: stop.id,
-          address: stop.address,
-          latitude: toNumber(stop.latitude),
-          longitude: toNumber(stop.longitude),
-          sequence: stop.sequence,
-        }))
+        .map((stop: any) => {
+          const legacy = parseStopNotes(stop.notes);
+          const metadata = normalizeStopMetadata({
+            ...legacy.metadata,
+            ...normalizeStopMetadata(stop.metadata),
+          });
+          const sourceProvider = normalizeStopSourceProvider(stop.sourceProvider);
+
+          return {
+            id: stop.id,
+            address: stop.address,
+            latitude: toNumber(stop.latitude),
+            longitude: toNumber(stop.longitude),
+            sequence: stop.sequence,
+            notes: legacy.notes,
+            sourceProvider,
+            originalStop: stop.originalStop ?? null,
+            isUnsequencedStop: Boolean(stop.isUnsequencedStop),
+            metadata,
+            packageNumber: metadata.packageNumber || legacy.packageNumber,
+          };
+        })
         .sort((a: Stop, b: Stop) => a.sequence - b.sequence)
         .map((stop: Stop, index: number) => {
           const isSequentialImile =
+            stop.sourceProvider === "imile" ||
             routeLooksLikeImile ||
             isImileStopNotes(stop.notes) ||
             isLegacyImileTrackingPackage(stop.packageNumber, stop.notes);
-          const packageNumber =
-            isSequentialImile
-            ? getSequentialStopPackageNumber(index)
-            : stop.packageNumber;
 
           return {
             ...stop,
-            packageNumber,
             isSequentialImile,
           };
         });
@@ -669,6 +667,44 @@ export default function RouteDetail() {
     });
   };
 
+  useEffect(() => {
+    if (!deliveryState.started || isComplete) return;
+
+    const reportPauseOrResume = () => {
+      if (document.visibilityState === "hidden") {
+        reportRouteExecutionEvent({
+          type: "route_paused",
+          severity: "info",
+          title: "Execução de rota pausada",
+          metadata: {
+            reason: "page_hidden",
+            currentIndex: deliveryState.currentIndex,
+          },
+        });
+        return;
+      }
+
+      reportRouteExecutionEvent({
+        type: "route_resumed",
+        severity: "info",
+        title: "Execução de rota retomada",
+        metadata: {
+          reason: "page_visible",
+          currentIndex: deliveryState.currentIndex,
+        },
+      });
+    };
+
+    document.addEventListener("visibilitychange", reportPauseOrResume);
+    return () => document.removeEventListener("visibilitychange", reportPauseOrResume);
+  }, [
+    deliveryState.currentIndex,
+    deliveryState.started,
+    isComplete,
+    routeId,
+    stops.length,
+  ]);
+
   const ensureProximityAudioReady = async () => {
     try {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -868,6 +904,16 @@ export default function RouteDetail() {
       id: routeId,
       status: "completed",
     });
+    reportRouteExecutionEvent({
+      type: "route_completed",
+      severity: "info",
+      title: "Rota concluída",
+      metadata: {
+        deliveredCount,
+        failedCount,
+        handledCount,
+      },
+    });
     toast.success("Rota concluida.");
   };
 
@@ -911,9 +957,34 @@ export default function RouteDetail() {
   const handleStartRoute = async () => {
     if (hasStructuralAuditIssues) {
       const firstIssue = structuralAuditIssues[0];
+      reportRouteExecutionEvent({
+        type: "route_start_blocked",
+        severity: "error",
+        title: "Início de rota bloqueado",
+        message: firstIssue.title,
+        metadata: {
+          reason: firstIssue.type || "other",
+          issue: firstIssue,
+        },
+      });
       toast.error(
         `${firstIssue.title}: corrija as paradas com problema antes de iniciar.`
       );
+      return;
+    }
+
+    if (routeQuery.data?.status !== "optimized") {
+      reportRouteExecutionEvent({
+        type: "route_start_blocked",
+        severity: "warning",
+        title: "Início de rota bloqueado",
+        message: "A rota ainda não está otimizada.",
+        metadata: {
+          reason: "route_not_optimized",
+          routeStatus: routeQuery.data?.status ?? null,
+        },
+      });
+      toast.error("Otimize a rota antes de iniciar.");
       return;
     }
 
@@ -936,7 +1007,7 @@ export default function RouteDetail() {
 
     const selectedStop = stops[currentIndex];
     reportRouteExecutionEvent({
-      type: "route_execution_started",
+      type: "route_started",
       title: "Execução de rota iniciada",
       stopId: selectedStop?.id,
       metadata: {
@@ -1179,6 +1250,20 @@ export default function RouteDetail() {
   };
 
   const handleReset = () => {
+    if (deliveryState.started && !isComplete) {
+      reportRouteExecutionEvent({
+        type: "route_abandoned",
+        severity: "warning",
+        title: "Rota abandonada",
+        metadata: {
+          reason: "manual_reset",
+          currentIndex: deliveryState.currentIndex,
+          deliveredCount,
+          failedCount,
+          handledCount,
+        },
+      });
+    }
     setDeliveryState(DEFAULT_DELIVERY_STATE);
     toast.message("Execução da rota reiniciada.");
   };
@@ -1301,7 +1386,7 @@ export default function RouteDetail() {
       address: stop.address,
       latitude: stop.latitude,
       longitude: stop.longitude,
-      packageNumber: stop.packageNumber ?? "",
+      packageNumber: stop.metadata?.packageNumber ?? stop.packageNumber ?? "",
       notes: stop.notes ?? "",
     });
   };
@@ -1384,6 +1469,13 @@ export default function RouteDetail() {
         longitude: resolved.longitude,
         sequence: stop.sequence,
         notes: buildStopNotes(stopDraft.packageNumber, stopDraft.notes),
+        sourceProvider: stop.sourceProvider,
+        originalStop: stop.originalStop ?? null,
+        isUnsequencedStop: Boolean(stop.isUnsequencedStop),
+        metadata: normalizeStopMetadata({
+          ...stop.metadata,
+          packageNumber: stopDraft.packageNumber || undefined,
+        }),
         geocodingConfidenceScore: resolved.geocodingConfidenceScore,
         geocodingMethod: resolved.geocodingMethod,
         geocodingSuspect: resolved.geocodingSuspect,
@@ -1965,13 +2057,18 @@ export default function RouteDetail() {
                             <p className="text-lg font-semibold">
                               {currentStop.address}
                             </p>
-                            {currentStop.packageNumber && (
-                              <p className="inline-flex max-w-full items-center rounded-lg bg-primary/10 px-2.5 py-1 text-base font-bold text-primary">
-                                <span className="truncate">
-                                  {currentStop.isSequentialImile ? "Parada" : "Pacote"}: {currentStop.packageNumber}
-                                </span>
-                              </p>
-                            )}
+                            <div className="flex flex-wrap gap-2">
+                              {getShopeeStopLabel(currentStop) && (
+                                <p className="inline-flex max-w-full items-center rounded-lg bg-amber-100 px-2.5 py-1 text-base font-bold text-amber-800">
+                                  <span className="truncate">{getShopeeStopLabel(currentStop)}</span>
+                                </p>
+                              )}
+                              {getPackageLabel(currentStop) && (
+                                <p className="inline-flex max-w-full items-center rounded-lg bg-primary/10 px-2.5 py-1 text-base font-bold text-primary">
+                                  <span className="truncate">{getPackageLabel(currentStop)}</span>
+                                </p>
+                              )}
+                            </div>
                             <p className="text-sm text-muted-foreground">
                               {currentStop.latitude.toFixed(6)},{" "}
                               {currentStop.longitude.toFixed(6)}
@@ -2105,13 +2202,18 @@ export default function RouteDetail() {
                           </div>
                           <div className="min-w-0 flex-1">
                             <p className="font-medium leading-snug">{stop.address}</p>
-                            {stop.packageNumber && (
-                              <p className="inline-flex max-w-full rounded-md bg-primary/10 px-2 py-0.5 text-sm font-bold text-primary">
-                                <span className="truncate">
-                                  {stop.isSequentialImile ? "Parada" : "Pacote"}: {stop.packageNumber}
-                                </span>
-                              </p>
-                            )}
+                            <div className="flex flex-wrap gap-2">
+                              {getShopeeStopLabel(stop) && (
+                                <p className="inline-flex max-w-full rounded-md bg-amber-100 px-2 py-0.5 text-sm font-bold text-amber-800">
+                                  <span className="truncate">{getShopeeStopLabel(stop)}</span>
+                                </p>
+                              )}
+                              {getPackageLabel(stop) && (
+                                <p className="inline-flex max-w-full rounded-md bg-primary/10 px-2 py-0.5 text-sm font-bold text-primary">
+                                  <span className="truncate">{getPackageLabel(stop)}</span>
+                                </p>
+                              )}
+                            </div>
                             <p className="text-xs text-muted-foreground">
                               {delivered
                                 ? "Entregue"
@@ -2157,7 +2259,7 @@ export default function RouteDetail() {
                                       htmlFor={`route-detail-stop-${stop.id ?? index}-package`}
                                       className="text-sm font-medium"
                                     >
-                                      Número/STOP do pacote
+                                      Pacote ou rastreio
                                     </label>
                                     <Input
                                       id={`route-detail-stop-${stop.id ?? index}-package`}
@@ -2168,7 +2270,7 @@ export default function RouteDetail() {
                                           packageNumber: event.target.value,
                                         }))
                                       }
-                                      placeholder="Ex.: 1520"
+                                      placeholder="Ex.: SPX123 ou 1520"
                                     />
                                   </div>
                                   <div className="space-y-1.5">

@@ -1,0 +1,116 @@
+{
+  "generatedAt": "2026-06-08T02:18:32.908Z",
+  "user": {
+    "id": 1272,
+    "email": "codex-execution-analytics-1780885090810@example.com"
+  },
+  "routeIds": [
+    65,
+    66,
+    68
+  ],
+  "eventsGenerated": [
+    {
+      "type": "route_started",
+      "routeId": 65,
+      "metadata": {
+        "scenario": "started"
+      }
+    },
+    {
+      "type": "route_started",
+      "routeId": 66,
+      "metadata": {
+        "scenario": "completed"
+      }
+    },
+    {
+      "type": "route_completed",
+      "routeId": 66,
+      "metadata": {
+        "scenario": "completed"
+      }
+    },
+    {
+      "type": "route_started",
+      "routeId": 68,
+      "metadata": {
+        "scenario": "abandoned"
+      }
+    },
+    {
+      "type": "route_abandoned",
+      "severity": "warning",
+      "routeId": 68,
+      "metadata": {
+        "scenario": "abandoned",
+        "reason": "manual_reset"
+      }
+    },
+    {
+      "type": "route_start_blocked",
+      "severity": "error",
+      "routeId": 68,
+      "metadata": {
+        "scenario": "blocked",
+        "reason": "invalid_coordinates"
+      }
+    }
+  ],
+  "executionReport": {
+    "generatedAt": "2026-06-08T02:18:32.115Z",
+    "last7Days": {
+      "periodDays": 7,
+      "optimizedRoutes": 75,
+      "startedRoutes": 6,
+      "completedRoutes": 2,
+      "abandonedRoutes": 2,
+      "pendingAfterOptimization": 69,
+      "startBlockedAttempts": 2,
+      "startBlockedByReason": {
+        "invalid_coordinates": 2
+      },
+      "startRate": 8,
+      "completionRate": 33.3,
+      "abandonmentRate": 33.3,
+      "averageExecutionDurationMs": 1000,
+      "p50ExecutionDurationMs": 1000,
+      "p95ExecutionDurationMs": 1000,
+      "p99ExecutionDurationMs": 1000,
+      "executionStartCount": 6,
+      "executionCompletionCount": 2,
+      "executionAbandonmentCount": 2
+    },
+    "last30Days": {
+      "periodDays": 30,
+      "optimizedRoutes": 75,
+      "startedRoutes": 6,
+      "completedRoutes": 2,
+      "abandonedRoutes": 2,
+      "pendingAfterOptimization": 69,
+      "startBlockedAttempts": 2,
+      "startBlockedByReason": {
+        "invalid_coordinates": 2
+      },
+      "startRate": 8,
+      "completionRate": 33.3,
+      "abandonmentRate": 33.3,
+      "averageExecutionDurationMs": 1000,
+      "p50ExecutionDurationMs": 1000,
+      "p95ExecutionDurationMs": 1000,
+      "p99ExecutionDurationMs": 1000,
+      "executionStartCount": 6,
+      "executionCompletionCount": 2,
+      "executionAbandonmentCount": 2
+    },
+    "comparison": {
+      "startRate": 0,
+      "completionRate": 0,
+      "abandonmentRate": 0,
+      "optimizedRoutes": 0,
+      "startedRoutes": 0,
+      "completedRoutes": 0,
+      "abandonedRoutes": 0
+    }
+  }
+}

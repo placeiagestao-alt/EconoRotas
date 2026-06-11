@@ -1,4 +1,6 @@
 import { ENV } from "./_core/env";
+import { createHash } from "node:crypto";
+import * as db from "./db";
 import {
   clusterStops,
   calculateDistance,
@@ -17,7 +19,6 @@ import {
 type MatrixValue = number[][];
 type MatrixMetric = "distance" | "duration";
 
-const ROAD_MATRIX_PARTITION_THRESHOLD = 120;
 const ROAD_MATRIX_PARTITION_SIZE = 70;
 
 type OsrmTableResponse = {
@@ -167,6 +168,52 @@ function buildOsrmTableUrl(nodes: MatrixNode[]) {
   return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
 }
 
+function hashText(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function coordinateKey(node: MatrixNode) {
+  return [
+    node.role,
+    node.deliveryIndex ?? "",
+    Number(node.location.latitude).toFixed(6),
+    Number(node.location.longitude).toFixed(6),
+  ].join(":");
+}
+
+function buildMatrixHashes(nodes: MatrixNode[]) {
+  const orderedCoordinates = nodes.map(coordinateKey).join("|");
+  const unorderedCoordinates = nodes
+    .map((node) =>
+      [
+        node.role,
+        Number(node.location.latitude).toFixed(6),
+        Number(node.location.longitude).toFixed(6),
+      ].join(":")
+    )
+    .sort()
+    .join("|");
+  const providerKey = ENV.osrmBaseUrl.replace(/\/+$/, "");
+
+  return {
+    matrixHash: hashText(["driving", providerKey, orderedCoordinates].join("|")),
+    clusterHash: hashText(["driving", unorderedCoordinates].join("|")),
+  };
+}
+
+function isMatrixValue(value: unknown, expectedSize: number): value is MatrixValue {
+  return (
+    Array.isArray(value) &&
+    value.length === expectedSize &&
+    value.every(
+      (row) =>
+        Array.isArray(row) &&
+        row.length === expectedSize &&
+        row.every((item) => typeof item === "number" && Number.isFinite(item))
+    )
+  );
+}
+
 function buildOsrmHealthUrl() {
   const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
   const coordinates = "-51.407,-22.121;-51.406,-22.122";
@@ -206,9 +253,48 @@ async function fetchRoadMatrix(
   }
 
   const startedAt = Date.now();
-  const record = (success: boolean) => {
-    options.telemetry?.recordOsrmCall?.(Date.now() - startedAt, success);
+  const provider = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const record = (
+    success: boolean,
+    failureReason: string | null = null,
+    cacheHit = false
+  ) => {
+    const durationMs = Date.now() - startedAt;
+    if (!cacheHit) {
+      options.telemetry?.recordOsrmCall?.(durationMs, success);
+    }
+    options.telemetry?.recordOsrmMatrix?.({
+      nodeCount: nodes.length,
+      durationMs,
+      cacheHit,
+      success,
+      failureReason,
+      provider,
+    });
   };
+
+  const { matrixHash, clusterHash } = buildMatrixHashes(nodes);
+  const shouldUseMatrixCache = process.env.VITEST !== "true";
+  const cached = shouldUseMatrixCache
+    ? await db.getOsrmMatrixCache(matrixHash).catch(() => null)
+    : null;
+  if (
+    cached &&
+    isMatrixValue(cached.distanceMatrix, nodes.length) &&
+    isMatrixValue(cached.durationMatrix, nodes.length)
+  ) {
+    record(true, null, true);
+    return {
+      matrix: {
+        nodes,
+        distancesKm: cached.distanceMatrix,
+        durationsMinutes: cached.durationMatrix,
+      },
+      startNodeIndex,
+      endNodeIndex,
+    };
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
 
@@ -219,31 +305,42 @@ async function fetchRoadMatrix(
     });
 
     if (!response.ok) {
-      record(false);
+      record(false, `http_${response.status}`);
       return null;
     }
 
     const data = (await response.json()) as OsrmTableResponse;
     if (data.code !== "Ok") {
-      record(false);
+      record(false, `osrm_${data.code || "not_ok"}`);
       return null;
     }
 
     const distancesKm = normalizeMatrix(data.distances, 1000);
     const durationsMinutes = normalizeMatrix(data.durations, 60);
     if (!distancesKm || !durationsMinutes) {
-      record(false);
+      record(false, "invalid_matrix");
       return null;
     }
 
+    if (shouldUseMatrixCache) {
+      await db.upsertOsrmMatrixCache({
+        matrixHash,
+        clusterHash,
+        stopCount: nodes.length,
+        durationMatrix: durationsMinutes,
+        distanceMatrix: distancesKm,
+        provider: "osrm",
+        osrmBaseUrl: provider,
+      }).catch(() => null);
+    }
     record(true);
     return {
       matrix: { nodes, distancesKm, durationsMinutes },
       startNodeIndex,
       endNodeIndex,
     };
-  } catch {
-    record(false);
+  } catch (error) {
+    record(false, error instanceof Error ? error.name || error.message : "fetch_error");
     return null;
   } finally {
     clearTimeout(timeout);
@@ -779,9 +876,17 @@ export async function optimizeRouteWithRoadMetrics(
   startIndex: number = 0,
   options: RouteOptimizationOptions = {}
 ): Promise<OptimizedRoute | null> {
+  const partitions =
+    options.partitionLargeRoutes !== false && locations.length > 100
+      ? partitionStopsForOptimization(locations, {
+          ...options,
+          maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE,
+        })
+      : [];
   if (
     options.partitionLargeRoutes !== false &&
-    locations.length > ROAD_MATRIX_PARTITION_THRESHOLD
+    locations.length > 100 &&
+    partitions.length > 1
   ) {
     return optimizePartitionedRouteWithRoadMetrics(locations, mode, options);
   }

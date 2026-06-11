@@ -1,3 +1,9 @@
+import {
+  normalizeStopSourceProvider,
+  type StopMetadata,
+  type StopSourceProvider,
+} from "@shared/stopMetadata";
+
 export type ImportedStop = {
   address: string;
   latitude: number;
@@ -5,6 +11,10 @@ export type ImportedStop = {
   packageNumber?: string;
   deliveryCount?: number;
   routingStop?: number;
+  sourceProvider?: StopSourceProvider;
+  originalStop?: number | null;
+  isUnsequencedStop?: boolean;
+  metadata?: StopMetadata;
   notes?: string;
   sourceRow: number;
 };
@@ -12,6 +22,7 @@ export type ImportedStop = {
 export type ImportedRoute = {
   routeName: string;
   stops: ImportedStop[];
+  sourceProvider: StopSourceProvider;
   hasStopSequence: boolean;
   totalRows: number;
   totalDeliveries?: number;
@@ -28,7 +39,11 @@ type ParsedRouteRow = {
   notes?: string;
   sequence?: number;
   sourceRow: number;
-  packageNumber: string;
+  packageNumber?: string;
+  metadata?: StopMetadata;
+  sourceProvider?: StopSourceProvider;
+  originalStop?: number | null;
+  isUnsequencedStop?: boolean;
 };
 
 type ImileScreenRow = {
@@ -244,31 +259,26 @@ function buildAddress(row: RawSpreadsheetRow, headerMap: Record<string, string>)
   return parts.join(", ");
 }
 
-function buildNotes(row: RawSpreadsheetRow, headerMap: Record<string, string>) {
+function buildMetadata(
+  row: RawSpreadsheetRow,
+  headerMap: Record<string, string>,
+  sourceProvider: StopSourceProvider
+): StopMetadata {
   const tracking = cleanText(getCell(row, headerMap, HEADER_ALIASES.tracking));
   const routeId = cleanText(getCell(row, headerMap, HEADER_ALIASES.routeId));
-  const notes = [
-    tracking ? `Rastreio: ${tracking}` : "",
-    routeId ? `Rota origem: ${routeId}` : "",
-  ].filter(Boolean);
+  const metadata: StopMetadata = {
+    importedFrom: sourceProvider,
+  };
 
-  return notes.length ? notes.join(" | ") : undefined;
-}
-
-function buildPackageNumberFromTableIndex(tableIndex: number) {
-  return String(tableIndex + 1);
-}
-
-function buildPackageNumber(tableIndex: number, sequence: number | undefined, hasStopColumn: boolean) {
-  if (hasStopColumn && !Number.isFinite(sequence)) {
-    return "0";
+  if (tracking) {
+    metadata.trackingNumber = tracking;
+    metadata.packageNumber = tracking;
+  }
+  if (routeId) {
+    metadata.sourceRouteId = routeId;
   }
 
-  if (Number.isFinite(sequence)) {
-    return String(Number(sequence));
-  }
-
-  return buildPackageNumberFromTableIndex(tableIndex);
+  return metadata;
 }
 
 function decodeXmlEntities(value: string) {
@@ -364,20 +374,16 @@ function looksLikeImileAddress(value: string) {
   );
 }
 
-function buildImileNotes(row: ImileScreenRow) {
-  return [
-    row.trackingNumber ? `Rastreio: ${row.trackingNumber}` : "",
-    row.recipientName ? `Destinatario: ${row.recipientName}` : "",
-    row.deliveryCount > 1 ? `Entregas agrupadas: ${row.deliveryCount}` : "",
-    row.status ? `Status iMile: ${row.status}` : "",
-    row.distance ? `Distancia app: ${row.distance}` : "",
-  ]
-    .filter(Boolean)
-    .join(" | ");
-}
-
-function buildSequentialImilePackageNumber(index: number) {
-  return String(index + 1).padStart(2, "0");
+function buildImileMetadata(row: ImileScreenRow): StopMetadata {
+  return {
+    packageNumber: row.trackingNumber,
+    trackingNumber: row.trackingNumber,
+    recipientName: row.recipientName,
+    externalStatus: row.status,
+    externalDistanceText: row.distance,
+    groupedDeliveryCount: row.deliveryCount > 1 ? row.deliveryCount : undefined,
+    importedFrom: "imile",
+  };
 }
 
 function normalizeImileAddress(address: string) {
@@ -634,44 +640,50 @@ function getRouteName(rows: RawSpreadsheetRow[], headerMap: Record<string, strin
   return fileName.replace(/\.[^.]+$/, "") || "Rota importada";
 }
 
-export function parseRouteRows(rows: RawSpreadsheetRow[], fileName = "rota.xlsx"): ImportedRoute {
+export function parseRouteRows(
+  rows: RawSpreadsheetRow[],
+  fileName = "rota.xlsx",
+  sourceProvider: StopSourceProvider | string = "generic"
+): ImportedRoute {
   if (!rows.length) {
     throw new Error("A planilha esta vazia.");
   }
 
+  const normalizedSourceProvider = normalizeStopSourceProvider(sourceProvider);
   const headerMap = createHeaderMap(rows[0]);
   const stopColumnExists = hasStopColumn(headerMap);
+  const useShopeeStop = normalizedSourceProvider === "shopee" && stopColumnExists;
   const parsedRows = rows
     .map((row, index) => {
       const address = buildAddress(row, headerMap);
       const latitude = parseCoordinate(getCell(row, headerMap, HEADER_ALIASES.latitude));
       const longitude = parseCoordinate(getCell(row, headerMap, HEADER_ALIASES.longitude));
-      const sequence = stopColumnExists ? getStopSequence(row, headerMap) : undefined;
+      const sequence = useShopeeStop ? getStopSequence(row, headerMap) : undefined;
+      const metadata = buildMetadata(row, headerMap, normalizedSourceProvider);
 
       return {
         address,
         latitude,
         longitude,
-        notes: buildNotes(row, headerMap),
+        metadata,
         sequence,
         sourceRow: index + 2,
+        sourceProvider: normalizedSourceProvider,
+        originalStop: useShopeeStop ? sequence ?? 0 : null,
+        isUnsequencedStop: useShopeeStop ? Number(sequence) <= 0 : false,
+        packageNumber: metadata.packageNumber,
       };
     })
     .filter((stop) => stop.address);
 
-  const numberedRows = parsedRows.map((stop, tableIndex) => ({
-    ...stop,
-    packageNumber: buildPackageNumber(tableIndex, stop.sequence, stopColumnExists),
-  }));
+  const sortableRows = useShopeeStop
+    ? sortStopsByStopSequence(parsedRows)
+    : parsedRows;
 
-  const sortableRows = stopColumnExists
-    ? sortStopsByStopSequence(numberedRows)
-    : numberedRows;
-
-  const hasStopSequence = stopColumnExists;
+  const hasStopSequence = useShopeeStop;
   const stops = sortableRows.map(({ sequence, ...stop }) => ({
     ...stop,
-    routingStop: sequence,
+    routingStop: useShopeeStop ? sequence : undefined,
   }));
 
   if (stops.length < 2) {
@@ -681,6 +693,7 @@ export function parseRouteRows(rows: RawSpreadsheetRow[], fileName = "rota.xlsx"
   return {
     routeName: getRouteName(rows, headerMap, fileName),
     stops,
+    sourceProvider: normalizedSourceProvider,
     hasStopSequence,
     totalRows: rows.length,
     skippedRows: rows.length - stops.length,
@@ -699,9 +712,12 @@ export function parseImileScreenText(input: string, fileName = "imile-screen.txt
     address: row.address,
     latitude: 0,
     longitude: 0,
-    packageNumber: buildSequentialImilePackageNumber(index),
+    packageNumber: row.trackingNumber,
     deliveryCount: row.deliveryCount,
-    notes: buildImileNotes(row),
+    sourceProvider: "imile" as const,
+    originalStop: null,
+    isUnsequencedStop: false,
+    metadata: buildImileMetadata(row),
     sourceRow: row.sourceRow,
   }));
   const groupedDeliveries = Math.max(
@@ -713,6 +729,7 @@ export function parseImileScreenText(input: string, fileName = "imile-screen.txt
   return {
     routeName: fileName.replace(/\.[^.]+$/, "") || "Rider Delivery",
     stops,
+    sourceProvider: "imile",
     hasStopSequence: false,
     totalRows: totalDeliveries,
     totalDeliveries,
@@ -726,8 +743,12 @@ export async function parseImileScreenFile(file: File) {
   return parseImileScreenText(await file.text(), file.name);
 }
 
-export async function parseRouteWorkbook(file: File) {
+export async function parseRouteWorkbook(
+  file: File,
+  sourceProvider: StopSourceProvider | string = "generic"
+) {
   const buffer = await file.arrayBuffer();
+  const normalizedSourceProvider = normalizeStopSourceProvider(sourceProvider);
 
   if (typeof Worker !== "undefined") {
     return await new Promise<ImportedRoute>((resolve, reject) => {
@@ -758,6 +779,7 @@ export async function parseRouteWorkbook(file: File) {
         {
           type: "parse-workbook",
           fileName: file.name,
+          sourceProvider: normalizedSourceProvider,
           buffer,
         },
         [buffer]
@@ -779,6 +801,6 @@ export async function parseRouteWorkbook(file: File) {
     raw: true,
   });
 
-  return parseRouteRows(rows, file.name);
+  return parseRouteRows(rows, file.name, normalizedSourceProvider);
 }
 

@@ -77,12 +77,18 @@ export const ENV = {
   osrmRequestTimeoutMs: Number(process.env.OSRM_REQUEST_TIMEOUT_MS || 8000),
   osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3000),
   osrmRequired: process.env.OSRM_REQUIRED === "true",
+  osrmRequiredMinStops: readPositiveInt(process.env.OSRM_REQUIRED_MIN_STOPS, 101),
   maxSyncStops: readPositiveInt(process.env.MAX_SYNC_STOPS, 250),
+  maxRouteStops: Math.min(readPositiveInt(process.env.MAX_ROUTE_STOPS, 150), 150),
   maxGeographicFallbackStops: readPositiveInt(
     process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS,
     100
   ),
   bullmqRedisUrl: process.env.BULLMQ_REDIS_URL ?? process.env.REDIS_URL ?? "",
+  backupLastCompletedAt: process.env.BACKUP_LAST_COMPLETED_AT ?? "",
+  backupStatus: process.env.BACKUP_STATUS ?? "",
+  restoreTestLastPassedAt: process.env.RESTORE_TEST_LAST_PASSED_AT ?? "",
+  restoreTestPassed: process.env.RESTORE_TEST_PASSED === "true",
   integrationCredentialsSecret:
     process.env.INTEGRATION_CREDENTIALS_SECRET ?? process.env.JWT_SECRET ?? "",
 };

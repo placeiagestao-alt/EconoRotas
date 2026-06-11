@@ -41,6 +41,13 @@ import {
   applyFinalVoiceStop,
   parseVoiceStop,
 } from "./createRouteVoiceStops";
+import {
+  normalizeStopMetadata,
+  normalizeStopSourceProvider,
+  parseLegacyStopNotes,
+  type StopMetadata,
+  type StopSourceProvider,
+} from "@shared/stopMetadata";
 
 type ImileCapturePlugin = {
   openAccessibilitySettings: () => Promise<void>;
@@ -50,6 +57,15 @@ type ImileCapturePlugin = {
 };
 
 const ImileCapture = registerPlugin<ImileCapturePlugin>("ImileCapture");
+const MAX_ROUTE_STOPS = 150;
+const IMPORT_SOURCE_OPTIONS: Array<{ value: StopSourceProvider; label: string }> = [
+  { value: "generic", label: "Genérico" },
+  { value: "shopee", label: "Shopee" },
+  { value: "mercado_livre", label: "Mercado Livre" },
+  { value: "amazon", label: "Amazon" },
+  { value: "correios", label: "Correios" },
+  { value: "manual", label: "Manual" },
+];
 
 type SpeechRecognitionEventLike = Event & {
   resultIndex: number;
@@ -88,6 +104,10 @@ type RouteStop = Pick<ImportedStop, "address" | "latitude" | "longitude"> & {
   packageNumber?: string;
   deliveryCount?: number;
   routingStop?: number;
+  sourceProvider?: StopSourceProvider;
+  originalStop?: number | null;
+  isUnsequencedStop?: boolean;
+  metadata?: StopMetadata;
   notes?: string;
   sourceRow?: number;
   geocodingConfidenceScore?: number;
@@ -239,42 +259,25 @@ async function searchAddressWithTimeout(
 }
 
 function parseStopNotes(notes?: string) {
-  const raw = notes?.trim();
-  if (!raw) return { packageNumber: "", notes: undefined as string | undefined };
-
-  const parts = raw
-    .split("|")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  let packageNumber = "";
-  const remaining: string[] = [];
-
-  for (const part of parts) {
-    const match = part.match(/^Pacote:\s*(.+)$/i);
-    if (match?.[1] && !packageNumber) {
-      packageNumber = match[1].trim();
-      continue;
-    }
-    remaining.push(part);
-  }
+  const parsed = parseLegacyStopNotes(notes);
 
   return {
-    packageNumber,
-    notes: remaining.length ? remaining.join(" | ") : undefined,
+    packageNumber: parsed.metadata.packageNumber ?? "",
+    notes: parsed.notes,
+    metadata: parsed.metadata,
   };
 }
 
 function buildStopNotes(packageNumber?: string, notes?: string) {
-  const parts = [
-    packageNumber?.trim() ? `Pacote: ${packageNumber.trim()}` : "",
-    notes?.trim() ?? "",
-  ].filter(Boolean);
-
-  return parts.length ? parts.join(" | ") : undefined;
+  return notes?.trim() || undefined;
 }
 
-function buildSequentialImilePackageNumber(index: number) {
-  return String(index + 1).padStart(2, "0");
+function buildStopMetadata(stop: RouteStop) {
+  return normalizeStopMetadata({
+    ...stop.metadata,
+    packageNumber: stop.packageNumber || stop.metadata?.packageNumber,
+    groupedDeliveryCount: stop.deliveryCount || stop.metadata?.groupedDeliveryCount,
+  });
 }
 
 export default function CreateRoute() {
@@ -286,6 +289,8 @@ export default function CreateRoute() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [mode, setMode] = useState<"shortest_distance" | "shortest_time" | "balanced">("balanced");
+  const [importSourceProvider, setImportSourceProvider] =
+    useState<StopSourceProvider>("generic");
   const [importSummary, setImportSummary] = useState<ImportedRoute | null>(null);
   const [respectImportedStopSequence, setRespectImportedStopSequence] = useState(false);
   const [isImportingFile, setIsImportingFile] = useState(false);
@@ -430,11 +435,23 @@ export default function CreateRoute() {
     return {};
   };
 
+  const assertRouteStopLimit = (stopCount: number, source: string) => {
+    if (stopCount <= MAX_ROUTE_STOPS) return true;
+    toast.error(
+      `${source} tem ${stopCount} paradas. Durante testes e validação, o limite operacional é de ${MAX_ROUTE_STOPS} paradas por rota. Volumes maiores serão liberados gradualmente conforme a infraestrutura evoluir.`
+    );
+    return false;
+  };
+
   const applyImileCaptureRoute = (
     importedRoute: ImportedRoute,
     descriptionSource: string,
     successLabel: string
   ) => {
+    if (!assertRouteStopLimit(importedRoute.stops.length, "Esta importacao")) {
+      return;
+    }
+
     setInvalidStopIndexes([]);
     setStops(
       importedRoute.stops.map((stop) => ({
@@ -452,6 +469,10 @@ export default function CreateRoute() {
         packageNumber: stop.packageNumber,
         deliveryCount: stop.deliveryCount,
         routingStop: stop.routingStop,
+        sourceProvider: stop.sourceProvider ?? "imile",
+        originalStop: stop.originalStop ?? null,
+        isUnsequencedStop: Boolean(stop.isUnsequencedStop),
+        metadata: normalizeStopMetadata(stop.metadata),
         notes: stop.notes,
         sourceRow: stop.sourceRow,
       }))
@@ -732,6 +753,10 @@ export default function CreateRoute() {
   };
 
   const handleAddStop = () => {
+    if (!assertRouteStopLimit(stops.length + 1, "Esta rota")) {
+      return;
+    }
+
     setInvalidStopIndexes([]);
     setRespectImportedStopSequence(false);
     setStops((currentStops) => [
@@ -773,6 +798,13 @@ export default function CreateRoute() {
     const parsed = parseVoiceStop(rawTranscript);
 
     if (parsed.address.length < 6) {
+      return;
+    }
+
+    if (
+      pendingVoiceStopIndexRef.current === null &&
+      !assertRouteStopLimit(stops.length + 1, "Esta rota")
+    ) {
       return;
     }
 
@@ -1020,7 +1052,11 @@ export default function CreateRoute() {
     setIsImportingFile(true);
 
     try {
-      const importedRoute = await parseRouteWorkbook(file);
+      const importedRoute = await parseRouteWorkbook(file, importSourceProvider);
+      if (!assertRouteStopLimit(importedRoute.stops.length, "Esta planilha")) {
+        return;
+      }
+
       const importedStops = importedRoute.stops.map((stop) => {
         const confidence = getDefaultStopConfidence(stop);
         return {
@@ -1034,6 +1070,13 @@ export default function CreateRoute() {
           packageNumber: stop.packageNumber,
           deliveryCount: stop.deliveryCount,
           routingStop: stop.routingStop,
+          sourceProvider: stop.sourceProvider,
+          originalStop: stop.originalStop,
+          isUnsequencedStop: stop.isUnsequencedStop,
+          metadata: normalizeStopMetadata({
+            ...stop.metadata,
+            ...parseStopNotes(stop.notes).metadata,
+          }),
           notes: stop.notes,
           sourceRow: stop.sourceRow,
         };
@@ -1059,6 +1102,8 @@ export default function CreateRoute() {
         toast.message(
           "Coluna STOP detectada: escolha se deseja seguir essa sequencia ou otimizar automaticamente."
         );
+      } else if (importSourceProvider !== "shopee") {
+        toast.message("Origem sem regra STOP: a sequência será definida pela otimização da rota.");
       }
 
       if (importedRoute.missingCoordinateRows > 0) {
@@ -1216,10 +1261,15 @@ export default function CreateRoute() {
         return;
       }
 
+      if (!assertRouteStopLimit(importedRoute.stops.length, "Esta importacao")) {
+        return;
+      }
+
       setInvalidStopIndexes([]);
       setStops(
         importedRoute.stops.map((stop, index) => {
           const confidence = getDefaultStopConfidence(stop);
+          const stopMetadata = normalizeStopMetadata((stop as any).metadata);
           return {
             address: stop.address,
             latitude: stop.latitude,
@@ -1227,7 +1277,15 @@ export default function CreateRoute() {
             geocodingConfidenceScore: confidence.score,
             geocodingMethod: confidence.method,
             geocodingSuspect: confidence.suspect,
-            packageNumber: buildSequentialImilePackageNumber(index),
+            packageNumber: stop.packageNumber,
+            sourceProvider: "imile" as const,
+            originalStop: null,
+            isUnsequencedStop: false,
+            metadata: normalizeStopMetadata({
+              ...stopMetadata,
+              importedFrom: "imile",
+              packageNumber: stop.packageNumber || stopMetadata.packageNumber,
+            }),
             notes: stop.notes,
             sourceRow: index + 1,
           };
@@ -1236,13 +1294,27 @@ export default function CreateRoute() {
       setImportSummary({
         routeName: `Rider Delivery ${imileDateFrom}${imileDateTo !== imileDateFrom ? ` a ${imileDateTo}` : ""}`,
         stops: importedRoute.stops.map((stop, index) => ({
+          ...(() => {
+            const stopMetadata = normalizeStopMetadata((stop as any).metadata);
+            return {
+              metadata: normalizeStopMetadata({
+                ...stopMetadata,
+                importedFrom: "imile",
+                packageNumber: stop.packageNumber || stopMetadata.packageNumber,
+              }),
+            };
+          })(),
           address: stop.address,
           latitude: stop.latitude,
           longitude: stop.longitude,
-          packageNumber: buildSequentialImilePackageNumber(index),
+          packageNumber: stop.packageNumber,
+          sourceProvider: "imile" as const,
+          originalStop: null,
+          isUnsequencedStop: false,
           notes: stop.notes,
           sourceRow: index + 1,
         })),
+        sourceProvider: "imile",
         hasStopSequence: false,
         totalRows: importedRoute.total,
         skippedRows: importedRoute.missingAddressRows,
@@ -1410,6 +1482,10 @@ export default function CreateRoute() {
       return;
     }
 
+    if (!assertRouteStopLimit(filledStops.length, "Esta rota")) {
+      return;
+    }
+
     let validStops = filledStops;
     let validStartPoint = startPoint;
     let validEndPoint = endPoint;
@@ -1527,8 +1603,12 @@ export default function CreateRoute() {
         address: stop.address,
         latitude: stop.latitude,
         longitude: stop.longitude,
-        notes: buildStopNotes(stop.packageNumber, stop.notes),
+        notes: buildStopNotes(undefined, stop.notes),
         sequence: index,
+        sourceProvider: normalizeStopSourceProvider(stop.sourceProvider ?? "manual"),
+        originalStop: stop.originalStop ?? null,
+        isUnsequencedStop: Boolean(stop.isUnsequencedStop),
+        metadata: buildStopMetadata(stop),
         geocodingConfidenceScore:
           stop.geocodingConfidenceScore ??
           getDefaultStopConfidence(stop).score,
@@ -1692,16 +1772,31 @@ export default function CreateRoute() {
                 <MapPin className="w-5 h-5" />
                 Paradas da Rota
               </CardTitle>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleAddStop}
-                className="gap-2"
-              >
-                <Plus className="w-4 h-4" />
-                Adicionar Parada
-              </Button>
+              <div className="flex items-center gap-3">
+                <span
+                  className={cn(
+                    "text-xs font-medium",
+                    stops.length > MAX_ROUTE_STOPS
+                      ? "text-destructive"
+                      : stops.length >= MAX_ROUTE_STOPS * 0.9
+                        ? "text-amber-600"
+                        : "text-muted-foreground"
+                  )}
+                >
+                  {stops.length}/{MAX_ROUTE_STOPS} paradas
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleAddStop}
+                  disabled={stops.length >= MAX_ROUTE_STOPS}
+                  className="gap-2"
+                >
+                  <Plus className="w-4 h-4" />
+                  Adicionar Parada
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="rounded-lg border bg-white p-4">
@@ -1892,7 +1987,25 @@ export default function CreateRoute() {
                       </p>
                     </div>
                   </div>
-                  <div className="min-w-0 md:w-72">
+                  <div className="grid min-w-0 gap-2 md:w-72">
+                    <Label htmlFor="route-import-source">Origem da tabela</Label>
+                    <Select
+                      value={importSourceProvider}
+                      onValueChange={(value) =>
+                        setImportSourceProvider(normalizeStopSourceProvider(value))
+                      }
+                    >
+                      <SelectTrigger id="route-import-source">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {IMPORT_SOURCE_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     <Label htmlFor="route-file-import" className="sr-only">
                       Importar planilha de rotas
                     </Label>

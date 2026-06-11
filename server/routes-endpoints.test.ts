@@ -33,8 +33,18 @@ describe("Route endpoints", () => {
   afterEach(() => {
     ENV.osrmRequired = false;
     ENV.maxSyncStops = 250;
+    ENV.maxRouteStops = 500;
     ENV.bullmqRedisUrl = "";
+    ENV.adminEmails = "";
   });
+
+  const makeStops = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      address: `Rua Limite ${index + 1}, Presidente Prudente - SP`,
+      latitude: -22.1207 + index * 0.00001,
+      longitude: -51.3889 + index * 0.00001,
+      sequence: index,
+    }));
 
   it("creates stops and optimizes route in one backend operation", async () => {
     const caller = appRouter.createCaller(createAuthContext(8201));
@@ -63,6 +73,33 @@ describe("Route endpoints", () => {
 
     const stops = await caller.stops.list({ routeId: result.route.id });
     expect(stops).toHaveLength(2);
+  });
+
+  it("blocks create and optimize above the commercial route stop limit", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8260));
+
+    await expect(
+      caller.routes.createAndOptimize({
+        name: "Rota acima do limite",
+        mode: "balanced",
+        stops: makeStops(501),
+      })
+    ).rejects.toThrow("limite comercial");
+  });
+
+  it("blocks adding stops when the route would exceed the commercial limit", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8261));
+    const route = await caller.routes.create({
+      name: "Rota limite",
+      mode: "balanced",
+    });
+
+    await expect(
+      caller.stops.create({
+        routeId: route.id,
+        stops: makeStops(501),
+      })
+    ).rejects.toThrow("limite comercial");
   });
 
   it("persists route metrics for admin analytics after optimization", async () => {
@@ -172,7 +209,174 @@ describe("Route endpoints", () => {
     expect(report.monthlyEvolution.manualCorrections.topAddresses.length).toBeGreaterThan(0);
   });
 
-  it("blocks optimization when a stop has low geocoding confidence", async () => {
+  it("tracks operational execution analytics from route events", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8288));
+
+    const completed = await caller.routes.createAndOptimize({
+      name: "Rota execucao concluida",
+      mode: "balanced",
+      stops: [
+        {
+          address: "Rua Execucao A, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+        },
+        {
+          address: "Rua Execucao B, Presidente Prudente - SP",
+          latitude: -22.1217,
+          longitude: -51.3899,
+          sequence: 1,
+        },
+      ],
+    });
+    const abandoned = await caller.routes.createAndOptimize({
+      name: "Rota execucao abandonada",
+      mode: "balanced",
+      stops: [
+        {
+          address: "Rua Abandono A, Presidente Prudente - SP",
+          latitude: -22.1227,
+          longitude: -51.3909,
+          sequence: 0,
+        },
+        {
+          address: "Rua Abandono B, Presidente Prudente - SP",
+          latitude: -22.1237,
+          longitude: -51.3919,
+          sequence: 1,
+        },
+      ],
+    });
+
+    await caller.events.report({
+      type: "route_started",
+      severity: "info",
+      source: "route.execution",
+      title: "Execucao iniciada",
+      routeId: completed.route.id,
+      metadata: { test: true },
+    });
+    await caller.events.report({
+      type: "route_completed",
+      severity: "info",
+      source: "route.execution",
+      title: "Execucao concluida",
+      routeId: completed.route.id,
+      metadata: { test: true },
+    });
+    await caller.events.report({
+      type: "route_started",
+      severity: "info",
+      source: "route.execution",
+      title: "Execucao iniciada",
+      routeId: abandoned.route.id,
+      metadata: { test: true },
+    });
+    await caller.events.report({
+      type: "route_abandoned",
+      severity: "warning",
+      source: "route.execution",
+      title: "Execucao abandonada",
+      routeId: abandoned.route.id,
+      metadata: { reason: "manual_reset" },
+    });
+    await caller.events.report({
+      type: "route_start_blocked",
+      severity: "error",
+      source: "route.execution",
+      title: "Inicio bloqueado",
+      routeId: abandoned.route.id,
+      metadata: { reason: "invalid_coordinates" },
+    });
+
+    const report = await db.getOperationExecutionReport();
+
+    expect(report.last30Days.optimizedRoutes).toBeGreaterThanOrEqual(2);
+    expect(report.last30Days.startedRoutes).toBeGreaterThanOrEqual(2);
+    expect(report.last30Days.completedRoutes).toBeGreaterThanOrEqual(1);
+    expect(report.last30Days.abandonedRoutes).toBeGreaterThanOrEqual(1);
+    expect(report.last30Days.startBlockedAttempts).toBeGreaterThanOrEqual(1);
+    expect(report.last30Days.startBlockedByReason.invalid_coordinates).toBeGreaterThanOrEqual(1);
+    expect(report.last30Days.startRate).toBeGreaterThan(0);
+    expect(report.last30Days.completionRate).toBeGreaterThan(0);
+  });
+
+  it("exposes disaster recovery readiness for admin dashboards", async () => {
+    ENV.adminEmails = "route-endpoints-8299@example.com";
+    const caller = appRouter.createCaller(createAuthContext(8299, "admin"));
+
+    const readiness = await caller.admin.disasterReadiness();
+
+    expect(readiness.rpoTargetHours).toBe(24);
+    expect(readiness.rtoTargetHours).toBe(4);
+    expect(readiness.criticalTables.map((table) => table.table)).toEqual(
+      expect.arrayContaining([
+        "routes",
+        "stops",
+        "route_metrics",
+        "optimization_jobs",
+        "operationalEvents",
+        "address_corrections",
+        "osrm_matrix_cache",
+        "admin_dashboard_metrics",
+      ])
+    );
+    expect(readiness.status).toMatch(/healthy|warning|critical/);
+    expect(Array.isArray(readiness.alerts)).toBe(true);
+  });
+
+  it("persists performance benchmark history for admin dashboards", async () => {
+    await db.createPerformanceBenchmark({
+      scenario: "test-suite",
+      stopCount: 250,
+      runtimeMs: 12_000,
+      peakMemoryMb: 180,
+      queueWaitMs: 20,
+      osrmLatencyMs: 40,
+      auditCycles: 2,
+      microClusterCount: 4,
+      osrmCalls: 8,
+      osrmFailures: 0,
+      success: true,
+    });
+
+    const dashboard = await db.getPerformanceBenchmarkDashboard(30);
+
+    const target250 = dashboard.targets.find((target) => target.stopCount === 250);
+    expect(dashboard.totalRuns).toBeGreaterThanOrEqual(1);
+    expect(dashboard.successRate).toBeGreaterThan(0);
+    expect(target250?.latestRuntimeMs).toBeGreaterThan(0);
+    expect(target250?.status).toBe("ready");
+  });
+
+  it("includes performance benchmarks in the consolidated admin dashboard", async () => {
+    ENV.adminEmails = "route-endpoints-8300@example.com";
+    const caller = appRouter.createCaller(createAuthContext(8300, "admin"));
+
+    const dashboard = await caller.admin.dashboard();
+
+    expect((dashboard as any).performanceBenchmarks).toBeDefined();
+    expect((dashboard as any).performanceBenchmarks.targets).toHaveLength(4);
+  });
+
+  it("exposes a consolidated multi-vehicle readiness decision", async () => {
+    ENV.adminEmails = "route-endpoints-8301@example.com";
+    const caller = appRouter.createCaller(createAuthContext(8301, "admin"));
+
+    const readiness = await caller.admin.multiVehicleReadiness();
+
+    expect(readiness.status).toMatch(/READY|PARTIAL|NO-GO/);
+    expect(readiness.items.osrmEnterprise.status).toMatch(/READY|PARTIAL|NO-GO/);
+    expect(readiness.items.workerRedundancy.status).toMatch(/READY|PARTIAL|NO-GO/);
+    expect(readiness.items.disasterRecovery.status).toMatch(/READY|PARTIAL|NO-GO/);
+    expect(readiness.items.benchmark250.evidence.stopCount).toBe(250);
+    expect(readiness.items.benchmark500.evidence.stopCount).toBe(500);
+    expect(readiness.items.benchmark1000.evidence.stopCount).toBe(1000);
+    expect(readiness.items.benchmark2000.evidence.stopCount).toBe(2000);
+  });
+
+  it("optimizes with warning when a stop has low geocoding confidence but valid coordinates", async () => {
     const caller = appRouter.createCaller(createAuthContext(8261));
 
     const result = await caller.routes.createAndOptimize({
@@ -200,12 +404,14 @@ describe("Route endpoints", () => {
       ],
     });
 
-    expect(result.route.status).toBe("draft");
-    expect(result.optimization).toBeNull();
-    expect(result.warning).toContain("Coordenada com baixa confianca");
+    expect(result.route.status).toBe("optimized");
+    expect(result.optimization).not.toBeNull();
+    expect(result.optimization?.audit.issues.some((issue) =>
+      issue.type === "low_geocoding_confidence"
+    )).toBe(true);
   });
 
-  it("blocks route optimization when OSRM is required and road metrics are unavailable", async () => {
+  it("optimizes with warning when OSRM is required and road metrics are unavailable", async () => {
     ENV.osrmRequired = true;
     const caller = appRouter.createCaller(createAuthContext(8217));
 
@@ -231,12 +437,13 @@ describe("Route endpoints", () => {
       ],
     });
 
-    await expect(caller.routes.optimize({ id: route.id })).rejects.toThrow(
-      "OSRM obrigatorio indisponivel"
-    );
+    const optimized = await caller.routes.optimize({ id: route.id });
 
     const storedRoute = await caller.routes.get({ id: route.id });
-    expect(storedRoute?.status).toBe("draft");
+    expect(optimized.audit.issues.some((issue: any) =>
+      issue.type === "osrm_fallback"
+    )).toBe(true);
+    expect(storedRoute?.status).toBe("optimized");
   });
 
   it("queues large routes instead of optimizing them synchronously", async () => {
@@ -400,7 +607,7 @@ describe("Route endpoints", () => {
     expect(stops).toHaveLength(2);
   });
 
-  it("keeps route as draft when optimization finds a generic address", async () => {
+  it("optimizes with warning when optimization finds a generic address with valid coordinates", async () => {
     const caller = appRouter.createCaller(createAuthContext(8211));
 
     const result = await caller.routes.createAndOptimize({
@@ -424,9 +631,11 @@ describe("Route endpoints", () => {
 
     const route = await caller.routes.get({ id: result.route.id });
 
-    expect(result.optimization).toBeNull();
-    expect(result.warning).toContain("Endereco generico");
-    expect(route?.status).toBe("draft");
+    expect(result.optimization).not.toBeNull();
+    expect(result.optimization?.audit.issues.some((issue) =>
+      issue.type === "generic_address"
+    )).toBe(true);
+    expect(route?.status).toBe("optimized");
   });
 
   it("reoptimizes automatically when the auditor finds a poor preserved sequence", async () => {
@@ -461,16 +670,20 @@ describe("Route endpoints", () => {
     const route = await caller.routes.get({ id: result.route.id });
 
     expect(result.optimization).not.toBeNull();
-    expect(result.optimization?.auditSource).toContain("audit-corrected");
+    expect(result.optimization?.auditSource).toContain("audit-global-plan");
     expect(
       result.optimization?.audit.issues.some(
         (issue: any) => issue.type === "nearby_stop_skipped"
       )
     ).toBe(false);
     expect(route?.status).toBe("optimized");
+
+    const metrics = await db.getRouteMetricsDashboard(30);
+    expect(metrics.optimizerV2.batchCorrectionCount).toBeGreaterThanOrEqual(1);
+    expect(metrics.optimizerV2.totalAuditCycles).toBeGreaterThanOrEqual(2);
   });
 
-  it("rejects reoptimization when too many addresses share approximate coordinates", async () => {
+  it("optimizes with attention when many addresses share approximate coordinates", async () => {
     const caller = appRouter.createCaller(createAuthContext(8213));
     const route = await caller.routes.create({
       name: "Rota com geocodificacao duplicada",
@@ -519,14 +732,15 @@ describe("Route endpoints", () => {
       ],
     });
 
-    await expect(caller.routes.optimize({ id: route.id })).rejects.toThrow(
-      "Geocodificacao imprecisa"
-    );
+    const optimized = await caller.routes.optimize({ id: route.id });
 
     const routeAfter = await caller.routes.get({ id: route.id });
     const stopsAfter = await caller.stops.list({ routeId: route.id });
 
-    expect(routeAfter?.status).toBe("draft");
+    expect(optimized.audit.issues.some((issue: any) =>
+      issue.type === "duplicate_coordinates"
+    )).toBe(true);
+    expect(routeAfter?.status).toBe("optimized");
     expect(stopsAfter).toHaveLength(6);
   });
 

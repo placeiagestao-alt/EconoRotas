@@ -1,9 +1,44 @@
-import "dotenv/config";
-import { getDatabaseHealth } from "../server/db";
-import { getOptimizationQueueHealth } from "../server/optimizationQueue";
+import dotenv from "dotenv";
 
-const database = await getDatabaseHealth();
-const queue = await getOptimizationQueueHealth();
+dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || ".env" });
+
+const { getDatabaseHealth } = await import("../server/db");
+const { getOptimizationQueueHealth } = await import("../server/optimizationQueue");
+
+function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs = 20_000): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs} ms`)), timeoutMs)
+    ),
+  ]);
+}
+
+let database;
+try {
+  database = await withTimeout(getDatabaseHealth(), "database");
+} catch (error) {
+  database = {
+    configured: Boolean(process.env.DATABASE_URL),
+    connected: false,
+    ssl: false,
+    error: error instanceof Error ? error.message : "database timeout",
+  };
+}
+
+let queue;
+try {
+  queue = await withTimeout(getOptimizationQueueHealth(), "queue");
+} catch (error) {
+  queue = {
+    configured: Boolean(process.env.BULLMQ_REDIS_URL || process.env.REDIS_URL),
+    reachable: false,
+    queueName: "econorota-optimization",
+    counts: null,
+    workerCount: 0,
+    error: error instanceof Error ? error.message : "queue timeout",
+  };
+}
 const workerCount = "workerCount" in queue ? Number(queue.workerCount || 0) : 0;
 const ok = Boolean(database.connected && queue.configured && queue.reachable && workerCount > 0);
 
@@ -18,6 +53,4 @@ console.log(JSON.stringify({
   queue,
 }, null, 2));
 
-if (!ok) {
-  process.exitCode = 1;
-}
+process.exit(ok ? 0 : 1);

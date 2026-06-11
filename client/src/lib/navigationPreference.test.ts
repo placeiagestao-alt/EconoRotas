@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildNavigationUrl } from "./navigationPreference";
 
 describe("buildNavigationUrl", () => {
-  it("keeps the full street number when opening Google Maps", () => {
+  it("uses coordinates first when opening Google Maps to avoid POI ambiguity", () => {
     const url = buildNavigationUrl({
       address: "Avenida Brasil, 1520, Centro, Presidente Prudente - SP",
       latitude: -22.1207,
@@ -10,13 +10,11 @@ describe("buildNavigationUrl", () => {
       provider: "google_maps",
     });
 
-    expect(decodeURIComponent(url)).toContain(
-      "destination=Avenida Brasil, 1520, Centro, Presidente Prudente - SP"
-    );
-    expect(url).not.toContain("-22.1207,-51.3889");
+    expect(url).toContain("destination=-22.1207,-51.3889");
+    expect(decodeURIComponent(url)).not.toContain("destination=Avenida Brasil");
   });
 
-  it("keeps the full street number when opening Waze", () => {
+  it("uses coordinates first when opening Waze", () => {
     const url = buildNavigationUrl({
       address: "Avenida Brasil, 1520, Centro, Presidente Prudente - SP",
       latitude: -22.1207,
@@ -24,10 +22,8 @@ describe("buildNavigationUrl", () => {
       provider: "waze",
     });
 
-    expect(decodeURIComponent(url)).toContain(
-      "q=Avenida Brasil, 1520, Centro, Presidente Prudente - SP"
-    );
-    expect(url).not.toContain("ll=-22.1207,-51.3889");
+    expect(url).toContain("ll=-22.1207,-51.3889");
+    expect(decodeURIComponent(url)).not.toContain("q=Avenida Brasil");
   });
 
   it("uses coordinates only when there is no address", () => {

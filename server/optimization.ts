@@ -9,6 +9,7 @@ import {
   type RouteMode,
   type RouteObjective,
 } from "./routeObjective";
+import type { StopMetadata, StopSourceProvider } from "../shared/stopMetadata";
 
 export interface Location {
   latitude: number;
@@ -18,6 +19,10 @@ export interface Location {
   geocodingConfidenceScore?: number;
   geocodingMethod?: string;
   geocodingSuspect?: boolean;
+  sourceProvider?: StopSourceProvider | string | null;
+  originalStop?: number | null;
+  isUnsequencedStop?: boolean | null;
+  metadata?: StopMetadata | null;
 }
 
 export interface OptimizedRoute {
@@ -39,8 +44,17 @@ export interface RouteOptimizationOptions {
   localityMode?: "balanced" | "local" | "strict";
   partitionLargeRoutes?: boolean;
   maxPartitionSize?: number;
+  forceMicrocluster?: boolean;
   telemetry?: {
     recordOsrmCall?: (durationMs: number, success: boolean) => void;
+    recordOsrmMatrix?: (args: {
+      nodeCount: number;
+      durationMs: number;
+      cacheHit: boolean;
+      success: boolean;
+      failureReason?: string | null;
+      provider?: string | null;
+    }) => void;
   };
 }
 
@@ -387,17 +401,47 @@ function chunkStops(
     }];
   }
 
-  const orderedStops = [...cluster.stops].sort((a, b) => {
-    const angleA = Math.atan2(
-      a.latitude - cluster.centroid.latitude,
-      a.longitude - cluster.centroid.longitude
+  const targetPartitionCount = Math.ceil(cluster.stops.length / maxPartitionSize);
+  const gridSize = Math.max(2, Math.ceil(Math.sqrt(targetPartitionCount)));
+  const latitudes = cluster.stops.map((stop) => stop.latitude);
+  const longitudes = cluster.stops.map((stop) => stop.longitude);
+  const minLatitude = Math.min(...latitudes);
+  const maxLatitude = Math.max(...latitudes);
+  const minLongitude = Math.min(...longitudes);
+  const maxLongitude = Math.max(...longitudes);
+  const latitudeSpan = Math.max(0.000001, maxLatitude - minLatitude);
+  const longitudeSpan = Math.max(0.000001, maxLongitude - minLongitude);
+  const gridGroups = new Map<string, typeof cluster.stops>();
+
+  for (const stop of cluster.stops) {
+    const row = Math.min(
+      gridSize - 1,
+      Math.floor(((stop.latitude - minLatitude) / latitudeSpan) * gridSize)
     );
-    const angleB = Math.atan2(
-      b.latitude - cluster.centroid.latitude,
-      b.longitude - cluster.centroid.longitude
+    const column = Math.min(
+      gridSize - 1,
+      Math.floor(((stop.longitude - minLongitude) / longitudeSpan) * gridSize)
     );
-    return angleA - angleB;
-  });
+    const key = `${row}:${column}`;
+    const group = gridGroups.get(key) ?? [];
+    group.push(stop);
+    gridGroups.set(key, group);
+  }
+
+  const orderedStops = Array.from(gridGroups.entries())
+    .sort(([keyA], [keyB]) => {
+      const [rowA, columnA] = keyA.split(":").map(Number);
+      const [rowB, columnB] = keyB.split(":").map(Number);
+      if (rowA !== rowB) return rowA - rowB;
+      return columnA - columnB;
+    })
+    .flatMap(([, stops]) =>
+      [...stops].sort((a, b) => {
+        if (a.latitude !== b.latitude) return a.latitude - b.latitude;
+        if (a.longitude !== b.longitude) return a.longitude - b.longitude;
+        return a.originalIndex - b.originalIndex;
+      })
+    );
   const chunks: RoutePartition[] = [];
 
   for (let index = 0; index < orderedStops.length; index += maxPartitionSize) {
@@ -413,18 +457,45 @@ function chunkStops(
   return chunks;
 }
 
+function shouldMicrocluster(
+  cluster: StopCluster,
+  totalStopCount: number,
+  maxPartitionSize: number
+) {
+  if (cluster.stops.length <= maxPartitionSize) return false;
+  if (totalStopCount >= 501) return true;
+  if (totalStopCount >= 201) return true;
+
+  if (totalStopCount >= 101) {
+    const radius = Math.max(
+      0,
+      ...cluster.stops.map((stop) => calculateDistance(cluster.centroid, stop))
+    );
+    return cluster.stops.length > 100 || radius > 1.5;
+  }
+
+  return false;
+}
+
 export function partitionStopsForOptimization(
   stops: Location[],
   options: RouteOptimizationOptions = {}
 ): RoutePartition[] {
   if (stops.length === 0) return [];
 
-  const maxPartitionSize = Math.max(10, options.maxPartitionSize ?? 80);
+  const defaultPartitionSize = stops.length >= 501 ? 60 : 70;
+  const maxPartitionSize = Math.max(10, options.maxPartitionSize ?? defaultPartitionSize);
   const clusters = clusterStops(stops, options);
   let generatedClusterId = clusters.length + 1;
   const nextClusterId = () => generatedClusterId++;
   const partitions = clusters.flatMap((cluster) =>
-    chunkStops(cluster, maxPartitionSize, nextClusterId)
+    options.forceMicrocluster ||
+    shouldMicrocluster(cluster, stops.length, maxPartitionSize)
+      ? chunkStops(cluster, maxPartitionSize, nextClusterId)
+      : [{
+          ...cluster,
+          sourceClusterId: cluster.clusterId,
+        }]
   );
 
   return partitions.sort((a, b) => {

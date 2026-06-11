@@ -29,7 +29,7 @@ describe("Route auditor", () => {
       },
     });
 
-    expect(report.status).toBe("critical");
+    expect(report.status).toBe("attention");
     expect(report.issues.some((issue) => issue.type === "nearby_stop_skipped")).toBe(
       true
     );
@@ -211,7 +211,7 @@ describe("Route auditor", () => {
       },
     ]);
 
-    expect(report.status).toBe("critical");
+    expect(report.status).toBe("attention");
     expect(report.issues.some((issue) => issue.type === "empty_address")).toBe(true);
     expect(
       report.issues.filter((issue) => issue.type === "generic_address")

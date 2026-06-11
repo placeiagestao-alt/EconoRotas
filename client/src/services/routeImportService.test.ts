@@ -27,12 +27,15 @@ describe("parseRouteRows", () => {
           Longitude: 0,
         },
       ],
-      "rota-stop.xlsx"
+      "rota-stop.xlsx",
+      "shopee"
     );
 
     expect(route.hasStopSequence).toBe(true);
     expect(route.stops.map((stop) => stop.routingStop)).toEqual([1, 0, 2]);
-    expect(route.stops.map((stop) => stop.packageNumber)).toEqual(["1", "0", "2"]);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([1, 0, 2]);
+    expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([false, true, false]);
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([undefined, undefined, undefined]);
     expect(route.stops.map((stop) => stop.address)).toEqual([
       "Rua A, 10, Centro, Presidente Prudente",
       "Rua Sem Stop, 30, Centro, Presidente Prudente",
@@ -68,7 +71,8 @@ describe("parseRouteRows", () => {
           Longitude: 30.1,
         },
       ],
-      "rota-stop-zero.xlsx"
+      "rota-stop-zero.xlsx",
+      "shopee"
     );
 
     expect(route.stops.map((stop) => stop.address)).toEqual([
@@ -77,7 +81,8 @@ describe("parseRouteRows", () => {
       "Joao Goets primeira",
       "Joao Goets segunda",
     ]);
-    expect(route.stops.map((stop) => stop.packageNumber)).toEqual(["1", "0", "2", "3"]);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([1, 0, 2, 3]);
+    expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([false, true, false, false]);
   });
 
   it("ignores sequence aliases when STOP column does not exist", () => {
@@ -101,7 +106,7 @@ describe("parseRouteRows", () => {
 
     expect(route.hasStopSequence).toBe(false);
     expect(route.stops.map((stop) => stop.routingStop)).toEqual([undefined, undefined]);
-    expect(route.stops.map((stop) => stop.packageNumber)).toEqual(["1", "2"]);
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([undefined, undefined]);
     expect(route.stops.map((stop) => stop.address)).toEqual([
       "Rua B, 20, Centro, Presidente Prudente",
       "Rua A, 10, Centro, Presidente Prudente",
@@ -191,6 +196,35 @@ describe("parseRouteRows", () => {
       "Av Manoel Goulart, 900, Vila Santa Helena, Presidente Prudente, SP",
     ]);
   });
+
+  it("does not activate Shopee STOP rules for a generic CSV even when a stop column exists", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua B, 20, Centro, Presidente Prudente",
+          STOP: 2,
+          Latitude: -22.13,
+          Longitude: -51.39,
+        },
+        {
+          "Destination Address": "Rua A, 10, Centro, Presidente Prudente",
+          STOP: 1,
+          Latitude: -22.11,
+          Longitude: -51.37,
+        },
+      ],
+      "generic-stop.csv",
+      "generic"
+    );
+
+    expect(route.sourceProvider).toBe("generic");
+    expect(route.hasStopSequence).toBe(false);
+    expect(route.stops.map((stop) => stop.routingStop)).toEqual([undefined, undefined]);
+    expect(route.stops.map((stop) => stop.address)).toEqual([
+      "Rua B, 20, Centro, Presidente Prudente",
+      "Rua A, 10, Centro, Presidente Prudente",
+    ]);
+  });
 });
 
 describe("parseImileScreenText", () => {
@@ -212,14 +246,19 @@ describe("parseImileScreenText", () => {
     expect(route.routeName).toBe("imile");
     expect(route.hasStopSequence).toBe(false);
     expect(route.missingCoordinateRows).toBe(2);
-    expect(route.stops.map((stop) => stop.packageNumber)).toEqual(["01", "02"]);
+    expect(route.sourceProvider).toBe("imile");
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      "6052826300704",
+      "6052126314870",
+    ]);
     expect(route.stops.map((stop) => stop.address)).toEqual([
       "Rua Olivio Crepaldi torre 2 ap 206, 345, Jardim Eldorado, Presidente Prudente, São Paulo",
       "Av salin farah maluf Muffato Max - Balcão Televendas, 170, Jardim Eldorado, Presidente Prudente, São Paulo",
     ]);
-    expect(route.stops[0].notes).toContain("murillo Henrique vieira da silva");
-    expect(route.stops[0].notes).toContain("6052826300704");
-    expect(route.stops[0].notes).toContain("E2E: Restante 24 Hora Tempo esgotado");
+    expect(route.stops[0].notes).toBeUndefined();
+    expect(route.stops[0].metadata?.recipientName).toBe("murillo Henrique vieira da silva");
+    expect(route.stops[0].metadata?.trackingNumber).toBe("6052826300704");
+    expect(route.stops[0].metadata?.externalStatus).toBe("E2E: Restante 24 Hora Tempo esgotado");
   });
 
   it("preserves grouped delivery counts from iMile recipient labels", () => {
@@ -239,7 +278,7 @@ describe("parseImileScreenText", () => {
     expect(route.totalDeliveries).toBe(4);
     expect(route.groupedDeliveries).toBe(2);
     expect(route.stops[0].deliveryCount).toBe(3);
-    expect(route.stops[0].notes).toContain("Entregas agrupadas: 3");
+    expect(route.stops[0].metadata?.groupedDeliveryCount).toBe(3);
   });
 
   it("deduplicates repeated iMile pages without losing tracking data", () => {
@@ -259,8 +298,11 @@ describe("parseImileScreenText", () => {
     );
 
     expect(route.stops).toHaveLength(2);
-    expect(route.stops.map((stop) => stop.packageNumber)).toEqual(["01", "02"]);
-    expect(route.stops[0].notes).toContain("6052826300704");
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      "6052826300704",
+      "6052126314870",
+    ]);
+    expect(route.stops[0].metadata?.trackingNumber).toBe("6052826300704");
   });
 
   it("recovers tracking when the address appears before the next card tracking", () => {
@@ -277,7 +319,10 @@ describe("parseImileScreenText", () => {
       "imile-invertido.xml"
     );
 
-    expect(route.stops.map((stop) => stop.packageNumber)).toEqual(["01", "02"]);
-    expect(route.stops[0].notes).toContain("6052826300704");
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      "6052826300704",
+      "6052126314870",
+    ]);
+    expect(route.stops[0].metadata?.trackingNumber).toBe("6052826300704");
   });
 });

@@ -1,3 +1,15 @@
+import dotenv from "dotenv";
+import fs from "node:fs";
+
+for (const path of [
+  ".env",
+  ".env.local",
+  ".env.production",
+  ".env.worker.production",
+]) {
+  if (fs.existsSync(path)) dotenv.config({ path });
+}
+
 const required = [
   {
     name: "PERSISTENT_STORAGE",

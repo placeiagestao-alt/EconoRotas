@@ -47,11 +47,29 @@ const isExpectedClientError = (error: unknown) => {
   );
 };
 
+const isTransientFetchFailure = (error: unknown) => {
+  if (error instanceof TRPCClientError) {
+    const message = error.message.toLowerCase();
+    return (
+      !error.data?.httpStatus &&
+      (message.includes("failed to fetch") ||
+        message.includes("networkerror") ||
+        message.includes("load failed"))
+    );
+  }
+
+  if (error instanceof TypeError) {
+    return error.message.toLowerCase().includes("fetch");
+  }
+
+  return false;
+};
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       retry: (failureCount, error) =>
-        isRetryableRequestError(error) && failureCount < 1,
+        isRetryableRequestError(error) && failureCount < 2,
       refetchOnWindowFocus: false,
     },
     mutations: {
@@ -92,6 +110,10 @@ queryClient.getQueryCache().subscribe(event => {
   if (event.type === "updated" && event.action.type === "error") {
     const error = event.query.state.error;
     if (redirectToLoginIfUnauthorized(error)) return;
+    if (isTransientFetchFailure(error)) {
+      console.warn("[API Query Transport Warning]", error);
+      return;
+    }
     console.error("[API Query Error]", error);
     reportUnknownError("Falha ao consultar dados da API", error, "react-query.query", {
       queryHash: event.query.queryHash,

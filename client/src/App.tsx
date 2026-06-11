@@ -59,17 +59,30 @@ const Profile = lazyPage(() => import("./pages/Profile"));
 const DownloadApk = lazyPage(() => import("./pages/DownloadApk"));
 const Operations = lazyPage(() => import("./pages/Operations"));
 
-function ProtectedRoute({ component: Component }: { component: ComponentType }) {
-  const { loading, isAuthenticated } = useAuth();
+function ProtectedRoute({
+  component: Component,
+  adminOnly = false,
+}: {
+  component: ComponentType;
+  adminOnly?: boolean;
+}) {
+  const { loading, isAuthenticated, user } = useAuth();
   const [, setLocation] = useLocation();
 
   useEffect(() => {
-    if (loading || isAuthenticated) return;
-    setLocation("/", { replace: true });
-  }, [loading, isAuthenticated, setLocation]);
+    if (loading) return;
+    if (!isAuthenticated) {
+      setLocation("/", { replace: true });
+      return;
+    }
+    if (adminOnly && user?.role !== "admin") {
+      setLocation("/routes", { replace: true });
+    }
+  }, [adminOnly, loading, isAuthenticated, setLocation, user?.role]);
 
   if (loading) return <DashboardLayoutSkeleton />;
   if (!isAuthenticated) return <DashboardLayoutSkeleton />;
+  if (adminOnly && user?.role !== "admin") return <DashboardLayoutSkeleton />;
 
   return <Component />;
 }
@@ -111,7 +124,7 @@ function Router() {
           <ProtectedRoute component={Profile} />
         </Route>
         <Route path={"/operations"}>
-          <ProtectedRoute component={Operations} />
+          <ProtectedRoute component={Operations} adminOnly />
         </Route>
         <Route path={"/404"} component={NotFound} />
         {/* Final fallback route */}

@@ -464,7 +464,7 @@ describe("Route Optimization", () => {
       expect(clusters.map((cluster) => cluster.stops.length)).toEqual([3, 2]);
     });
 
-    it("partitions large clustered routes into bounded regional chunks", () => {
+    it("keeps routes up to 100 stops as a normal cluster", () => {
       const locations: Location[] = Array.from({ length: 95 }, (_, index) => ({
         latitude: -22.12 + index * 0.00001,
         longitude: -51.4 + index * 0.00001,
@@ -476,11 +476,50 @@ describe("Route Optimization", () => {
         maxPartitionSize: 30,
       });
 
-      expect(partitions.length).toBeGreaterThan(1);
-      expect(partitions.every((partition) => partition.stops.length <= 30)).toBe(true);
+      expect(partitions).toHaveLength(1);
       expect(
         partitions.flatMap((partition) => partition.stops.map((stop) => stop.originalIndex))
       ).toHaveLength(locations.length);
+    });
+
+    it("microclusters 101-200 stops only when operational rules require it", () => {
+      const compactLocations: Location[] = Array.from({ length: 150 }, (_, index) => ({
+        latitude: -22.12 + index * 0.000001,
+        longitude: -51.4 + index * 0.000001,
+        address: `Compacto ${index + 1}`,
+      }));
+      const spreadLocations: Location[] = Array.from({ length: 150 }, (_, index) => ({
+        latitude: -22.12 + index * 0.0002,
+        longitude: -51.4,
+        address: `Espalhado ${index + 1}`,
+      }));
+
+      const compactPartitions = partitionStopsForOptimization(compactLocations, {
+        localityMode: "strict",
+      });
+      const spreadPartitions = partitionStopsForOptimization(spreadLocations, {
+        localityMode: "strict",
+      });
+
+      expect(compactPartitions.length).toBeGreaterThan(1);
+      expect(compactPartitions.every((partition) => partition.stops.length <= 70)).toBe(true);
+      expect(spreadPartitions.length).toBeGreaterThan(1);
+      expect(spreadPartitions.every((partition) => partition.stops.length <= 70)).toBe(true);
+    });
+
+    it("forces microclusters for 201+ stops", () => {
+      const locations: Location[] = Array.from({ length: 220 }, (_, index) => ({
+        latitude: -22.12 + index * 0.000001,
+        longitude: -51.4 + index * 0.000001,
+        address: `Centro ${index + 1}`,
+      }));
+
+      const partitions = partitionStopsForOptimization(locations, {
+        localityMode: "strict",
+      });
+
+      expect(partitions.length).toBeGreaterThan(1);
+      expect(partitions.every((partition) => partition.stops.length <= 70)).toBe(true);
     });
 
     it("prefers finishing a cluster before moving to another region", () => {

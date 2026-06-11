@@ -52,18 +52,18 @@ export function buildNavigationUrl({
     longitude !== 0;
 
   if (provider === "waze") {
-    if (cleanAddress) {
-      return `https://waze.com/ul?q=${encodeURIComponent(cleanAddress)}&navigate=yes`;
-    }
-
     if (hasCoordinates) {
       return `https://waze.com/ul?ll=${latitude},${longitude}&navigate=yes`;
     }
+
+    if (cleanAddress) {
+      return `https://waze.com/ul?q=${encodeURIComponent(cleanAddress)}&navigate=yes`;
+    }
   }
 
-  const destination = cleanAddress
-    ? encodeURIComponent(cleanAddress)
-    : `${latitude},${longitude}`;
+  const destination = hasCoordinates
+    ? `${latitude},${longitude}`
+    : encodeURIComponent(cleanAddress);
 
   return `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving`;
 }

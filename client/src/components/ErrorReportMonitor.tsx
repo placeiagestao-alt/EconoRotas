@@ -7,6 +7,7 @@ import {
   type AppAnomaly,
 } from "@/lib/errorReporter";
 import { trpc } from "@/lib/trpc";
+import { NOT_ADMIN_ERR_MSG } from "@shared/const";
 import { useEffect } from "react";
 import { toast } from "sonner";
 
@@ -46,12 +47,29 @@ function getFrontendDiagnostics() {
   };
 }
 
+function isExpectedPermissionAnomaly(anomaly: AppAnomaly) {
+  if (anomaly.message?.includes(NOT_ADMIN_ERR_MSG)) return true;
+  if (anomaly.stack?.includes(NOT_ADMIN_ERR_MSG)) return true;
+
+  const queryHash = anomaly.metadata?.queryHash;
+  return (
+    anomaly.source === "react-query.query" &&
+    typeof queryHash === "string" &&
+    queryHash.includes('"admin"') &&
+    anomaly.message?.includes("required permission")
+  );
+}
+
 export default function ErrorReportMonitor() {
   const reportEventMutation = trpc.events.report.useMutation();
 
   useEffect(() => {
     const handleAnomaly = (event: Event) => {
       const anomaly = (event as CustomEvent<AppAnomaly>).detail;
+
+      if (isExpectedPermissionAnomaly(anomaly)) {
+        return;
+      }
 
       reportEventMutation.mutate({
         type: "frontend_error",

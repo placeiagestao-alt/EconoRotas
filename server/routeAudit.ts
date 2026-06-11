@@ -35,6 +35,7 @@ export type RouteAuditIssue = {
   gapKm?: number;
   addresses?: string[];
   pendingSequences?: number[];
+  crossingToSequence?: number;
 };
 
 export type AuditableStop = Location & {
@@ -87,7 +88,7 @@ const ROUTE_QUALITY_PENALTIES: Partial<Record<RouteAuditIssue["type"], number>> 
   premature_region_exit: 25,
   cluster_spread_high: 10,
   nearby_stop_skipped: 15,
-  route_crossing: 10,
+  route_crossing: 0,
   high_road_detour: 10,
   duplicate_coordinates: 30,
   generic_address: 5,
@@ -193,8 +194,7 @@ function getRouteQuality(score: number): RouteAuditReport["quality"] {
   if (score >= 90) return "excellent";
   if (score >= 80) return "good";
   if (score >= 65) return "attention";
-  if (score >= 50) return "poor";
-  return "blocked";
+  return "poor";
 }
 
 function orientation(a: Location, b: Location, c: Location) {
@@ -393,7 +393,7 @@ export function auditRouteSequence(
     if (!address) {
       issues.push({
         type: "empty_address",
-        severity: "critical",
+        severity: "high",
         title: "Parada sem endereco",
         message: `A parada ${stop.sequence + 1} esta sem endereco preenchido.`,
         stopSequence: stop.sequence,
@@ -572,7 +572,7 @@ export function auditRouteSequence(
     if (immediateSkip || localSkip) {
       issues.push({
         type: "nearby_stop_skipped",
-        severity: immediateSkip ? "critical" : "high",
+        severity: "high",
         title: immediateSkip
           ? "Parada muito próxima foi pulada"
           : "Parada próxima deixada para depois",
@@ -665,16 +665,17 @@ export function auditRouteSequence(
   for (const crossing of detectRouteCrossings(routeableStops)) {
     issues.push({
       type: "route_crossing",
-      severity: "medium",
-      title: "Trajeto com cruzamento",
+      severity: "low",
+      title: "Cruzamento visual no trajeto",
       message: `O trecho entre as paradas ${crossing.fromSequence + 1} e ${
         crossing.toSequence + 1
       } cruza o trecho entre as paradas ${crossing.crossingFromSequence + 1} e ${
         crossing.crossingToSequence + 1
-      }. Isso indica sequencia com zigue-zague operacional.`,
+      }. Isso e informativo e nao bloqueia a rota quando nao ha revisita, salto ou parada proxima pulada.`,
       fromSequence: crossing.fromSequence,
       toSequence: crossing.toSequence,
       nearestSequence: crossing.crossingFromSequence,
+      crossingToSequence: crossing.crossingToSequence,
     });
   }
 

@@ -20,6 +20,7 @@ import {
   clusterStops,
   estimateTravelTime,
   optimizeRoute,
+  partitionStopsForOptimization,
   validateLocations,
   type Location,
   type OptimizedRoute,
@@ -30,6 +31,7 @@ import {
 } from "./osrm";
 import {
   auditRouteSequence,
+  detectRouteCrossings,
   type AuditableStop,
   type RouteAuditReport,
 } from "./routeAudit";
@@ -48,21 +50,35 @@ import {
   type GeocodingMethod,
 } from "../shared/geocodingConfidence";
 import {
+  normalizeStopMetadata,
+  normalizeStopSourceProvider,
+  STOP_SOURCE_PROVIDERS,
+} from "../shared/stopMetadata";
+import {
   enqueueOptimizationJob,
   getOptimizationQueueHealth,
+  getOptimizationWorkersDashboard,
   isOptimizationQueueConfigured,
 } from "./optimizationQueue";
+import { getMultiVehicleReadinessDashboard } from "./multiVehicleReadiness";
 
 const IMILE_PROVIDER = "imile_rider_delivery";
 const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",
   "invalid_coordinates",
-  "empty_address",
-  "generic_address",
-  "low_geocoding_confidence",
 ]);
 const DUPLICATE_COORDINATE_BLOCKING_GROUPS = 3;
 const MAX_AUDIT_CORRECTION_ATTEMPTS = 20;
+const MAX_NEARBY_FIXES = 100;
+const MAX_REVISIT_FIXES = 50;
+const MAX_PREMATURE_EXIT_FIXES = 50;
+const MAX_BATCH_AUDIT_REPAIR_PASSES = 3;
+const OSRM_CIRCUIT_MIN_CALLS = 20;
+const OSRM_CIRCUIT_FAILURE_RATE = 0.8;
+type CoherenceFixIssueType =
+  | "nearby_stop_skipped"
+  | "region_revisited"
+  | "premature_region_exit";
 
 const imileCredentialInput = z.object({
   label: z.string().max(255).optional(),
@@ -186,29 +202,6 @@ function buildSequentialRoute(
   };
 }
 
-function isImileStopNotes(notes?: string | null) {
-  return /\b(Status iMile|Distancia app|Entregas agrupadas|Destinatario|Telefone)\s*:/i.test(
-    notes || ""
-  );
-}
-
-function buildSequentialImilePackageNumber(index: number) {
-  return String(index + 1).padStart(2, "0");
-}
-
-function replaceImilePackageInNotes(notes: string | undefined, sequence: number) {
-  if (!isImileStopNotes(notes)) return notes;
-
-  const packageNote = `Pacote: ${buildSequentialImilePackageNumber(sequence)}`;
-  const parts = (notes || "")
-    .split("|")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .filter((part) => !/^(Pacote|STOP)\s*:/i.test(part));
-
-  return [packageNote, ...parts].join(" | ");
-}
-
 function routeToAuditableStops(route: OptimizedRoute): AuditableStop[] {
   return route.waypoints.map((waypoint) => ({
     latitude: waypoint.latitude,
@@ -216,6 +209,9 @@ function routeToAuditableStops(route: OptimizedRoute): AuditableStop[] {
     address: waypoint.address,
     notes: waypoint.notes,
     sequence: waypoint.sequence,
+    geocodingConfidenceScore: waypoint.geocodingConfidenceScore,
+    geocodingMethod: waypoint.geocodingMethod,
+    geocodingSuspect: waypoint.geocodingSuspect,
   }));
 }
 
@@ -274,24 +270,6 @@ function getPostOptimizationBlockingReason(audit: RouteAuditReport) {
     };
   }
 
-  const routeCrossing = audit.issues.find((issue) => issue.type === "route_crossing");
-  if (routeCrossing) {
-    return {
-      issue: routeCrossing,
-      message: `${routeCrossing.title}: ${routeCrossing.message}`,
-    };
-  }
-
-  const duplicateCoordinateIssues = audit.issues.filter(
-    (issue) => issue.type === "duplicate_coordinates"
-  );
-  if (duplicateCoordinateIssues.length >= DUPLICATE_COORDINATE_BLOCKING_GROUPS) {
-    return {
-      issue: duplicateCoordinateIssues[0],
-      message: `Geocodificacao imprecisa: ${duplicateCoordinateIssues.length} grupos de enderecos cairam no mesmo ponto do mapa.`,
-    };
-  }
-
   return null;
 }
 
@@ -309,9 +287,40 @@ function countAuditIssues(audit: RouteAuditReport, type: RouteAuditReport["issue
 }
 
 function countCorrectedIssues(
-  correctionAttempts: Array<{ blockingIssue: RouteAuditReport["issues"][number] }>
+  correctionAttempts: Array<{
+    blockingIssue: RouteAuditReport["issues"][number];
+    batch?: {
+      appliedIssueCounts: {
+        nearby: number;
+        revisit: number;
+        prematureExit: number;
+      };
+    };
+  }>
 ) {
-  return correctionAttempts.length;
+  return correctionAttempts.reduce((total, attempt) => {
+    const batchApplied = attempt.batch
+      ? attempt.batch.appliedIssueCounts.nearby +
+        attempt.batch.appliedIssueCounts.revisit +
+        attempt.batch.appliedIssueCounts.prematureExit
+      : 0;
+    return total + Math.max(1, batchApplied);
+  }, 0);
+}
+
+function countBatchCorrectionAttempts(
+  correctionAttempts: Array<{ batch?: unknown }>
+) {
+  return correctionAttempts.filter((attempt) => attempt.batch).length;
+}
+
+function countRemainingCoherenceIssues(audit: RouteAuditReport) {
+  return audit.issues.filter((issue) => {
+    if (issue.type === "nearby_stop_skipped") {
+      return issue.severity === "critical" || issue.severity === "high";
+    }
+    return issue.type === "region_revisited" || issue.type === "premature_region_exit";
+  }).length;
 }
 
 function routeWaypointSignature(route: OptimizedRoute) {
@@ -324,6 +333,248 @@ function routeWaypointSignature(route: OptimizedRoute) {
       ].join(",")
     )
     .join("|");
+}
+
+function routeWaypointsToLocations(waypoints: OptimizedRoute["waypoints"]): Location[] {
+  return waypoints.map((waypoint) => ({
+    latitude: waypoint.latitude,
+    longitude: waypoint.longitude,
+    address: waypoint.address,
+    notes: waypoint.notes,
+    sourceProvider: waypoint.sourceProvider,
+    originalStop: waypoint.originalStop,
+    isUnsequencedStop: waypoint.isUnsequencedStop,
+    metadata: waypoint.metadata,
+    geocodingConfidenceScore: waypoint.geocodingConfidenceScore,
+    geocodingMethod: waypoint.geocodingMethod,
+    geocodingSuspect: waypoint.geocodingSuspect,
+  }));
+}
+
+function correctionLimitForIssueType(type: RouteAuditReport["issues"][number]["type"]) {
+  switch (type) {
+    case "nearby_stop_skipped":
+      return MAX_NEARBY_FIXES;
+    case "region_revisited":
+      return MAX_REVISIT_FIXES;
+    case "premature_region_exit":
+      return MAX_PREMATURE_EXIT_FIXES;
+    default:
+      return 0;
+  }
+}
+
+function isCoherenceFixIssueType(
+  type: RouteAuditReport["issues"][number]["type"]
+): type is CoherenceFixIssueType {
+  return (
+    type === "nearby_stop_skipped" ||
+    type === "region_revisited" ||
+    type === "premature_region_exit"
+  );
+}
+
+function countSequenceCoherenceIssuesByType(audit: RouteAuditReport) {
+  return audit.issues.reduce(
+    (counts, issue) => {
+      if (issue.type === "nearby_stop_skipped") counts.nearby += 1;
+      if (issue.type === "region_revisited") counts.revisit += 1;
+      if (issue.type === "premature_region_exit") counts.prematureExit += 1;
+      return counts;
+    },
+    { nearby: 0, revisit: 0, prematureExit: 0 }
+  );
+}
+
+function isLimitCappedCoherenceIssue(issue: RouteAuditReport["issues"][number]) {
+  return isCoherenceFixIssueType(issue.type);
+}
+
+function shouldProceedAfterCorrectionLimits(
+  audit: RouteAuditReport,
+  reason: ReturnType<typeof getPostOptimizationBlockingReason>,
+  limitsReached: Set<RouteAuditReport["issues"][number]["type"]>,
+  options: { allowLargeRouteAttention?: boolean } = {}
+) {
+  if (!reason || !isLimitCappedCoherenceIssue(reason.issue)) return false;
+  if (!limitsReached.has(reason.issue.type) && !options.allowLargeRouteAttention) {
+    return false;
+  }
+
+  const remainingBlockingIssues = audit.issues.filter((issue) => {
+    if (issue.type === "nearby_stop_skipped") {
+      return issue.severity === "critical" || issue.severity === "high";
+    }
+    return issue.type === "region_revisited" || issue.type === "premature_region_exit";
+  });
+
+  return remainingBlockingIssues.every(
+    (issue) =>
+      limitsReached.has(issue.type) ||
+      (options.allowLargeRouteAttention && isCoherenceFixIssueType(issue.type))
+  );
+}
+
+function moveWaypointsBeforeSequence(
+  waypoints: OptimizedRoute["waypoints"],
+  movedSequences: number[],
+  beforeSequence: number
+) {
+  const movedSet = new Set(movedSequences);
+  if (movedSet.size === 0 || movedSet.has(beforeSequence)) return false;
+
+  const insertionReferenceIndex = waypoints.findIndex(
+    (waypoint) => waypoint.sequence === beforeSequence
+  );
+  if (insertionReferenceIndex < 0) return false;
+
+  const movedWaypoints = waypoints.filter((waypoint) => movedSet.has(waypoint.sequence));
+  if (movedWaypoints.length === 0) return false;
+
+  const remainingWaypoints = waypoints.filter(
+    (waypoint) => !movedSet.has(waypoint.sequence)
+  );
+  const insertionIndex = remainingWaypoints.findIndex(
+    (waypoint) => waypoint.sequence === beforeSequence
+  );
+  if (insertionIndex < 0) return false;
+
+  if (
+    movedWaypoints.every((waypoint) => {
+      const currentIndex = waypoints.findIndex(
+        (candidate) => candidate.sequence === waypoint.sequence
+      );
+      return currentIndex >= 0 && currentIndex < insertionReferenceIndex;
+    })
+  ) {
+    return false;
+  }
+
+  remainingWaypoints.splice(insertionIndex, 0, ...movedWaypoints);
+  waypoints.splice(0, waypoints.length, ...remainingWaypoints);
+  return true;
+}
+
+function buildBatchAuditRepairPlan(audit: RouteAuditReport) {
+  const selectedIssues: RouteAuditReport["issues"] = [];
+  const counts: Record<CoherenceFixIssueType, number> = {
+    nearby_stop_skipped: 0,
+    region_revisited: 0,
+    premature_region_exit: 0,
+  };
+  const cappedTypes = new Set<RouteAuditReport["issues"][number]["type"]>();
+
+  for (const issue of audit.issues) {
+    if (!isCoherenceFixIssueType(issue.type)) continue;
+    const limit = correctionLimitForIssueType(issue.type);
+    const currentCount = counts[issue.type] ?? 0;
+    if (currentCount >= limit) {
+      cappedTypes.add(issue.type);
+      continue;
+    }
+    counts[issue.type] = currentCount + 1;
+    selectedIssues.push(issue);
+  }
+
+  return {
+    selectedIssues,
+    cappedTypes,
+    availableIssueCounts: countSequenceCoherenceIssuesByType(audit),
+    appliedIssueCounts: {
+      nearby: counts.nearby_stop_skipped,
+      revisit: counts.region_revisited,
+      prematureExit: counts.premature_region_exit,
+    },
+  };
+}
+
+function applyAuditPlan(route: OptimizedRoute, audit: RouteAuditReport) {
+  const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
+  const plan = buildBatchAuditRepairPlan(audit);
+  let changed = false;
+
+  const prematureExitIssues = plan.selectedIssues.filter(
+    (issue) => issue.type === "premature_region_exit" && issue.pendingSequences?.length
+  );
+  for (const issue of prematureExitIssues) {
+    if (issue.toSequence === undefined || !issue.pendingSequences?.length) continue;
+    changed =
+      moveWaypointsBeforeSequence(waypoints, issue.pendingSequences, issue.toSequence) ||
+      changed;
+  }
+
+  const nearbyOrRevisitIssues = plan.selectedIssues.filter(
+    (issue) =>
+      (issue.type === "nearby_stop_skipped" || issue.type === "region_revisited") &&
+      issue.nearestSequence !== undefined &&
+      issue.toSequence !== undefined
+  );
+  const movedNearestSequences = new Set<number>();
+  for (const issue of nearbyOrRevisitIssues) {
+    if (issue.nearestSequence === undefined || issue.toSequence === undefined) continue;
+    if (movedNearestSequences.has(issue.nearestSequence)) continue;
+    changed =
+      moveWaypointsBeforeSequence(waypoints, [issue.nearestSequence], issue.toSequence) ||
+      changed;
+    movedNearestSequences.add(issue.nearestSequence);
+  }
+
+  return {
+    repairedLocations: changed ? routeWaypointsToLocations(waypoints) : null,
+    plan: {
+      ...plan,
+      nearbyFixes: plan.selectedIssues.filter(
+        (issue) => issue.type === "nearby_stop_skipped"
+      ),
+      revisitFixes: plan.selectedIssues.filter(
+        (issue) => issue.type === "region_revisited"
+      ),
+      prematureExitFixes: plan.selectedIssues.filter(
+        (issue) => issue.type === "premature_region_exit"
+      ),
+      crossingAlerts: audit.issues.filter((issue) => issue.type === "route_crossing"),
+    },
+  };
+}
+
+function removeRouteCrossings(route: OptimizedRoute): Location[] | null {
+  const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
+  let changed = false;
+  const maxPasses = Math.max(20, Math.min(2000, waypoints.length * 8));
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    const [crossing] = detectRouteCrossings(waypoints as AuditableStop[]);
+    if (!crossing) {
+      return changed ? routeWaypointsToLocations(waypoints) : null;
+    }
+
+    const firstSegmentEndIndex = waypoints.findIndex(
+      (waypoint) => waypoint.sequence === crossing.toSequence
+    );
+    const secondSegmentStartIndex = waypoints.findIndex(
+      (waypoint) => waypoint.sequence === crossing.crossingFromSequence
+    );
+
+    if (
+      firstSegmentEndIndex < 0 ||
+      secondSegmentStartIndex < 0 ||
+      secondSegmentStartIndex <= firstSegmentEndIndex
+    ) {
+      break;
+    }
+
+    const reversedMiddle = waypoints
+      .slice(firstSegmentEndIndex, secondSegmentStartIndex + 1)
+      .reverse();
+    waypoints.splice(
+      firstSegmentEndIndex,
+      secondSegmentStartIndex - firstSegmentEndIndex + 1,
+      ...reversedMiddle
+    );
+    changed = true;
+  }
+
+  return changed ? routeWaypointsToLocations(waypoints) : null;
 }
 
 function reorderRouteByAuditIssue(
@@ -339,6 +590,10 @@ function reorderRouteByAuditIssue(
   }
 
   const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
+
+  if (issue.type === "route_crossing") {
+    return removeRouteCrossings(route);
+  }
 
   if (issue.type === "premature_region_exit" && issue.pendingSequences?.length) {
     const plannedIndex = waypoints.findIndex(
@@ -400,8 +655,9 @@ async function assertRouteStopsReadyForOptimization(
   if (blockingIssues.length === 0) return;
 
   const firstIssue = blockingIssues[0];
-  if (firstIssue.type === "low_geocoding_confidence") {
-    const issueMetadata = firstIssue as Record<string, unknown>;
+  for (const issue of audit.issues) {
+    if (issue.type !== "low_geocoding_confidence") continue;
+    const issueMetadata = issue as Record<string, unknown>;
     await db.createOperationalEvent({
       userId: context.userId,
       routeId: context.routeId,
@@ -410,11 +666,11 @@ async function assertRouteStopsReadyForOptimization(
       severity: "warning",
       source: "routes.optimize",
       title: "Endereco com baixa confianca",
-      message: firstIssue.message,
+      message: issue.message,
       metadata: {
-        issueType: firstIssue.type,
+        issueType: issue.type,
         confidenceScore: issueMetadata.confidenceScore ?? null,
-        sequence: firstIssue.stopSequence ?? null,
+        sequence: issue.stopSequence ?? null,
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record low confidence event:", error);
@@ -517,6 +773,18 @@ export async function optimizeUserRoute(
     osrmFailureCount: 0,
     osrmTotalMs: 0,
     osrmAverageMs: 0,
+    osrmProvider: null as string | null,
+    osrmAvailability: "unknown" as "unknown" | "available" | "degraded" | "unavailable",
+    osrmLatencyMs: 0,
+    osrmMatrixCount: 0,
+    osrmMatrixSize: 0,
+    osrmFailureReason: null as string | null,
+    matrixCacheHit: 0,
+    matrixCacheMiss: 0,
+    matrixGenerationMs: 0,
+    macroClusterCount: 0,
+    microClusterCount: 0,
+    largestClusterSize: 0,
   };
   const telemetry = {
     recordOsrmCall(durationMs: number, success: boolean) {
@@ -528,8 +796,40 @@ export async function optimizeUserRoute(
       runtimeBreakdown.osrmAverageMs = Math.round(
         runtimeBreakdown.osrmTotalMs / Math.max(1, runtimeBreakdown.osrmCallCount)
       );
+      runtimeBreakdown.osrmLatencyMs = runtimeBreakdown.osrmAverageMs;
+      runtimeBreakdown.osrmAvailability =
+        runtimeBreakdown.osrmFailureCount === 0
+          ? "available"
+          : runtimeBreakdown.osrmFailureCount >= runtimeBreakdown.osrmCallCount
+            ? "unavailable"
+            : "degraded";
+    },
+    recordOsrmMatrix(args: {
+      nodeCount: number;
+      durationMs: number;
+      cacheHit: boolean;
+      success: boolean;
+      failureReason?: string | null;
+      provider?: string | null;
+    }) {
+      const safeDuration = Number.isFinite(args.durationMs)
+        ? Math.max(0, args.durationMs)
+        : 0;
+      runtimeBreakdown.osrmProvider = args.provider ?? runtimeBreakdown.osrmProvider;
+      runtimeBreakdown.osrmMatrixCount += 1;
+      runtimeBreakdown.osrmMatrixSize += Math.max(0, args.nodeCount) ** 2;
+      runtimeBreakdown.matrixGenerationMs += safeDuration;
+      if (args.cacheHit) {
+        runtimeBreakdown.matrixCacheHit += 1;
+      } else {
+        runtimeBreakdown.matrixCacheMiss += 1;
+      }
+      if (!args.success && args.failureReason) {
+        runtimeBreakdown.osrmFailureReason = args.failureReason;
+      }
     },
   };
+  let osrmCircuitEventRecorded = false;
   const dbFetchStartedAt = Date.now();
   const route = await requireUserRoute(routeId, userId);
   const excludedStopIds = new Set(options?.excludeStopIds ?? []);
@@ -666,6 +966,10 @@ export async function optimizeUserRoute(
     longitude: parseFloat(String(stop.longitude ?? 0)),
     address: stop.address,
     notes: stop.notes ?? undefined,
+    sourceProvider: normalizeStopSourceProvider(stop.sourceProvider),
+    originalStop: stop.originalStop ?? null,
+    isUnsequencedStop: Boolean(stop.isUnsequencedStop),
+    metadata: normalizeStopMetadata(stop.metadata),
     geocodingConfidenceScore: Number(stop.geocodingConfidenceScore ?? 0),
     geocodingMethod: stop.geocodingMethod ?? undefined,
     geocodingSuspect: Boolean(stop.geocodingSuspect),
@@ -685,6 +989,20 @@ export async function optimizeUserRoute(
       message: `Coordenadas ausentes na parada ${missingCoordinateIndex + 1}.`,
     });
   }
+
+  const macroClusters = clusterStops(locations, {
+    localityMode: options?.localityMode,
+  });
+  const microClusters = partitionStopsForOptimization(locations, {
+    localityMode: options?.localityMode,
+  });
+  runtimeBreakdown.macroClusterCount = macroClusters.length;
+  runtimeBreakdown.microClusterCount =
+    locations.length <= 100 ? macroClusters.length : microClusters.length;
+  runtimeBreakdown.largestClusterSize = Math.max(
+    0,
+    ...macroClusters.map((cluster) => cluster.stops.length)
+  );
 
   const startLocation =
     options?.startLocation ??
@@ -733,31 +1051,77 @@ export async function optimizeUserRoute(
     let auditSource = "geo-default";
 
     const optimizerStartedAt = Date.now();
-    if (attempt.respectInputSequence) {
-      optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
-        attemptLocations,
-        roadMetricOptions
-      );
-      auditSource = optimizedWithRoadMetrics ? "road-sequential" : "geo-sequential";
-    } else if (attempt.orderedLocations) {
-      optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
-        attemptLocations,
-        roadMetricOptions
-      );
-      auditSource = optimizedWithRoadMetrics ? "road-audit-repair" : "geo-audit-repair";
+    const osrmCircuitOpen =
+      runtimeBreakdown.osrmCallCount >= OSRM_CIRCUIT_MIN_CALLS &&
+      runtimeBreakdown.osrmFailureCount / Math.max(1, runtimeBreakdown.osrmCallCount) >=
+        OSRM_CIRCUIT_FAILURE_RATE;
+
+    if (osrmCircuitOpen) {
+      auditSource = "geo-osrm-circuit-open";
+      if (!osrmCircuitEventRecorded) {
+        osrmCircuitEventRecorded = true;
+        await db.createOperationalEvent({
+          userId,
+          routeId,
+          stopId: null,
+          type: "route_osrm_circuit_opened",
+          severity: "warning",
+          source: options?.allowLargeSync ? "optimization.worker" : "routes.optimize",
+          title: "OSRM pausado por falha alta",
+          message:
+            "O otimizador interrompeu novas chamadas OSRM nesta rota depois de detectar muitas falhas do provedor.",
+          runtime: null,
+          url: null,
+          userAgent: null,
+          appVersion: null,
+          metadata: {
+            stopCount: attemptLocations.length,
+            osrmCallCount: runtimeBreakdown.osrmCallCount,
+            osrmFailureCount: runtimeBreakdown.osrmFailureCount,
+            failureRate:
+              runtimeBreakdown.osrmFailureCount /
+              Math.max(1, runtimeBreakdown.osrmCallCount),
+            minCalls: OSRM_CIRCUIT_MIN_CALLS,
+            threshold: OSRM_CIRCUIT_FAILURE_RATE,
+            osrmBaseUrl: ENV.osrmBaseUrl,
+          },
+        }).catch((error) => {
+          console.warn("[Routes] Failed to record OSRM circuit event:", error);
+        });
+      }
     } else {
-      optimizedWithRoadMetrics = await optimizeRouteWithRoadMetrics(
-        attemptLocations,
-        mode,
-        0,
-        roadMetricOptions
-      );
-      auditSource = optimizedWithRoadMetrics ? "road-default" : "geo-default";
+      if (attempt.respectInputSequence) {
+        optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
+          attemptLocations,
+          roadMetricOptions
+        );
+        auditSource = optimizedWithRoadMetrics ? "road-sequential" : "geo-sequential";
+      } else if (attempt.orderedLocations) {
+        optimizedWithRoadMetrics = await buildSequentialRouteWithRoadMetrics(
+          attemptLocations,
+          roadMetricOptions
+        );
+        auditSource = optimizedWithRoadMetrics ? "road-audit-repair" : "geo-audit-repair";
+      } else {
+        optimizedWithRoadMetrics = await optimizeRouteWithRoadMetrics(
+          attemptLocations,
+          mode,
+          0,
+          roadMetricOptions
+        );
+        auditSource = optimizedWithRoadMetrics ? "road-default" : "geo-default";
+      }
     }
+
+    const shouldUseLargePartitionedFallback =
+      !optimizedWithRoadMetrics &&
+      attemptLocations.length > ENV.maxGeographicFallbackStops &&
+      Boolean(options?.allowLargeSync);
 
     if (
       !optimizedWithRoadMetrics &&
-      attemptLocations.length > ENV.maxGeographicFallbackStops
+      attemptLocations.length > ENV.maxGeographicFallbackStops &&
+      !shouldUseLargePartitionedFallback
     ) {
       await db.createOperationalEvent({
         userId,
@@ -811,12 +1175,41 @@ export async function optimizeUserRoute(
       });
     }
 
+    if (shouldUseLargePartitionedFallback) {
+      await db.createOperationalEvent({
+        userId,
+        routeId,
+        stopId: null,
+        type: "geographic_fallback_worker_global",
+        severity: "warning",
+        source: "optimization.worker",
+        title: "Fallback geografico global no worker",
+        message: `OSRM indisponivel para ${attemptLocations.length} paradas. Worker aplicou fallback global fora da requisicao HTTP.`,
+        runtime: null,
+        url: null,
+        userAgent: null,
+        appVersion: null,
+        metadata: {
+          stopCount: attemptLocations.length,
+          maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
+          osrmBaseUrl: ENV.osrmBaseUrl,
+          auditSource,
+          allowLargeSync: true,
+        },
+      }).catch((error) => {
+        console.warn("[Routes] Failed to record partitioned geographic fallback:", error);
+      });
+    }
+
     const optimized = optimizedWithRoadMetrics
       ?? (attempt.respectInputSequence
         ? buildSequentialRoute(attemptLocations, roadMetricOptions)
         : attempt.orderedLocations
           ? buildSequentialRoute(attemptLocations, roadMetricOptions)
-          : optimizeRoute(attemptLocations, mode, 0, roadMetricOptions));
+          : optimizeRoute(attemptLocations, mode, 0, {
+              ...roadMetricOptions,
+              partitionLargeRoutes: shouldUseLargePartitionedFallback ? false : undefined,
+            }));
     runtimeBreakdown.optimizerMs += Date.now() - optimizerStartedAt;
     const auditStartedAt = Date.now();
     const audit = auditOptimizedRoute(optimized, {
@@ -852,32 +1245,22 @@ export async function optimizeUserRoute(
     status: RouteAuditReport["status"];
     score: number;
     issueCount: number;
+    batch?: {
+      availableIssueCounts: ReturnType<typeof countSequenceCoherenceIssuesByType>;
+      appliedIssueCounts: {
+        nearby: number;
+        revisit: number;
+        prematureExit: number;
+      };
+      cappedTypes: string[];
+    };
   }> = [];
+  const correctionLimitsReached = new Set<RouteAuditReport["issues"][number]["type"]>();
 
   if (postOptimizationBlockingReason && isSequenceCoherenceIssue(postOptimizationBlockingReason.issue)) {
     const correctionStartedAt = Date.now();
-    const firstBlockingIssue = postOptimizationBlockingReason.issue;
-    optimizationAttempt = await buildOptimizationAttempt({
-      localityMode: "strict",
-      respectInputSequence: false,
-      auditSourceSuffix: "audit-corrected",
-    });
-    postOptimizationBlockingReason = getPostOptimizationBlockingReason(
-      optimizationAttempt.audit
-    );
-    correctionAttempts.push({
-      blockingIssue: firstBlockingIssue,
-      auditSource: optimizationAttempt.auditSource,
-      status: optimizationAttempt.audit.status,
-      score: optimizationAttempt.audit.score,
-      issueCount: optimizationAttempt.audit.issueCount,
-    });
-
     const seenSignatures = new Set([routeWaypointSignature(optimizationAttempt.optimized)]);
-    const maxRepairAttempts = Math.min(
-      MAX_AUDIT_CORRECTION_ATTEMPTS,
-      Math.max(1, locations.length * 2)
-    );
+    const maxRepairAttempts = MAX_BATCH_AUDIT_REPAIR_PASSES;
 
     for (
       let repairAttempt = 0;
@@ -886,16 +1269,73 @@ export async function optimizeUserRoute(
         repairAttempt < maxRepairAttempts;
       repairAttempt += 1
     ) {
-      const repairedLocations = reorderRouteByAuditIssue(
+      const batchRepair = applyAuditPlan(
         optimizationAttempt.optimized,
-        postOptimizationBlockingReason.issue
+        optimizationAttempt.audit
       );
-      if (!repairedLocations) break;
+      await db.createOperationalEvent({
+        userId,
+        routeId,
+        stopId: null,
+        type: "audit_plan_generated",
+        severity: "info",
+        source: "routes.audit",
+        title: "Plano global do fiscal gerado",
+        message: `Plano com ${batchRepair.plan.selectedIssues.length} incoerencia(s) selecionada(s).`,
+        runtime: null,
+        url: null,
+        userAgent: null,
+        appVersion: null,
+        metadata: {
+          repairAttempt: repairAttempt + 1,
+          availableIssueCounts: batchRepair.plan.availableIssueCounts,
+          appliedIssueCounts: batchRepair.plan.appliedIssueCounts,
+          cappedTypes: Array.from(batchRepair.plan.cappedTypes),
+          crossingAlerts: batchRepair.plan.crossingAlerts.length,
+        },
+      }).catch((error) => {
+        console.warn("[Routes] Failed to record audit plan event:", error);
+      });
+      for (const cappedType of Array.from(batchRepair.plan.cappedTypes)) {
+        correctionLimitsReached.add(cappedType);
+      }
+      const repairedLocations =
+        batchRepair.repairedLocations ??
+        reorderRouteByAuditIssue(
+          optimizationAttempt.optimized,
+          postOptimizationBlockingReason.issue
+        );
+      if (!repairedLocations) {
+        await db.createOperationalEvent({
+          userId,
+          routeId,
+          stopId: null,
+          type: "audit_batch_failed",
+          severity: "warning",
+          source: "routes.audit",
+          title: "Correção em lote sem alteração",
+          message: "O fiscal gerou plano global, mas não encontrou alteração aplicável na sequência.",
+          runtime: null,
+          url: null,
+          userAgent: null,
+          appVersion: null,
+          metadata: {
+            repairAttempt: repairAttempt + 1,
+            blockingIssue: postOptimizationBlockingReason.issue,
+            availableIssueCounts: batchRepair.plan.availableIssueCounts,
+            appliedIssueCounts: batchRepair.plan.appliedIssueCounts,
+            cappedTypes: Array.from(batchRepair.plan.cappedTypes),
+          },
+        }).catch((error) => {
+          console.warn("[Routes] Failed to record audit batch failure:", error);
+        });
+        break;
+      }
 
       const repairedAttempt = await buildOptimizationAttempt({
         localityMode: "strict",
         respectInputSequence: false,
-        auditSourceSuffix: `audit-repaired-${repairAttempt + 1}`,
+        auditSourceSuffix: `audit-global-plan-${repairAttempt + 1}`,
         orderedLocations: repairedLocations,
       });
       const signature = routeWaypointSignature(repairedAttempt.optimized);
@@ -908,11 +1348,57 @@ export async function optimizeUserRoute(
         status: repairedAttempt.audit.status,
         score: repairedAttempt.audit.score,
         issueCount: repairedAttempt.audit.issueCount,
+        batch: {
+          availableIssueCounts: batchRepair.plan.availableIssueCounts,
+          appliedIssueCounts: batchRepair.plan.appliedIssueCounts,
+          cappedTypes: Array.from(batchRepair.plan.cappedTypes),
+        },
+      });
+      await db.createOperationalEvent({
+        userId,
+        routeId,
+        stopId: null,
+        type: "audit_batch_applied",
+        severity: "info",
+        source: "routes.audit",
+        title: "Correção em lote aplicada",
+        message: `Fiscal aplicou lote ${repairAttempt + 1} e reauditoria encontrou ${repairedAttempt.audit.issueCount} alerta(s).`,
+        runtime: null,
+        url: null,
+        userAgent: null,
+        appVersion: null,
+        metadata: {
+          repairAttempt: repairAttempt + 1,
+          auditSource: repairedAttempt.auditSource,
+          finalStatus: repairedAttempt.audit.status,
+          finalScore: repairedAttempt.audit.score,
+          finalIssueCount: repairedAttempt.audit.issueCount,
+          remainingCoherenceIssues: countRemainingCoherenceIssues(repairedAttempt.audit),
+          batch: {
+            availableIssueCounts: batchRepair.plan.availableIssueCounts,
+            appliedIssueCounts: batchRepair.plan.appliedIssueCounts,
+            cappedTypes: Array.from(batchRepair.plan.cappedTypes),
+          },
+        },
+      }).catch((error) => {
+        console.warn("[Routes] Failed to record audit batch event:", error);
       });
       optimizationAttempt = repairedAttempt;
       postOptimizationBlockingReason = getPostOptimizationBlockingReason(
         optimizationAttempt.audit
       );
+    }
+    if (
+      shouldProceedAfterCorrectionLimits(
+        optimizationAttempt.audit,
+        postOptimizationBlockingReason,
+        correctionLimitsReached,
+        {
+          allowLargeRouteAttention: true,
+        }
+      )
+    ) {
+      postOptimizationBlockingReason = null;
     }
     runtimeBreakdown.correctionMs += Date.now() - correctionStartedAt;
   }
@@ -952,6 +1438,36 @@ export async function optimizeUserRoute(
     });
   }
 
+  if (
+    correctionAttempts.length > 0 &&
+    !postOptimizationBlockingReason &&
+    countRemainingCoherenceIssues(optimizationAttempt.audit) > 0
+  ) {
+    await db.createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "audit_final_attention",
+      severity: "warning",
+      source: "routes.audit",
+      title: "Fiscal finalizou com atenção",
+      message: "A rota ficou executável, mas ainda possui alertas operacionais após correção em lote.",
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        auditStatus: optimizationAttempt.audit.status,
+        auditScore: optimizationAttempt.audit.score,
+        finalIssueCount: optimizationAttempt.audit.issueCount,
+        remainingCoherenceIssues: countRemainingCoherenceIssues(optimizationAttempt.audit),
+        correctionAttempts,
+      },
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record final attention event:", error);
+    });
+  }
+
   async function recordRouteMetricForAttempt(
     blockedReason: ReturnType<typeof getPostOptimizationBlockingReason>
   ) {
@@ -974,6 +1490,18 @@ export async function optimizeUserRoute(
       osrmFailureCount: runtimeBreakdown.osrmFailureCount,
       osrmTotalMs: runtimeBreakdown.osrmTotalMs,
       osrmAverageMs: runtimeBreakdown.osrmAverageMs,
+      osrmProvider: runtimeBreakdown.osrmProvider,
+      osrmAvailability: runtimeBreakdown.osrmAvailability,
+      osrmLatencyMs: runtimeBreakdown.osrmLatencyMs,
+      osrmMatrixCount: runtimeBreakdown.osrmMatrixCount,
+      osrmMatrixSize: runtimeBreakdown.osrmMatrixSize,
+      osrmFailureReason: runtimeBreakdown.osrmFailureReason,
+      matrixCacheHit: runtimeBreakdown.matrixCacheHit,
+      matrixCacheMiss: runtimeBreakdown.matrixCacheMiss,
+      matrixGenerationMs: runtimeBreakdown.matrixGenerationMs,
+      macroClusterCount: runtimeBreakdown.macroClusterCount,
+      microClusterCount: runtimeBreakdown.microClusterCount,
+      largestClusterSize: runtimeBreakdown.largestClusterSize,
       osrmUsed: optimizationAttempt.usedRoadMetrics,
       osrmFallback: !optimizationAttempt.usedRoadMetrics,
       clusterCount: attemptAudit.clusterMetrics.clusterCount,
@@ -997,6 +1525,9 @@ export async function optimizeUserRoute(
         ? 0
         : countCorrectedIssues(correctionAttempts),
       issuesBlockedCount: blockedReason ? 1 : 0,
+      auditCycles: 1 + correctionAttempts.length,
+      issuesRemainingCount: countRemainingCoherenceIssues(attemptAudit),
+      batchCorrectionCount: countBatchCorrectionAttempts(correctionAttempts),
       auditStatus: attemptAudit.status,
       auditQuality: attemptAudit.quality,
       auditSource: optimizationAttempt.auditSource,
@@ -1019,11 +1550,13 @@ export async function optimizeUserRoute(
   }
 
   const { optimized, audit, auditSource } = optimizationAttempt;
-  if (ENV.osrmRequired && !optimizationAttempt.usedRoadMetrics) {
+  const osrmRequiredForRoute =
+    ENV.osrmRequired && routeStops.length >= ENV.osrmRequiredMinStops;
+  if (osrmRequiredForRoute && !optimizationAttempt.usedRoadMetrics) {
     const osrmBlockingReason = {
       issue: audit.issues.find((issue) => issue.type === "osrm_fallback") ?? null,
       message:
-        "OSRM obrigatorio indisponivel. A rota nao foi salva para evitar roteirizacao por estimativa geografica.",
+        "OSRM obrigatorio indisponivel. A rota foi salva com alerta usando a melhor estimativa disponivel.",
     };
 
     await db.createOperationalEvent({
@@ -1031,7 +1564,7 @@ export async function optimizeUserRoute(
       routeId,
       stopId: null,
       type: "route_osrm_required_unavailable",
-      severity: "error",
+      severity: "warning",
       source: "routes.optimize",
       title: "OSRM obrigatorio indisponivel",
       message: osrmBlockingReason.message,
@@ -1046,18 +1579,12 @@ export async function optimizeUserRoute(
         issueCount: audit.issueCount,
         totalDistanceKm: audit.totalDistanceKm,
         osrmRequired: ENV.osrmRequired,
+        osrmRequiredMinStops: ENV.osrmRequiredMinStops,
         osrmBaseUrl: ENV.osrmBaseUrl,
         blockingIssue: osrmBlockingReason.issue,
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record required OSRM event:", error);
-    });
-
-    await recordRouteMetricForAttempt(osrmBlockingReason as any);
-
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: osrmBlockingReason.message,
     });
   }
 
@@ -1066,10 +1593,10 @@ export async function optimizeUserRoute(
       userId,
       routeId,
       stopId: null,
-      type: "route_audit_blocked_optimization",
-      severity: "error",
+      type: "route_audit_attention_optimization",
+      severity: "warning",
       source: "routes.optimize",
-      title: "Auditor bloqueou a otimizacao",
+      title: "Auditor manteve alerta na otimizacao",
       message: postOptimizationBlockingReason.message,
       runtime: null,
       url: null,
@@ -1088,15 +1615,10 @@ export async function optimizeUserRoute(
         issues: audit.issues.slice(0, 8),
       },
     }).catch((error) => {
-      console.warn("[Routes] Failed to record blocked route audit event:", error);
+      console.warn("[Routes] Failed to record route audit attention event:", error);
     });
 
-    await recordRouteMetricForAttempt(postOptimizationBlockingReason);
-
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: `Auditor bloqueou a otimizacao. ${postOptimizationBlockingReason.message}`,
-    });
+    postOptimizationBlockingReason = null;
   }
 
   const dbSaveStartedAt = Date.now();
@@ -1115,7 +1637,11 @@ export async function optimizeUserRoute(
     geocodingMethod: wp.geocodingMethod as GeocodingMethod | undefined,
     geocodingSuspect: wp.geocodingSuspect,
     sequence: wp.sequence,
-    notes: replaceImilePackageInNotes(wp.notes, wp.sequence),
+    notes: wp.notes,
+    sourceProvider: normalizeStopSourceProvider(wp.sourceProvider),
+    originalStop: wp.originalStop ?? null,
+    isUnsequencedStop: Boolean(wp.isUnsequencedStop),
+    metadata: normalizeStopMetadata(wp.metadata),
   }));
   await db.createStops(routeId, updatedStops);
   runtimeBreakdown.dbSaveMs += Date.now() - dbSaveStartedAt;
@@ -1189,12 +1715,19 @@ const geocodingMethodSchema = z.enum([
   "manual_coordinate",
 ]);
 
+const stopSourceProviderSchema = z.enum(STOP_SOURCE_PROVIDERS);
+const stopMetadataSchema = z.record(z.string(), z.unknown()).nullable().optional();
+
 const stopCreateSchema = z.object({
   address: z.string().min(1, "Informe o endereço da parada."),
   latitude: z.number().optional(),
   longitude: z.number().optional(),
   sequence: z.number(),
   notes: z.string().optional(),
+  sourceProvider: stopSourceProviderSchema.optional(),
+  originalStop: z.number().nullable().optional(),
+  isUnsequencedStop: z.boolean().optional(),
+  metadata: stopMetadataSchema,
   geocodingConfidenceScore: z.number().min(0).max(100).optional(),
   geocodingMethod: geocodingMethodSchema.optional(),
   geocodingSuspect: z.boolean().optional(),
@@ -1207,6 +1740,10 @@ const stopUpdateSchema = z.object({
   longitude: z.number().nullable().optional(),
   sequence: z.number().optional(),
   notes: z.string().nullable().optional(),
+  sourceProvider: stopSourceProviderSchema.optional(),
+  originalStop: z.number().nullable().optional(),
+  isUnsequencedStop: z.boolean().nullable().optional(),
+  metadata: stopMetadataSchema,
   geocodingConfidenceScore: z.number().min(0).max(100).optional(),
   geocodingMethod: geocodingMethodSchema.optional(),
   geocodingSuspect: z.boolean().optional(),
@@ -1272,6 +1809,37 @@ async function recordRouteAuditEvent(
       maxLegKm: audit.maxLegKm,
       issues: audit.issues.slice(0, 8),
     },
+  });
+}
+
+function routeStopLimitMessage(stopCount: number) {
+  return `Esta rota tem ${stopCount} paradas e excede o limite comercial atual de testes de ${ENV.maxRouteStops} paradas por rota. Volumes maiores serão liberados gradualmente conforme a evolução da infraestrutura. Divida a tabela em rotas menores.`;
+}
+
+async function assertRouteStopLimit(
+  userId: number,
+  stopCount: number,
+  source: string,
+  routeId?: number
+) {
+  if (stopCount <= ENV.maxRouteStops) return;
+
+  await recordOperationalEvent(userId, {
+    type: "route_stop_limit_exceeded",
+    severity: "warning",
+    source,
+    title: `Limite de ${ENV.maxRouteStops} paradas excedido`,
+    routeId,
+    message: routeStopLimitMessage(stopCount),
+    metadata: {
+      stopCount,
+      maxRouteStops: ENV.maxRouteStops,
+    },
+  });
+
+  throw new TRPCError({
+    code: "BAD_REQUEST",
+    message: routeStopLimitMessage(stopCount),
   });
 }
 
@@ -1500,11 +2068,24 @@ export const appRouter = router({
     dashboard: adminProcedure.query(async () => {
       const dashboard = await db.getAdminOperationalDashboard();
       const optimizationQueue = await getOptimizationQueueHealth();
+      const optimizationWorkers = await getOptimizationWorkersDashboard();
+      const queueIntegrity = await db.getQueueIntegrityDashboard();
+      const disasterReadiness = await db.getDisasterReadinessDashboard();
+      const performanceBenchmarks = await db.getPerformanceBenchmarkDashboard();
+      const multiVehicleReadiness = await getMultiVehicleReadinessDashboard();
+      const goLive500 = await db.getGoLive500Dashboard();
       return {
         ...dashboard,
         optimizationQueue,
+        optimizationWorkers,
+        queueIntegrity,
+        disasterReadiness,
+        performanceBenchmarks,
+        multiVehicleReadiness,
+        goLive500,
       };
     }),
+    refreshDashboard: adminProcedure.mutation(() => db.refreshAdminDashboardMetrics()),
     routeMetrics: adminProcedure.input(z.object({
       days: z.number().min(1).max(365).default(30),
     }))
@@ -1513,10 +2094,24 @@ export const appRouter = router({
     geocodingExecutiveReport: adminProcedure.query(() =>
       db.getGeocodingExecutiveReport()
     ),
+    operationExecutionReport: adminProcedure.query(() =>
+      db.getOperationExecutionReport()
+    ),
+    workers: adminProcedure.query(() => getOptimizationWorkersDashboard()),
+    queueIntegrity: adminProcedure.query(() => db.getQueueIntegrityDashboard()),
+    disasterReadiness: adminProcedure.query(() => db.getDisasterReadinessDashboard()),
+    performanceBenchmarks: adminProcedure.query(() =>
+      db.getPerformanceBenchmarkDashboard()
+    ),
+    goLive500: adminProcedure.query(() => db.getGoLive500Dashboard()),
+    multiVehicleReadiness: adminProcedure.query(() =>
+      getMultiVehicleReadinessDashboard()
+    ),
     events: adminProcedure.input(z.object({
-      limit: z.number().min(1).max(200).default(100),
+      page: z.number().min(1).default(1),
+      limit: z.number().min(1).max(100).default(30),
     }))
-      .query(({ input }) => db.getRecentOperationalEvents(input.limit)),
+      .query(({ input }) => db.getAdminDashboardEvents(input.page, input.limit)),
     cleanupE2eUsers: adminProcedure.mutation(async ({ ctx }) => {
       const result = await db.cleanupE2eTestUsers();
       await recordOperationalEvent(ctx.user.id, {
@@ -1621,6 +2216,11 @@ export const appRouter = router({
     }))
       .mutation(async ({ ctx, input }) => {
         const { stops, respectInputSequence, ...routeInput } = input;
+        await assertRouteStopLimit(
+          ctx.user.id,
+          stops.length,
+          "routes.createAndOptimize"
+        );
         const route = await db.createRoute(ctx.user.id, routeInput);
 
         if (!route) {
@@ -1731,6 +2331,14 @@ export const appRouter = router({
       startLongitude: z.number().optional(),
     }))
       .mutation(async ({ ctx, input }) => {
+        await requireUserRoute(input.id, ctx.user.id);
+        const currentStops = await db.getRouteStops(input.id);
+        await assertRouteStopLimit(
+          ctx.user.id,
+          currentStops.length,
+          "routes.optimize",
+          input.id
+        );
         const startLocation =
           Number.isFinite(input.startLatitude) && Number.isFinite(input.startLongitude)
             ? {
@@ -1781,6 +2389,14 @@ export const appRouter = router({
       startLongitude: z.number().optional(),
     }))
       .mutation(async ({ ctx, input }) => {
+        await requireUserRoute(input.id, ctx.user.id);
+        const currentStops = await db.getRouteStops(input.id);
+        await assertRouteStopLimit(
+          ctx.user.id,
+          currentStops.length,
+          "routes.optimizeRemaining",
+          input.id
+        );
         const hasStartLocation =
           Number.isFinite(input.startLatitude) && Number.isFinite(input.startLongitude);
 
@@ -1847,6 +2463,13 @@ export const appRouter = router({
     }))
       .mutation(async ({ ctx, input }) => {
         await requireUserRoute(input.routeId, ctx.user.id);
+        const currentStops = await db.getRouteStops(input.routeId);
+        await assertRouteStopLimit(
+          ctx.user.id,
+          currentStops.length + input.stops.length,
+          "stops.create",
+          input.routeId
+        );
         const createdStops = await db.createStops(input.routeId, input.stops);
         await db.updateRoute(input.routeId, ctx.user.id, { status: "draft" });
         return createdStops;
@@ -1865,6 +2488,10 @@ export const appRouter = router({
           longitude: input.longitude,
           sequence: input.sequence,
           notes: input.notes?.trim() || null,
+          sourceProvider: input.sourceProvider,
+          originalStop: input.originalStop,
+          isUnsequencedStop: input.isUnsequencedStop,
+          metadata: normalizeStopMetadata(input.metadata),
           geocodingConfidenceScore: input.geocodingConfidenceScore,
           geocodingMethod: input.geocodingMethod,
           geocodingSuspect: input.geocodingSuspect,

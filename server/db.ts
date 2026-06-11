@@ -17,7 +17,10 @@ import {
   userIntegrations,
   operationalEvents,
   routeMetrics,
+  osrmMatrixCache,
   optimizationJobs,
+  performanceBenchmarks,
+  adminDashboardMetrics,
   geocodeCache,
   addressCorrections,
 } from "../drizzle/schema";
@@ -27,6 +30,12 @@ import {
   summarizeGeocodingConfidence,
   type GeocodingMethod,
 } from "../shared/geocodingConfidence";
+import {
+  normalizeStopMetadata,
+  normalizeStopSourceProvider,
+  type StopMetadata,
+  type StopSourceProvider,
+} from "../shared/stopMetadata";
 
 let _db: any = null;
 let _pool: mysql.Pool | null = null;
@@ -56,6 +65,7 @@ const memory = {
   operationalEvents: [] as any[],
   routeMetrics: [] as any[],
   optimizationJobs: [] as any[],
+  performanceBenchmarks: [] as any[],
   geocodeCache: [] as any[],
   addressCorrections: [] as any[],
   ids: {
@@ -69,6 +79,7 @@ const memory = {
     operationalEvents: 1,
     routeMetrics: 1,
     optimizationJobs: 1,
+    performanceBenchmarks: 1,
     geocodeCache: 1,
     addressCorrections: 1,
   },
@@ -130,6 +141,7 @@ function hydrateMemory(data: any) {
   memory.operationalEvents = Array.isArray(data.operationalEvents) ? data.operationalEvents : [];
   memory.routeMetrics = Array.isArray(data.routeMetrics) ? data.routeMetrics : [];
   memory.optimizationJobs = Array.isArray(data.optimizationJobs) ? data.optimizationJobs : [];
+  memory.performanceBenchmarks = Array.isArray(data.performanceBenchmarks) ? data.performanceBenchmarks : [];
   memory.geocodeCache = Array.isArray(data.geocodeCache) ? data.geocodeCache : [];
   memory.addressCorrections = Array.isArray(data.addressCorrections) ? data.addressCorrections : [];
   memory.ids = {
@@ -143,6 +155,7 @@ function hydrateMemory(data: any) {
     operationalEvents: Number(data.ids?.operationalEvents) || 1,
     routeMetrics: Number(data.ids?.routeMetrics) || 1,
     optimizationJobs: Number(data.ids?.optimizationJobs) || 1,
+    performanceBenchmarks: Number(data.ids?.performanceBenchmarks) || 1,
     geocodeCache: Number(data.ids?.geocodeCache) || 1,
     addressCorrections: Number(data.ids?.addressCorrections) || 1,
   };
@@ -534,6 +547,10 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["stops", "geocodingConfidenceScore"],
   ["stops", "geocodingMethod"],
   ["stops", "geocodingSuspect"],
+  ["stops", "sourceProvider"],
+  ["stops", "originalStop"],
+  ["stops", "isUnsequencedStop"],
+  ["stops", "metadata"],
   ["userIntegrations", "authTokenEncrypted"],
   ["operationalEvents", "type"],
   ["operationalEvents", "severity"],
@@ -541,6 +558,13 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["route_metrics", "optimizationRuntimeMs"],
   ["route_metrics", "osrmUsed"],
   ["route_metrics", "issuesCorrectedCount"],
+  ["route_metrics", "auditCycles"],
+  ["route_metrics", "issuesRemainingCount"],
+  ["route_metrics", "batchCorrectionCount"],
+  ["route_metrics", "startedAt"],
+  ["route_metrics", "completedAt"],
+  ["route_metrics", "executionDurationMs"],
+  ["route_metrics", "executionStatus"],
   ["route_metrics", "averageGeocodingConfidence"],
   ["route_metrics", "minGeocodingConfidence"],
   ["route_metrics", "suspiciousGeocodingCount"],
@@ -556,13 +580,40 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["route_metrics", "osrmFailureCount"],
   ["route_metrics", "osrmTotalMs"],
   ["route_metrics", "osrmAverageMs"],
+  ["route_metrics", "osrmProvider"],
+  ["route_metrics", "osrmAvailability"],
+  ["route_metrics", "osrmLatencyMs"],
+  ["route_metrics", "osrmMatrixCount"],
+  ["route_metrics", "osrmMatrixSize"],
+  ["route_metrics", "osrmFailureReason"],
+  ["route_metrics", "matrixCacheHit"],
+  ["route_metrics", "matrixCacheMiss"],
+  ["route_metrics", "matrixGenerationMs"],
+  ["route_metrics", "macroClusterCount"],
+  ["route_metrics", "microClusterCount"],
+  ["route_metrics", "largestClusterSize"],
+  ["osrm_matrix_cache", "matrixHash"],
+  ["osrm_matrix_cache", "clusterHash"],
+  ["osrm_matrix_cache", "durationMatrix"],
+  ["osrm_matrix_cache", "distanceMatrix"],
   ["optimization_jobs", "route_id"],
   ["optimization_jobs", "status"],
   ["optimization_jobs", "queue_wait_ms"],
+  ["optimization_jobs", "execution_ms"],
+  ["optimization_jobs", "worker_memory_mb"],
+  ["optimization_jobs", "peak_memory_mb"],
+  ["optimization_jobs", "worker_id"],
+  ["optimization_jobs", "worker_hostname"],
+  ["optimization_jobs", "worker_started_at"],
+  ["optimization_jobs", "worker_finished_at"],
   ["optimization_jobs", "attempt_count"],
   ["optimization_jobs", "max_attempts"],
   ["optimization_jobs", "provider_job_id"],
   ["optimization_jobs", "stack_trace"],
+  ["performance_benchmarks", "stop_count"],
+  ["performance_benchmarks", "runtime_ms"],
+  ["performance_benchmarks", "peak_memory_mb"],
+  ["performance_benchmarks", "criteria_met"],
   ["geocode_cache", "cacheKey"],
   ["geocode_cache", "results"],
   ["geocode_cache", "expiresAt"],
@@ -1306,6 +1357,10 @@ export async function createStops(routeId: number, stopsData: Array<{
   longitude?: number;
   sequence: number;
   notes?: string;
+  sourceProvider?: StopSourceProvider | string | null;
+  originalStop?: number | null;
+  isUnsequencedStop?: boolean | null;
+  metadata?: StopMetadata | null;
   geocodingConfidenceScore?: number;
   geocodingMethod?: GeocodingMethod | string;
   geocodingSuspect?: boolean;
@@ -1325,6 +1380,8 @@ export async function createStops(routeId: number, stopsData: Array<{
             !(Number(stop.latitude) === 0 && Number(stop.longitude) === 0),
         });
 
+        const metadata = normalizeStopMetadata(stop.metadata);
+
         return {
           id: memory.ids.stops++,
           routeId,
@@ -1336,6 +1393,10 @@ export async function createStops(routeId: number, stopsData: Array<{
           geocodingSuspect: stop.geocodingSuspect ?? confidence.suspect,
           sequence: stop.sequence,
           notes: stop.notes ?? null,
+          sourceProvider: normalizeStopSourceProvider(stop.sourceProvider),
+          originalStop: stop.originalStop ?? null,
+          isUnsequencedStop: Boolean(stop.isUnsequencedStop),
+          metadata: Object.keys(metadata).length ? metadata : null,
           createdAt: now,
         };
       });
@@ -1358,6 +1419,8 @@ export async function createStops(routeId: number, stopsData: Array<{
         !(Number(s.latitude) === 0 && Number(s.longitude) === 0),
     });
 
+    const metadata = normalizeStopMetadata(s.metadata);
+
     return {
       routeId,
       address: s.address,
@@ -1368,6 +1431,10 @@ export async function createStops(routeId: number, stopsData: Array<{
       geocodingSuspect: s.geocodingSuspect ?? confidence.suspect,
       sequence: s.sequence,
       notes: s.notes,
+      sourceProvider: normalizeStopSourceProvider(s.sourceProvider),
+      originalStop: s.originalStop ?? null,
+      isUnsequencedStop: Boolean(s.isUnsequencedStop),
+      metadata: Object.keys(metadata).length ? metadata : null,
     };
   });
 
@@ -1399,6 +1466,10 @@ export async function updateStop(routeId: number, stopId: number, data: Partial<
   longitude: number | null;
   sequence: number;
   notes: string | null;
+  sourceProvider: StopSourceProvider | string | null;
+  originalStop: number | null;
+  isUnsequencedStop: boolean | null;
+  metadata: StopMetadata | null;
   geocodingConfidenceScore: number;
   geocodingMethod: GeocodingMethod | string;
   geocodingSuspect: boolean;
@@ -1411,8 +1482,27 @@ export async function updateStop(routeId: number, stopId: number, data: Partial<
       );
       if (!stop) return null;
 
+      const normalizedMetadata =
+        data.metadata !== undefined ? normalizeStopMetadata(data.metadata) : undefined;
+
       Object.assign(stop, {
         ...data,
+        sourceProvider:
+          data.sourceProvider !== undefined
+            ? normalizeStopSourceProvider(data.sourceProvider)
+            : stop.sourceProvider,
+        originalStop:
+          data.originalStop !== undefined ? data.originalStop : stop.originalStop,
+        isUnsequencedStop:
+          data.isUnsequencedStop !== undefined
+            ? Boolean(data.isUnsequencedStop)
+            : stop.isUnsequencedStop,
+        metadata:
+          normalizedMetadata !== undefined
+            ? Object.keys(normalizedMetadata).length
+              ? normalizedMetadata
+              : null
+            : stop.metadata,
         latitude:
           data.latitude !== undefined
             ? data.latitude === null
@@ -1432,9 +1522,26 @@ export async function updateStop(routeId: number, stopId: number, data: Partial<
     requireConfiguredDatabase();
   }
 
+  const normalizedMetadata =
+    data.metadata !== undefined ? normalizeStopMetadata(data.metadata) : undefined;
+
   await db.update(stops)
     .set({
       ...data,
+      sourceProvider:
+        data.sourceProvider !== undefined
+          ? normalizeStopSourceProvider(data.sourceProvider)
+          : undefined,
+      metadata:
+        normalizedMetadata !== undefined
+          ? Object.keys(normalizedMetadata).length
+            ? normalizedMetadata
+            : null
+          : undefined,
+      isUnsequencedStop:
+        data.isUnsequencedStop !== undefined
+          ? Boolean(data.isUnsequencedStop)
+          : undefined,
       latitude:
         data.latitude !== undefined
           ? data.latitude === null
@@ -1892,6 +1999,7 @@ export async function createOperationalEvent(data: {
         createdAt: new Date(),
       };
       memory.operationalEvents.push(created);
+      await updateRouteExecutionMetricFromEvent(created);
       await persistFallbackDb();
       return created;
     }
@@ -1910,7 +2018,9 @@ export async function createOperationalEvent(data: {
       .where(eq(operationalEvents.id, insertedId))
       .limit(1);
 
-    return result[0] ?? null;
+    const created = result[0] ?? null;
+    if (created) await updateRouteExecutionMetricFromEvent(created);
+    return created;
   }
 
   const result = await db
@@ -1929,7 +2039,117 @@ export async function createOperationalEvent(data: {
     .orderBy(desc(operationalEvents.id))
     .limit(1);
 
-  return result[0] ?? null;
+  const created = result[0] ?? null;
+  if (created) await updateRouteExecutionMetricFromEvent(created);
+  return created;
+}
+
+type RouteExecutionStatus = "pending" | "started" | "completed" | "abandoned";
+
+function normalizeExecutionEventType(type: string) {
+  if (type === "route_execution_started") return "route_started";
+  if (type === "route_execution_completed") return "route_completed";
+  return type;
+}
+
+function routeExecutionStatusForEvent(type: string): RouteExecutionStatus | null {
+  const normalized = normalizeExecutionEventType(type);
+  if (normalized === "route_started" || normalized === "route_paused" || normalized === "route_resumed") {
+    return "started";
+  }
+  if (normalized === "route_completed") return "completed";
+  if (normalized === "route_abandoned") return "abandoned";
+  return null;
+}
+
+async function updateRouteExecutionMetricFromEvent(event: {
+  routeId?: number | null;
+  type: string;
+  createdAt?: Date | string;
+}) {
+  const routeId = Number(event.routeId);
+  if (!Number.isFinite(routeId) || routeId <= 0) return;
+
+  const status = routeExecutionStatusForEvent(event.type);
+  if (!status) return;
+
+  const eventDate = event.createdAt ? new Date(event.createdAt) : new Date();
+  const db = await getDb();
+
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const candidates = memory.routeMetrics
+        .filter((metric) => Number(metric.routeId) === routeId)
+        .sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+      const metric = candidates[0];
+      if (!metric) return;
+
+      if (status === "started") {
+        metric.startedAt = metric.startedAt ?? eventDate;
+        metric.executionStatus = "started";
+      } else if (status === "completed") {
+        metric.startedAt = metric.startedAt ?? eventDate;
+        metric.completedAt = eventDate;
+        metric.executionStatus = "completed";
+        const startedAt = metric.startedAt ? new Date(metric.startedAt).getTime() : NaN;
+        metric.executionDurationMs = Number.isFinite(startedAt)
+          ? Math.max(0, eventDate.getTime() - startedAt)
+          : null;
+      } else if (status === "abandoned") {
+        metric.executionStatus = "abandoned";
+      }
+      return;
+    }
+    return;
+  }
+
+  const latestRows = await db
+    .select({
+      id: routeMetrics.id,
+      startedAt: routeMetrics.startedAt,
+    })
+    .from(routeMetrics)
+    .where(eq(routeMetrics.routeId, routeId))
+    .orderBy(desc(routeMetrics.createdAt), desc(routeMetrics.id))
+    .limit(1);
+  const latest = latestRows[0];
+  if (!latest) return;
+
+  if (status === "started") {
+    await db
+      .update(routeMetrics)
+      .set({
+        startedAt: latest.startedAt ?? eventDate,
+        executionStatus: "started",
+      } as any)
+      .where(eq(routeMetrics.id, latest.id));
+    return;
+  }
+
+  if (status === "completed") {
+    const startedAt = latest.startedAt ? new Date(latest.startedAt).getTime() : NaN;
+    await db
+      .update(routeMetrics)
+      .set({
+        startedAt: latest.startedAt ?? eventDate,
+        completedAt: eventDate,
+        executionDurationMs: Number.isFinite(startedAt)
+          ? Math.max(0, eventDate.getTime() - startedAt)
+          : 0,
+        executionStatus: "completed",
+      } as any)
+      .where(eq(routeMetrics.id, latest.id));
+    return;
+  }
+
+  if (status === "abandoned") {
+    await db
+      .update(routeMetrics)
+      .set({
+        executionStatus: "abandoned",
+      } as any)
+      .where(eq(routeMetrics.id, latest.id));
+  }
 }
 
 export async function getRecentOperationalEvents(limit = 100) {
@@ -1949,32 +2169,36 @@ export async function getRecentOperationalEvents(limit = 100) {
     requireConfiguredDatabase();
   }
 
-  return db
-    .select({
-      id: operationalEvents.id,
-      userId: operationalEvents.userId,
-      routeId: operationalEvents.routeId,
-      stopId: operationalEvents.stopId,
-      type: operationalEvents.type,
-      severity: operationalEvents.severity,
-      source: operationalEvents.source,
-      title: operationalEvents.title,
-      message: operationalEvents.message,
-      runtime: operationalEvents.runtime,
-      url: operationalEvents.url,
-      userAgent: operationalEvents.userAgent,
-      appVersion: operationalEvents.appVersion,
-      metadata: operationalEvents.metadata,
-      createdAt: operationalEvents.createdAt,
-      userName: users.name,
-      userEmail: users.email,
-      routeName: routes.name,
-    })
-    .from(operationalEvents)
-    .leftJoin(users, eq(operationalEvents.userId, users.id))
-    .leftJoin(routes, eq(operationalEvents.routeId, routes.id))
-    .orderBy(desc(operationalEvents.createdAt))
-    .limit(safeLimit);
+  const [rows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT
+        e.id,
+        e.userId,
+        e.routeId,
+        e.stopId,
+        e.type,
+        e.severity,
+        e.source,
+        e.title,
+        e.message,
+        e.runtime,
+        e.url,
+        e.userAgent,
+        e.appVersion,
+        e.metadata,
+        e.createdAt,
+        u.name as userName,
+        u.email as userEmail,
+        r.name as routeName
+      FROM operationalEvents e FORCE INDEX (operationalEvents_createdAt_idx)
+      LEFT JOIN users u ON e.userId = u.id
+      LEFT JOIN routes r ON e.routeId = r.id
+      ORDER BY e.createdAt DESC
+      LIMIT ${safeLimit}
+    `
+  );
+
+  return rows;
 }
 
 export async function getLatestRouteOptimizationEvent(routeId: number, userId: number) {
@@ -2125,6 +2349,13 @@ export type CreateOptimizationJobInput = {
   errorMessage?: string | null;
   runtimeMs?: number | null;
   queueWaitMs?: number | null;
+  executionMs?: number | null;
+  workerMemoryMb?: number | null;
+  peakMemoryMb?: number | null;
+  workerId?: string | null;
+  workerHostname?: string | null;
+  workerStartedAt?: Date | null;
+  workerFinishedAt?: Date | null;
   attemptCount?: number;
   maxAttempts?: number;
   providerJobId?: string | null;
@@ -2139,6 +2370,13 @@ export async function createOptimizationJob(data: CreateOptimizationJobInput) {
     status: data.status ?? "queued",
     runtimeMs: data.runtimeMs ?? null,
     queueWaitMs: data.queueWaitMs ?? null,
+    executionMs: data.executionMs ?? null,
+    workerMemoryMb: data.workerMemoryMb ?? null,
+    peakMemoryMb: data.peakMemoryMb ?? null,
+    workerId: data.workerId ?? null,
+    workerHostname: data.workerHostname ?? null,
+    workerStartedAt: data.workerStartedAt ?? null,
+    workerFinishedAt: data.workerFinishedAt ?? null,
     attemptCount: data.attemptCount ?? 0,
     maxAttempts: data.maxAttempts ?? 3,
     providerJobId: data.providerJobId ?? null,
@@ -2193,6 +2431,13 @@ export async function updateOptimizationJob(
     finishedAt?: Date | null;
     runtimeMs?: number | null;
     queueWaitMs?: number | null;
+    executionMs?: number | null;
+    workerMemoryMb?: number | null;
+    peakMemoryMb?: number | null;
+    workerId?: string | null;
+    workerHostname?: string | null;
+    workerStartedAt?: Date | null;
+    workerFinishedAt?: Date | null;
     attemptCount?: number;
     maxAttempts?: number;
     providerJobId?: string | null;
@@ -2225,6 +2470,661 @@ export async function updateOptimizationJob(
     .limit(1);
 
   return result[0] ?? null;
+}
+
+export async function getOptimizationJobById(id: number) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.optimizationJobs.find((item) => Number(item.id) === id) ?? null;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const result = await db
+    .select()
+    .from(optimizationJobs)
+    .where(eq(optimizationJobs.id, id))
+    .limit(1);
+
+  return result[0] ?? null;
+}
+
+const QUEUE_INTEGRITY_EVENT_TYPES = [
+  "duplicate_job_detected",
+  "worker_crash_recovered",
+  "job_recovered_after_crash",
+  "optimization_job_stalled",
+  "redis_reconnect_detected",
+  "optimization_job_failed",
+];
+
+export async function getQueueIntegrityDashboard(days = 30) {
+  const safeDays = Math.min(Math.max(Math.round(days), 1), 365);
+  const cutoffDate = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      const events = memory.operationalEvents.filter(
+        (event) =>
+          QUEUE_INTEGRITY_EVENT_TYPES.includes(String(event.type)) &&
+          new Date(event.createdAt).getTime() >= cutoff
+      );
+      const failedJobs = memory.optimizationJobs.filter(
+        (job) =>
+          job.status === "failed" &&
+          new Date(job.createdAt).getTime() >= cutoff
+      );
+      const runningJobs = memory.optimizationJobs.filter(
+        (job) => job.status === "running"
+      );
+      return buildQueueIntegrityDashboard(events, failedJobs, runningJobs, safeDays);
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [events] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT id, type, severity, source, title, message, metadata, createdAt
+      FROM operationalEvents FORCE INDEX (operationalEvents_type_createdAt_idx)
+      WHERE type IN (${QUEUE_INTEGRITY_EVENT_TYPES.map(() => "?").join(",")})
+        AND createdAt >= ?
+      ORDER BY createdAt DESC
+      LIMIT 5000
+    `,
+    [...QUEUE_INTEGRITY_EVENT_TYPES, cutoffDate]
+  );
+  const [failedJobs] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT id, route_id AS routeId, worker_id AS workerId, attempt_count AS attemptCount,
+        max_attempts AS maxAttempts, error_message AS errorMessage, created_at AS createdAt,
+        finished_at AS finishedAt
+      FROM optimization_jobs
+      WHERE status = 'failed'
+        AND created_at >= ?
+      ORDER BY created_at DESC
+      LIMIT 2000
+    `,
+    [cutoffDate]
+  );
+  const [runtimeRows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT AVG(NULLIF(COALESCE(runtime_ms, execution_ms, 0), 0)) AS averageRuntimeMs
+      FROM optimization_jobs
+      WHERE status = 'completed'
+        AND created_at >= ?
+    `,
+    [cutoffDate]
+  );
+  const averageRuntimeMs = Math.max(60_000, Number(runtimeRows[0]?.averageRuntimeMs || 0));
+  const [runningJobs] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT id, route_id AS routeId, user_id AS userId, worker_id AS workerId,
+        worker_hostname AS workerHostname, attempt_count AS attemptCount,
+        started_at AS startedAt, created_at AS createdAt,
+        ROUND(TIMESTAMPDIFF(MICROSECOND, COALESCE(started_at, created_at), NOW()) / 1000) AS runningMs
+      FROM optimization_jobs
+      WHERE status = 'running'
+      ORDER BY COALESCE(started_at, created_at) ASC
+      LIMIT 200
+    `
+  );
+  const runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs);
+  await persistLongRunningJobAlerts(runningAlerts);
+
+  return buildQueueIntegrityDashboard(
+    events,
+    failedJobs,
+    runningJobs,
+    safeDays,
+    averageRuntimeMs,
+    runningAlerts
+  );
+}
+
+function countEventsByType(events: any[], type: string) {
+  return events.filter((event) => event.type === type).length;
+}
+
+function buildLongRunningJobAlerts(runningJobs: any[], averageRuntimeMs: number) {
+  const warningThresholdMs = averageRuntimeMs * 2;
+  const criticalThresholdMs = averageRuntimeMs * 5;
+  return runningJobs
+    .map((job) => {
+      const runningMs =
+        Number(job.runningMs || 0) ||
+        Math.max(
+          0,
+          Date.now() -
+            new Date(job.startedAt || job.started_at || job.createdAt || Date.now()).getTime()
+        );
+      const severity =
+        runningMs > criticalThresholdMs
+          ? "critical"
+          : runningMs > warningThresholdMs
+            ? "warning"
+            : null;
+      if (!severity) return null;
+      return {
+        jobId: Number(job.id),
+        routeId: job.routeId ?? job.route_id ?? null,
+        userId: job.userId ?? job.user_id ?? null,
+        workerId: job.workerId ?? job.worker_id ?? null,
+        workerHostname: job.workerHostname ?? job.worker_hostname ?? null,
+        runningMs,
+        averageRuntimeMs,
+        thresholdMultiplier: severity === "critical" ? 5 : 2,
+        severity,
+      };
+    })
+    .filter(Boolean) as Array<{
+      jobId: number;
+      routeId: number | null;
+      userId: number | null;
+      workerId: string | null;
+      workerHostname: string | null;
+      runningMs: number;
+      averageRuntimeMs: number;
+      thresholdMultiplier: number;
+      severity: "warning" | "critical";
+    }>;
+}
+
+async function hasRecentQueueIntegrityEvent(type: string, title: string, minutes = 30) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = Date.now() - minutes * 60_000;
+      return memory.operationalEvents.some(
+        (event) =>
+          event.type === type &&
+          event.title === title &&
+          new Date(event.createdAt).getTime() >= cutoff
+      );
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [rows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT id
+      FROM operationalEvents FORCE INDEX (operationalEvents_type_createdAt_idx)
+      WHERE type = ?
+        AND title = ?
+        AND createdAt >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+      LIMIT 1
+    `,
+    [type, title, minutes]
+  );
+  return rows.length > 0;
+}
+
+const DISASTER_CRITICAL_TABLES = [
+  { table: "routes", memoryKey: "routes" },
+  { table: "stops", memoryKey: "stops" },
+  { table: "route_metrics", memoryKey: "routeMetrics" },
+  { table: "optimization_jobs", memoryKey: "optimizationJobs" },
+  { table: "operationalEvents", memoryKey: "operationalEvents" },
+  { table: "address_corrections", memoryKey: "addressCorrections" },
+  { table: "osrm_matrix_cache", memoryKey: null },
+  { table: "admin_dashboard_metrics", memoryKey: null },
+] as const;
+
+const DISASTER_EVENT_TYPES = [
+  "backup_completed",
+  "backup_missing",
+  "backup_failed",
+  "restore_test_passed",
+  "restore_test_failed",
+] as const;
+
+function parseOptionalDate(value: unknown) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function dateAgeHours(date: Date | null) {
+  if (!date) return null;
+  return Math.max(0, Math.round(((Date.now() - date.getTime()) / 3_600_000) * 10) / 10);
+}
+
+function readBooleanLike(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "sim", "passed", "ok"].includes(normalized)) return true;
+    if (["false", "0", "no", "nao", "não", "failed"].includes(normalized)) return false;
+  }
+  return false;
+}
+
+async function hasRecentDisasterReadinessEvent(type: string, title: string, minutes = 360) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = Date.now() - minutes * 60_000;
+      return memory.operationalEvents.some(
+        (event) =>
+          event.type === type &&
+          event.title === title &&
+          new Date(event.createdAt).getTime() >= cutoff
+      );
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [rows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT id
+      FROM operationalEvents FORCE INDEX (operationalEvents_type_createdAt_idx)
+      WHERE type = ?
+        AND title = ?
+        AND createdAt >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+      LIMIT 1
+    `,
+    [type, title, minutes]
+  );
+  return rows.length > 0;
+}
+
+async function persistDisasterReadinessAlerts(
+  alerts: Array<{
+    type: string;
+    severity: "warning" | "error" | "fatal";
+    title: string;
+    message: string;
+    metadata?: Record<string, unknown>;
+  }>
+) {
+  for (const alert of alerts) {
+    if (await hasRecentDisasterReadinessEvent(alert.type, alert.title)) {
+      continue;
+    }
+    await createOperationalEvent({
+      userId: null,
+      routeId: null,
+      stopId: null,
+      type: alert.type,
+      severity: alert.severity,
+      source: "admin.disasterReadiness",
+      title: alert.title,
+      message: alert.message,
+      metadata: alert.metadata ?? null,
+    });
+  }
+}
+
+async function getLatestDisasterEvents() {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return DISASTER_EVENT_TYPES.map((type) =>
+        sortByDateDesc(
+          memory.operationalEvents.filter((event) => event.type === type),
+          "createdAt"
+        )[0] ?? null
+      ).filter(Boolean);
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [rows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT id, type, severity, title, message, metadata, createdAt
+      FROM operationalEvents FORCE INDEX (operationalEvents_type_createdAt_idx)
+      WHERE type IN (${DISASTER_EVENT_TYPES.map(() => "?").join(",")})
+      ORDER BY createdAt DESC
+      LIMIT 100
+    `,
+    [...DISASTER_EVENT_TYPES]
+  );
+  return rows;
+}
+
+function latestEventByType(events: any[], type: string) {
+  return events.find((event) => event?.type === type) ?? null;
+}
+
+async function getCriticalTableReadiness() {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return DISASTER_CRITICAL_TABLES.map((item) => {
+        const records = item.memoryKey
+          ? Number((memory as any)[item.memoryKey]?.length ?? 0)
+          : 0;
+        return {
+          table: item.table,
+          records,
+          status: "ok" as const,
+        };
+      });
+    }
+    requireConfiguredDatabase();
+  }
+
+  const counts = await Promise.all(
+    DISASTER_CRITICAL_TABLES.map(async (item) => {
+      try {
+        const [rows] = await _pool!.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS records FROM \`${item.table}\``
+        );
+        return {
+          table: item.table,
+          records: Number(rows[0]?.records ?? 0),
+          status: "ok" as const,
+        };
+      } catch (error) {
+        return {
+          table: item.table,
+          records: 0,
+          status: "error" as const,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    })
+  );
+
+  return counts;
+}
+
+export async function getDisasterReadinessDashboard() {
+  const rpoTargetHours = 24;
+  const rtoTargetHours = 4;
+  const events = await getLatestDisasterEvents();
+  const lastBackupEvent = latestEventByType(events, "backup_completed");
+  const backupFailedEvent = latestEventByType(events, "backup_failed");
+  const restorePassedEvent = latestEventByType(events, "restore_test_passed");
+  const restoreFailedEvent = latestEventByType(events, "restore_test_failed");
+
+  const envBackupAt = parseOptionalDate(ENV.backupLastCompletedAt);
+  const eventBackupAt = parseOptionalDate(lastBackupEvent?.createdAt);
+  const lastBackupAt = envBackupAt ?? eventBackupAt;
+  const backupAgeHours = dateAgeHours(lastBackupAt);
+  const backupStatus = (ENV.backupStatus || (backupFailedEvent ? "failed" : "unknown"))
+    .trim()
+    .toLowerCase();
+
+  const envRestoreAt = parseOptionalDate(ENV.restoreTestLastPassedAt);
+  const eventRestoreAt = parseOptionalDate(restorePassedEvent?.createdAt);
+  const restoreTestAt = envRestoreAt ?? eventRestoreAt;
+  const restoreTestPassed =
+    ENV.restoreTestPassed ||
+    Boolean(restoreTestAt && (!restoreFailedEvent || restoreTestAt >= new Date(restoreFailedEvent.createdAt)));
+
+  const criticalTables = await getCriticalTableReadiness();
+  const tableErrors = criticalTables.filter((table) => table.status !== "ok");
+  const alerts: Array<{
+    type: string;
+    severity: "warning" | "error" | "fatal";
+    severityLabel: "warning" | "critical";
+    title: string;
+    message: string;
+    metadata?: Record<string, unknown>;
+  }> = [];
+
+  if (!lastBackupAt) {
+    alerts.push({
+      type: "backup_missing",
+      severity: "fatal",
+      severityLabel: "critical",
+      title: "Backup sem evidencia registrada",
+      message: "Nenhuma evidencia de backup foi encontrada em variaveis ou eventos operacionais.",
+      metadata: { rpoTargetHours, backupAgeHours: null },
+    });
+  } else if ((backupAgeHours ?? 0) > 72) {
+    alerts.push({
+      type: "backup_missing",
+      severity: "fatal",
+      severityLabel: "critical",
+      title: "Backup acima de 72 horas",
+      message: `Ultimo backup tem ${backupAgeHours}h. Meta RPO: ${rpoTargetHours}h.`,
+      metadata: { rpoTargetHours, backupAgeHours, thresholdHours: 72 },
+    });
+  } else if ((backupAgeHours ?? 0) > 24) {
+    alerts.push({
+      type: "backup_missing",
+      severity: "warning",
+      severityLabel: "warning",
+      title: "Backup acima de 24 horas",
+      message: `Ultimo backup tem ${backupAgeHours}h. Meta RPO: ${rpoTargetHours}h.`,
+      metadata: { rpoTargetHours, backupAgeHours, thresholdHours: 24 },
+    });
+  }
+
+  if (backupStatus === "failed") {
+    alerts.push({
+      type: "backup_failed",
+      severity: "fatal",
+      severityLabel: "critical",
+      title: "Falha de backup registrada",
+      message: "A ultima evidencia de backup indica falha.",
+      metadata: { backupStatus, backupFailedAt: backupFailedEvent?.createdAt ?? null },
+    });
+  }
+
+  if (!restoreTestPassed) {
+    alerts.push({
+      type: "restore_test_failed",
+      severity: "warning",
+      severityLabel: "warning",
+      title: "Restore test nao aprovado",
+      message: "Nenhuma evidencia de teste de restore aprovado foi encontrada.",
+      metadata: { rtoTargetHours, restoreTestAt: restoreTestAt?.toISOString() ?? null },
+    });
+  }
+
+  for (const table of tableErrors) {
+    alerts.push({
+      type: "restore_test_failed",
+      severity: "fatal",
+      severityLabel: "critical",
+      title: `Tabela critica inacessivel: ${table.table}`,
+      message: table.error ?? "Tabela critica nao respondeu a consulta de prontidao.",
+      metadata: { table: table.table, status: table.status },
+    });
+  }
+
+  await persistDisasterReadinessAlerts(alerts);
+
+  const status = alerts.some((alert) => alert.severity === "fatal")
+    ? "critical"
+    : alerts.length > 0
+      ? "warning"
+      : "healthy";
+
+  return {
+    status,
+    rpoTargetHours,
+    rtoTargetHours,
+    lastBackupAt: lastBackupAt?.toISOString() ?? null,
+    backupAgeHours,
+    backupStatus: backupStatus || "unknown",
+    restoreTestAt: restoreTestAt?.toISOString() ?? null,
+    restoreTestPassed,
+    criticalTables,
+    alerts,
+    events: {
+      lastBackupEventId: lastBackupEvent?.id ?? null,
+      backupFailedEventId: backupFailedEvent?.id ?? null,
+      restorePassedEventId: restorePassedEvent?.id ?? null,
+      restoreFailedEventId: restoreFailedEvent?.id ?? null,
+    },
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+async function persistLongRunningJobAlerts(
+  alerts: ReturnType<typeof buildLongRunningJobAlerts>
+) {
+  for (const alert of alerts) {
+    const title = `Job ${alert.jobId} executando acima do esperado`;
+    if (await hasRecentQueueIntegrityEvent("optimization_job_stalled", title)) {
+      continue;
+    }
+    await createOperationalEvent({
+      userId: alert.userId,
+      routeId: alert.routeId,
+      stopId: null,
+      type: "optimization_job_stalled",
+      severity: alert.severity === "critical" ? "fatal" : "warning",
+      source: "optimization.queue.integrity",
+      title,
+      message: `Job executando ha ${Math.round(alert.runningMs / 1000)}s, acima de ${alert.thresholdMultiplier}x o runtime medio.`,
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        optimizationJobId: alert.jobId,
+        routeId: alert.routeId,
+        workerId: alert.workerId,
+        workerHostname: alert.workerHostname,
+        runningMs: alert.runningMs,
+        averageRuntimeMs: alert.averageRuntimeMs,
+        thresholdMultiplier: alert.thresholdMultiplier,
+        stalledCount: 1,
+      },
+    });
+  }
+}
+
+function buildQueueIntegrityDashboard(
+  events: any[],
+  failedJobs: any[],
+  runningJobs: any[],
+  days: number,
+  averageRuntimeMs = 60_000,
+  runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs)
+) {
+  const duplicateJobs = countEventsByType(events, "duplicate_job_detected");
+  const jobRecoveredAfterCrash = countEventsByType(events, "job_recovered_after_crash");
+  const workerCrashRecovered = countEventsByType(events, "worker_crash_recovered");
+  const stalledCount = countEventsByType(events, "optimization_job_stalled");
+  const stalledRecoveredCount = jobRecoveredAfterCrash;
+  const redisReconnectCount = countEventsByType(events, "redis_reconnect_detected");
+  const failedRecoveries = failedJobs.filter((job) => {
+    const attemptCount = Number(job.attemptCount ?? job.attempt_count ?? 0);
+    const maxAttempts = Number(job.maxAttempts ?? job.max_attempts ?? 3);
+    return attemptCount >= maxAttempts;
+  }).length;
+  const lastEvent = events[0];
+
+  return {
+    periodDays: days,
+    duplicateJobs,
+    duplicateJobDetected: duplicateJobs,
+    recoveredJobs: jobRecoveredAfterCrash,
+    jobRecoveredAfterCrash,
+    workerCrashRecovered,
+    stalledCount,
+    stalledRecoveredCount,
+    runningStalledJobs: runningAlerts.length,
+    stalledJobs: stalledCount + runningAlerts.length,
+    averageRuntimeMs,
+    longRunningJobs: runningAlerts,
+    failedRecoveries,
+    redisReconnectCount,
+    lastIntegrityCheck: lastEvent?.createdAt ?? null,
+    status:
+      duplicateJobs === 0 && failedRecoveries === 0 && stalledCount === 0 && runningAlerts.length === 0
+        ? "healthy"
+        : "attention",
+    target: {
+      duplicateJobs: 0,
+      failedRecoveries: 0,
+      stalledJobs: 0,
+      recoveryAfterFailure: "100%",
+    },
+    recentEvents: events.slice(0, 20),
+  };
+}
+
+export async function getOptimizationWorkerJobStats(days = 30) {
+  const safeDays = Math.min(Math.max(Math.round(days), 1), 365);
+  const cutoffDate = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
+  const db = await getDb();
+
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const rows = memory.optimizationJobs.filter(
+        (job) =>
+          job.workerId &&
+          new Date(job.createdAt).getTime() >= cutoffDate.getTime()
+      );
+      const byWorker = new Map<
+        string,
+        {
+          workerId: string;
+          workerHostname: string | null;
+          jobsProcessed: number;
+          jobsFailed: number;
+          runtimeTotal: number;
+          runtimeCount: number;
+        }
+      >();
+
+      for (const job of rows) {
+        const workerId = String(job.workerId);
+        const current =
+          byWorker.get(workerId) ??
+          {
+            workerId,
+            workerHostname: job.workerHostname ?? null,
+            jobsProcessed: 0,
+            jobsFailed: 0,
+            runtimeTotal: 0,
+            runtimeCount: 0,
+          };
+        if (job.status === "completed") current.jobsProcessed += 1;
+        if (job.status === "failed") current.jobsFailed += 1;
+        const runtimeMs = Number(job.runtimeMs || job.executionMs || 0);
+        if (runtimeMs > 0) {
+          current.runtimeTotal += runtimeMs;
+          current.runtimeCount += 1;
+        }
+        byWorker.set(workerId, current);
+      }
+
+      return Array.from(byWorker.values()).map((worker) => ({
+        workerId: worker.workerId,
+        workerHostname: worker.workerHostname,
+        jobsProcessed: worker.jobsProcessed,
+        jobsFailed: worker.jobsFailed,
+        workerAverageRuntime: worker.runtimeCount
+          ? Math.round(worker.runtimeTotal / worker.runtimeCount)
+          : 0,
+      }));
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [rows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT
+        worker_id AS workerId,
+        MAX(worker_hostname) AS workerHostname,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS jobsProcessed,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS jobsFailed,
+        ROUND(AVG(NULLIF(COALESCE(runtime_ms, execution_ms, 0), 0))) AS workerAverageRuntime
+      FROM optimization_jobs
+      WHERE worker_id IS NOT NULL
+        AND created_at >= ?
+      GROUP BY worker_id
+    `,
+    [cutoffDate]
+  );
+
+  return rows.map((row) => ({
+    workerId: String(row.workerId),
+    workerHostname: row.workerHostname ? String(row.workerHostname) : null,
+    jobsProcessed: Number(row.jobsProcessed || 0),
+    jobsFailed: Number(row.jobsFailed || 0),
+    workerAverageRuntime: Number(row.workerAverageRuntime || 0),
+  }));
 }
 
 export async function getOptimizationJobsDashboard(days = 30) {
@@ -2335,14 +3235,33 @@ export type CreateRouteMetricInput = {
   osrmFailureCount?: number;
   osrmTotalMs?: number;
   osrmAverageMs?: number;
+  osrmProvider?: string | null;
+  osrmAvailability?: "unknown" | "available" | "degraded" | "unavailable";
+  osrmLatencyMs?: number;
+  osrmMatrixCount?: number;
+  osrmMatrixSize?: number;
+  osrmFailureReason?: string | null;
+  matrixCacheHit?: number;
+  matrixCacheMiss?: number;
+  matrixGenerationMs?: number;
+  macroClusterCount?: number;
+  microClusterCount?: number;
+  largestClusterSize?: number;
   issuesDetectedCount: number;
   issuesCorrectedCount: number;
   issuesBlockedCount: number;
+  auditCycles?: number;
+  issuesRemainingCount?: number;
+  batchCorrectionCount?: number;
   auditStatus: "approved" | "attention" | "critical";
   auditQuality: "excellent" | "good" | "attention" | "poor" | "blocked";
   auditSource?: string | null;
   routeMode?: "shortest_distance" | "shortest_time" | "balanced" | null;
   localityMode?: "balanced" | "local" | "strict" | null;
+  startedAt?: Date | string | null;
+  completedAt?: Date | string | null;
+  executionDurationMs?: number | null;
+  executionStatus?: "pending" | "started" | "completed" | "abandoned";
   stopCount: number;
   totalDistanceKm: number;
   totalTimeMinutes: number;
@@ -2379,6 +3298,412 @@ function metricPercent(part: number, total: number) {
 function roundMetric(value: number, digits = 1) {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
+}
+
+const PERFORMANCE_BENCHMARK_TARGETS: Record<number, number> = {
+  250: 15_000,
+  500: 30_000,
+  1000: 60_000,
+  2000: 180_000,
+};
+
+export type CreatePerformanceBenchmarkInput = {
+  scenario?: string;
+  stopCount: number;
+  runtimeMs: number;
+  peakMemoryMb?: number;
+  queueWaitMs?: number;
+  osrmLatencyMs?: number;
+  auditCycles?: number;
+  microClusterCount?: number;
+  osrmCalls?: number;
+  osrmFailures?: number;
+  matrixCacheHit?: number;
+  matrixCacheMiss?: number;
+  success?: boolean;
+  criteriaMet?: boolean;
+  metadata?: Record<string, unknown> | null;
+};
+
+function benchmarkCriteriaMet(stopCount: number, runtimeMs: number, success = true) {
+  const targetMs = PERFORMANCE_BENCHMARK_TARGETS[stopCount];
+  if (!targetMs) return Boolean(success);
+  return Boolean(success) && runtimeMs > 0 && runtimeMs < targetMs;
+}
+
+export async function createPerformanceBenchmark(data: CreatePerformanceBenchmarkInput) {
+  const stopCount = Math.round(normalizeMetricNumber(data.stopCount));
+  const runtimeMs = Math.round(normalizeMetricNumber(data.runtimeMs));
+  const success = data.success ?? true;
+  const criteriaMet =
+    data.criteriaMet ?? benchmarkCriteriaMet(stopCount, runtimeMs, success);
+  const benchmark = {
+    scenario: (data.scenario || "stress-suite").slice(0, 64),
+    stopCount,
+    runtimeMs,
+    peakMemoryMb: Math.round(normalizeMetricNumber(data.peakMemoryMb)),
+    queueWaitMs: Math.round(normalizeMetricNumber(data.queueWaitMs)),
+    osrmLatencyMs: Math.round(normalizeMetricNumber(data.osrmLatencyMs)),
+    auditCycles: Math.round(normalizeMetricNumber(data.auditCycles)),
+    microClusterCount: Math.round(normalizeMetricNumber(data.microClusterCount)),
+    osrmCalls: Math.round(normalizeMetricNumber(data.osrmCalls)),
+    osrmFailures: Math.round(normalizeMetricNumber(data.osrmFailures)),
+    matrixCacheHit: Math.round(normalizeMetricNumber(data.matrixCacheHit)),
+    matrixCacheMiss: Math.round(normalizeMetricNumber(data.matrixCacheMiss)),
+    success,
+    criteriaMet,
+    metadata: data.metadata ?? null,
+  };
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const created = {
+        id: memory.ids.performanceBenchmarks++,
+        ...benchmark,
+        createdAt: new Date(),
+      };
+      memory.performanceBenchmarks.push(created);
+      await persistFallbackDb();
+      return created;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const inserted = await db
+    .insert(performanceBenchmarks)
+    .values(benchmark as any)
+    .$returningId();
+  const insertedId = inserted[0]?.id;
+  if (!insertedId) return null;
+
+  const result = await db
+    .select()
+    .from(performanceBenchmarks)
+    .where(eq(performanceBenchmarks.id, insertedId))
+    .limit(1);
+
+  return result[0] ?? null;
+}
+
+function buildPerformanceBenchmarkDashboard(rows: any[], days: number, tableAvailable = true) {
+  const scenarioTargets = [250, 500, 1000, 2000].map((stopCount) => {
+    const values = rows.filter((row) => Number(row.stopCount ?? row.stop_count) === stopCount);
+    const runtimes = values.map((row) => Number(row.runtimeMs ?? row.runtime_ms ?? 0));
+    const latest = values
+      .slice()
+      .sort((a, b) =>
+        new Date(b.createdAt ?? b.created_at ?? 0).getTime() -
+        new Date(a.createdAt ?? a.created_at ?? 0).getTime()
+      )[0];
+    const latestRuntimeMs = Number(latest?.runtimeMs ?? latest?.runtime_ms ?? 0);
+    const targetMs = PERFORMANCE_BENCHMARK_TARGETS[stopCount];
+    const latestCriteriaMet = Boolean(latest?.criteriaMet ?? latest?.criteria_met ?? false);
+    return {
+      stopCount,
+      targetMs,
+      runs: values.length,
+      latestRuntimeMs,
+      latestPeakMemoryMb: Number(latest?.peakMemoryMb ?? latest?.peak_memory_mb ?? 0),
+      latestQueueWaitMs: Number(latest?.queueWaitMs ?? latest?.queue_wait_ms ?? 0),
+      latestOsrmLatencyMs: Number(latest?.osrmLatencyMs ?? latest?.osrm_latency_ms ?? 0),
+      latestAuditCycles: Number(latest?.auditCycles ?? latest?.audit_cycles ?? 0),
+      latestMicroClusterCount: Number(latest?.microClusterCount ?? latest?.micro_cluster_count ?? 0),
+      latestCriteriaMet,
+      averageRuntimeMs: Math.round(metricAverage(runtimes)),
+      p95RuntimeMs: Math.round(metricPercentile(runtimes, 95)),
+      p99RuntimeMs: Math.round(metricPercentile(runtimes, 99)),
+      status: !latest
+        ? "missing"
+        : latestCriteriaMet && latestRuntimeMs > 0 && latestRuntimeMs < targetMs
+          ? "ready"
+          : "no-go",
+      latestAt: latest?.createdAt ?? latest?.created_at ?? null,
+    };
+  });
+
+  const totalRuns = rows.length;
+  const successfulRuns = rows.filter((row) => Boolean(row.success)).length;
+  const criteriaMetRuns = rows.filter((row) =>
+    Boolean(row.criteriaMet ?? row.criteria_met)
+  ).length;
+  const osrmCalls = rows.reduce(
+    (total, row) => total + Number(row.osrmCalls ?? row.osrm_calls ?? 0),
+    0
+  );
+  const osrmFailures = rows.reduce(
+    (total, row) => total + Number(row.osrmFailures ?? row.osrm_failures ?? 0),
+    0
+  );
+
+  return {
+    tableAvailable,
+    days,
+    totalRuns,
+    successfulRuns,
+    criteriaMetRuns,
+    successRate: roundMetric(metricPercent(successfulRuns, totalRuns)),
+    criteriaMetRate: roundMetric(metricPercent(criteriaMetRuns, totalRuns)),
+    osrmCalls,
+    osrmFailures,
+    osrmFailureRate: roundMetric(metricPercent(osrmFailures, osrmCalls)),
+    targets: scenarioTargets,
+    status: !tableAvailable
+      ? "unavailable"
+      : scenarioTargets.every((target) => target.status === "ready")
+        ? "ready"
+        : scenarioTargets.some((target) => target.status === "no-go")
+          ? "no-go"
+          : "partial",
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+export async function getPerformanceBenchmarkDashboard(days = 30) {
+  const safeDays = Math.min(Math.max(Math.round(days), 1), 365);
+  const cutoffDate = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const rows = memory.performanceBenchmarks.filter(
+        (row) => new Date(row.createdAt).getTime() >= cutoffDate.getTime()
+      );
+      return buildPerformanceBenchmarkDashboard(rows, safeDays);
+    }
+    requireConfiguredDatabase();
+  }
+
+  try {
+    const rows = await db
+      .select()
+      .from(performanceBenchmarks)
+      .where(gte(performanceBenchmarks.createdAt, cutoffDate))
+      .orderBy(desc(performanceBenchmarks.createdAt))
+      .limit(500);
+
+    return buildPerformanceBenchmarkDashboard(rows, safeDays);
+  } catch (error) {
+    return {
+      ...buildPerformanceBenchmarkDashboard([], safeDays, false),
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function buildGoLive500Dashboard(args: {
+  routeStopCounts: number[];
+  routeMetricRows: any[];
+  performanceBenchmarks: any;
+  maxRouteStops?: number;
+}) {
+  const maxRouteStops = args.maxRouteStops || ENV.maxRouteStops || 500;
+  const routeStopCounts = args.routeStopCounts
+    .map((value) => Number(value || 0))
+    .filter((value) => value >= 0);
+  const largestRouteStops = Math.max(0, ...routeStopCounts);
+  const routesAboveLimit = routeStopCounts.filter(
+    (value) => value > maxRouteStops
+  ).length;
+  const routesAtLimit = routeStopCounts.filter(
+    (value) => value === maxRouteStops
+  ).length;
+  const routesAbove250 = routeStopCounts.filter((value) => value > 250).length;
+  const routesNearLimit = routeStopCounts.filter(
+    (value) => value >= Math.round(maxRouteStops * 0.9) && value <= maxRouteStops
+  ).length;
+  const routeMetricsRows = args.routeMetricRows.filter((row) => {
+    const stopCount = Number(row.stopCount ?? row.stop_count ?? 0);
+    return stopCount > 0 && stopCount <= maxRouteStops;
+  });
+  const runtimeValues = routeMetricsRows
+    .map((row) =>
+      Number(
+        row.totalRuntimeMs ??
+          row.total_runtime_ms ??
+          row.optimizationRuntimeMs ??
+          row.optimization_runtime_ms ??
+          0
+      )
+    )
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const benchmark500 = args.performanceBenchmarks?.targets?.find(
+    (target: any) => Number(target.stopCount) === 500
+  );
+  const benchmark500Status = benchmark500?.status ?? "missing";
+  const runtimeP95Ms = Math.round(metricPercentile(runtimeValues, 95));
+  const osrmFailureRate = roundMetric(
+    metricPercent(
+      routeMetricsRows.reduce(
+        (total, row) => total + Number(row.osrmFailureCount ?? row.osrm_failure_count ?? 0),
+        0
+      ),
+      routeMetricsRows.reduce(
+        (total, row) => total + Number(row.osrmCallCount ?? row.osrm_call_count ?? 0),
+        0
+      )
+    )
+  );
+
+  const issues: Array<{ severity: "warning" | "critical"; message: string }> = [];
+  if (routesAboveLimit > 0) {
+    issues.push({
+      severity: "warning",
+      message: `${routesAboveLimit} rota(s) historica(s) acima do limite comercial de ${maxRouteStops} paradas. Novas rotas acima do limite ja sao bloqueadas.`,
+    });
+  }
+  if (benchmark500Status === "missing") {
+    issues.push({
+      severity: "warning",
+      message: "Benchmark oficial de 500 paradas ainda nao foi executado.",
+    });
+  } else if (benchmark500Status !== "ready") {
+    issues.push({
+      severity: "critical",
+      message: "Benchmark oficial de 500 paradas nao atingiu a meta de 30 segundos.",
+    });
+  }
+  if (runtimeP95Ms > 60_000) {
+    issues.push({
+      severity: "warning",
+      message: "P95 operacional ate 500 paradas acima de 60 segundos.",
+    });
+  }
+  if (osrmFailureRate > 25) {
+    issues.push({
+      severity: "warning",
+      message: `Falha OSRM em ${osrmFailureRate}% das chamadas nas rotas ate 500 paradas.`,
+    });
+  }
+
+  const verdict = issues.some((issue) => issue.severity === "critical")
+    ? "NO_GO"
+    : issues.length > 0
+      ? "ATTENTION"
+      : "READY";
+
+  return {
+    maxRouteStops,
+    targetConcurrentUsers: 20,
+    targetRegisteredUsers: 200,
+    targetConcurrentOptimizations: 5,
+    routes: {
+      total: routeStopCounts.length,
+      averageStops: roundMetric(metricAverage(routeStopCounts)),
+      largestRouteStops,
+      routesAbove100: routeStopCounts.filter((value) => value > 100).length,
+      routesAbove250,
+      routesAbove500: routesAboveLimit,
+      routesAtLimit,
+      routesNearLimit,
+      utilizationPercent: roundMetric(
+        maxRouteStops > 0 ? (largestRouteStops / maxRouteStops) * 100 : 0
+      ),
+    },
+    runtime: {
+      sampleCount: runtimeValues.length,
+      averageMs: Math.round(metricAverage(runtimeValues)),
+      p50Ms: Math.round(metricPercentile(runtimeValues, 50)),
+      p95Ms: runtimeP95Ms,
+      p99Ms: Math.round(metricPercentile(runtimeValues, 99)),
+    },
+    pipeline: {
+      auditMsAverage: Math.round(
+        metricAverage(routeMetricsRows.map((row) => Number(row.auditMs ?? row.audit_ms ?? 0)))
+      ),
+      correctionMsAverage: Math.round(
+        metricAverage(routeMetricsRows.map((row) => Number(row.correctionMs ?? row.correction_ms ?? 0)))
+      ),
+      optimizerMsAverage: Math.round(
+        metricAverage(routeMetricsRows.map((row) => Number(row.optimizerMs ?? row.optimizer_ms ?? 0)))
+      ),
+      osrmMsAverage: Math.round(
+        metricAverage(routeMetricsRows.map((row) => Number(row.osrmMs ?? row.osrm_ms ?? 0)))
+      ),
+      osrmFailureRate,
+    },
+    benchmark500: benchmark500
+      ? {
+          status: benchmark500Status,
+          targetMs: benchmark500.targetMs,
+          latestRuntimeMs: benchmark500.latestRuntimeMs,
+          latestPeakMemoryMb: benchmark500.latestPeakMemoryMb,
+          latestOsrmLatencyMs: benchmark500.latestOsrmLatencyMs,
+          runs: benchmark500.runs,
+          latestAt: benchmark500.latestAt,
+        }
+      : {
+          status: "missing",
+          targetMs: 30_000,
+          latestRuntimeMs: 0,
+          latestPeakMemoryMb: 0,
+          latestOsrmLatencyMs: 0,
+          runs: 0,
+          latestAt: null,
+        },
+    verdict,
+    issues,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+export async function getGoLive500Dashboard(days = 30) {
+  const safeDays = Math.min(Math.max(Math.round(days), 1), 365);
+  const cutoffDate = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
+  const performanceBenchmarks = await getPerformanceBenchmarkDashboard(safeDays);
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const stopCountsByRoute = new Map<number, number>();
+      for (const route of memory.routes) stopCountsByRoute.set(Number(route.id), 0);
+      for (const stop of memory.stops) {
+        const routeId = Number(stop.routeId);
+        stopCountsByRoute.set(routeId, (stopCountsByRoute.get(routeId) || 0) + 1);
+      }
+      const routeMetricRows = memory.routeMetrics.filter(
+        (metric) => new Date(metric.createdAt).getTime() >= cutoffDate.getTime()
+      );
+      return buildGoLive500Dashboard({
+        routeStopCounts: Array.from(stopCountsByRoute.values()),
+        routeMetricRows,
+        performanceBenchmarks,
+      });
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [routeRows] = await _pool!.query<RowDataPacket[]>(`
+    SELECT r.id, COUNT(s.id) AS stopCount
+    FROM routes r
+    LEFT JOIN stops s ON s.routeId = r.id
+    GROUP BY r.id
+  `);
+  const [metricRows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT
+        stopCount,
+        totalRuntimeMs,
+        optimizationRuntimeMs,
+        auditMs,
+        correctionMs,
+        optimizerMs,
+        osrmMs,
+        osrmCallCount,
+        osrmFailureCount
+      FROM route_metrics
+      WHERE createdAt >= ?
+        AND stopCount > 0
+        AND stopCount <= ?
+    `,
+    [cutoffDate, ENV.maxRouteStops]
+  );
+
+  return buildGoLive500Dashboard({
+    routeStopCounts: routeRows.map((row) => Number(row.stopCount || 0)),
+    routeMetricRows: metricRows,
+    performanceBenchmarks,
+  });
 }
 
 function parseMetricMetadata(metadata: unknown): Record<string, any> {
@@ -2480,6 +3805,18 @@ export async function createRouteMetric(data: CreateRouteMetricInput) {
     osrmFailureCount: Math.round(normalizeMetricNumber(data.osrmFailureCount)),
     osrmTotalMs: Math.round(normalizeMetricNumber(data.osrmTotalMs)),
     osrmAverageMs: Math.round(normalizeMetricNumber(data.osrmAverageMs)),
+    osrmProvider: data.osrmProvider?.slice(0, 64) ?? null,
+    osrmAvailability: data.osrmAvailability ?? "unknown",
+    osrmLatencyMs: Math.round(normalizeMetricNumber(data.osrmLatencyMs)),
+    osrmMatrixCount: Math.round(normalizeMetricNumber(data.osrmMatrixCount)),
+    osrmMatrixSize: Math.round(normalizeMetricNumber(data.osrmMatrixSize)),
+    osrmFailureReason: data.osrmFailureReason?.slice(0, 255) ?? null,
+    matrixCacheHit: Math.round(normalizeMetricNumber(data.matrixCacheHit)),
+    matrixCacheMiss: Math.round(normalizeMetricNumber(data.matrixCacheMiss)),
+    matrixGenerationMs: Math.round(normalizeMetricNumber(data.matrixGenerationMs)),
+    macroClusterCount: Math.round(normalizeMetricNumber(data.macroClusterCount)),
+    microClusterCount: Math.round(normalizeMetricNumber(data.microClusterCount)),
+    largestClusterSize: Math.round(normalizeMetricNumber(data.largestClusterSize)),
     issuesDetectedCount: Math.round(
       normalizeMetricNumber(data.issuesDetectedCount)
     ),
@@ -2489,11 +3826,25 @@ export async function createRouteMetric(data: CreateRouteMetricInput) {
     issuesBlockedCount: Math.round(
       normalizeMetricNumber(data.issuesBlockedCount)
     ),
+    auditCycles: Math.round(normalizeMetricNumber(data.auditCycles)),
+    issuesRemainingCount: Math.round(
+      normalizeMetricNumber(data.issuesRemainingCount)
+    ),
+    batchCorrectionCount: Math.round(
+      normalizeMetricNumber(data.batchCorrectionCount)
+    ),
     auditStatus: data.auditStatus,
     auditQuality: data.auditQuality,
     auditSource: data.auditSource?.slice(0, 128) ?? null,
     routeMode: data.routeMode ?? null,
     localityMode: data.localityMode ?? null,
+    startedAt: data.startedAt ? new Date(data.startedAt) : null,
+    completedAt: data.completedAt ? new Date(data.completedAt) : null,
+    executionDurationMs:
+      data.executionDurationMs == null
+        ? null
+        : Math.round(normalizeMetricNumber(data.executionDurationMs)),
+    executionStatus: data.executionStatus ?? "pending",
     stopCount: Math.round(normalizeMetricNumber(data.stopCount)),
     totalDistanceKm: String(
       roundMetric(normalizeMetricNumber(data.totalDistanceKm), 2)
@@ -2536,6 +3887,75 @@ export async function createRouteMetric(data: CreateRouteMetricInput) {
     .limit(1);
 
   return result[0] ?? null;
+}
+
+export async function getOsrmMatrixCache(matrixHash: string) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const rows = await db
+    .select()
+    .from(osrmMatrixCache)
+    .where(eq(osrmMatrixCache.matrixHash, matrixHash))
+    .limit(1);
+  const cached = rows[0];
+  if (!cached) return null;
+
+  await db
+    .update(osrmMatrixCache)
+    .set({
+      lastUsedAt: new Date(),
+      hitCount: sql`${osrmMatrixCache.hitCount} + 1`,
+    } as any)
+    .where(eq(osrmMatrixCache.id, cached.id));
+
+  return cached;
+}
+
+export async function upsertOsrmMatrixCache(data: {
+  matrixHash: string;
+  clusterHash: string;
+  stopCount: number;
+  durationMatrix: unknown;
+  distanceMatrix: unknown;
+  profile?: string;
+  provider?: string;
+  osrmBaseUrl?: string | null;
+  expiresAt?: Date | null;
+}) {
+  const db = await getDb();
+  if (!db) return null;
+
+  await db
+    .insert(osrmMatrixCache)
+    .values({
+      matrixHash: data.matrixHash,
+      clusterHash: data.clusterHash,
+      stopCount: Math.round(normalizeMetricNumber(data.stopCount)),
+      durationMatrix: data.durationMatrix as any,
+      distanceMatrix: data.distanceMatrix as any,
+      profile: data.profile ?? "driving",
+      provider: data.provider ?? "osrm",
+      osrmBaseUrl: data.osrmBaseUrl ?? null,
+      expiresAt: data.expiresAt ?? null,
+      lastUsedAt: new Date(),
+    } as any)
+    .onDuplicateKeyUpdate({
+      set: {
+        lastUsedAt: new Date(),
+        durationMatrix: data.durationMatrix as any,
+        distanceMatrix: data.distanceMatrix as any,
+        stopCount: Math.round(normalizeMetricNumber(data.stopCount)),
+        osrmBaseUrl: data.osrmBaseUrl ?? null,
+      } as any,
+    });
+
+  const rows = await db
+    .select()
+    .from(osrmMatrixCache)
+    .where(eq(osrmMatrixCache.matrixHash, data.matrixHash))
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 function buildRouteMetricsSummary(metrics: any[], days: number) {
@@ -2596,6 +4016,18 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
   );
   const blockedIssues = metrics.reduce(
     (totalCount, metric) => totalCount + Number(metric.issuesBlockedCount || 0),
+    0
+  );
+  const auditCycles = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.auditCycles || 0),
+    0
+  );
+  const issuesRemaining = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.issuesRemainingCount || 0),
+    0
+  );
+  const batchCorrections = metrics.reduce(
+    (totalCount, metric) => totalCount + Number(metric.batchCorrectionCount || 0),
     0
   );
   const clusterEfficiencyBase = metrics.filter(
@@ -2660,6 +4092,18 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
     (totalMs, metric) => totalMs + Number(metric.osrmTotalMs || 0),
     0
   );
+  const executionStarted = metrics.filter((metric) =>
+    ["started", "completed", "abandoned"].includes(String(metric.executionStatus || ""))
+  ).length;
+  const executionCompleted = metrics.filter(
+    (metric) => metric.executionStatus === "completed"
+  ).length;
+  const executionAbandoned = metrics.filter(
+    (metric) => metric.executionStatus === "abandoned"
+  ).length;
+  const executionDurations = metrics
+    .map((metric) => Number(metric.executionDurationMs || 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
   const modePerformance = routeModes.map((mode) => {
     const modeMetrics = metrics.filter((metric) => metric.routeMode === mode);
     const modeTotal = modeMetrics.length;
@@ -2777,6 +4221,20 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
           Number(metric.issuesBlockedCount || 0) === 0
       ).length,
     },
+    execution: {
+      optimizedCount: total,
+      startedCount: executionStarted,
+      completedCount: executionCompleted,
+      abandonedCount: executionAbandoned,
+      pendingCount: Math.max(0, total - executionStarted),
+      startRate: roundMetric(metricPercent(executionStarted, total)),
+      completionRate: roundMetric(metricPercent(executionCompleted, executionStarted)),
+      abandonmentRate: roundMetric(metricPercent(executionAbandoned, executionStarted)),
+      averageExecutionDurationMs: roundMetric(metricAverage(executionDurations)),
+      p50ExecutionDurationMs: roundMetric(metricPercentile(executionDurations, 50)),
+      p95ExecutionDurationMs: roundMetric(metricPercentile(executionDurations, 95)),
+      p99ExecutionDurationMs: roundMetric(metricPercentile(executionDurations, 99)),
+    },
     issues: {
       regionRevisited: revisits,
       prematureRegionExit: prematureExits,
@@ -2785,6 +4243,18 @@ function buildRouteMetricsSummary(metrics: any[], days: number) {
       detected: detectedIssues,
       corrected: correctedIssues,
       blocked: blockedIssues,
+      remaining: issuesRemaining,
+    },
+    optimizerV2: {
+      averageAuditCycles: roundMetric(metricAverage(
+        metrics.map((metric) => Number(metric.auditCycles || 0))
+      )),
+      totalAuditCycles: auditCycles,
+      batchCorrectionCount: batchCorrections,
+      averageIssuesCorrectedPerBatch: roundMetric(
+        batchCorrections > 0 ? correctedIssues / batchCorrections : 0
+      ),
+      issuesRemaining,
     },
     commercialImpact: {
       estimatedKmSaved: roundMetric(estimatedKmSaved, 1),
@@ -2837,6 +4307,104 @@ export async function getRouteMetricsDashboard(days = 30) {
   return buildRouteMetricsSummary(metrics, safeDays);
 }
 
+function buildExecutionReportPeriod(metrics: any[], blockedEvents: any[], days: number) {
+  const optimized = metrics.length;
+  const started = metrics.filter((metric) =>
+    ["started", "completed", "abandoned"].includes(String(metric.executionStatus || ""))
+  ).length;
+  const completed = metrics.filter((metric) => metric.executionStatus === "completed").length;
+  const abandoned = metrics.filter((metric) => metric.executionStatus === "abandoned").length;
+  const pending = Math.max(0, optimized - started);
+  const durations = metrics
+    .map((metric) => Number(metric.executionDurationMs || 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const blockedByReason = blockedEvents.reduce<Record<string, number>>((acc, event) => {
+    const metadata = parseOperationalMetadata(event.metadata);
+    const reason = String(metadata.reason || metadata.blockReason || "other");
+    acc[reason] = (acc[reason] || 0) + 1;
+    return acc;
+  }, {});
+
+  return {
+    periodDays: days,
+    optimizedRoutes: optimized,
+    startedRoutes: started,
+    completedRoutes: completed,
+    abandonedRoutes: abandoned,
+    pendingAfterOptimization: pending,
+    startBlockedAttempts: blockedEvents.length,
+    startBlockedByReason: blockedByReason,
+    startRate: roundMetric(metricPercent(started, optimized)),
+    completionRate: roundMetric(metricPercent(completed, started)),
+    abandonmentRate: roundMetric(metricPercent(abandoned, started)),
+    averageExecutionDurationMs: roundMetric(metricAverage(durations)),
+    p50ExecutionDurationMs: roundMetric(metricPercentile(durations, 50)),
+    p95ExecutionDurationMs: roundMetric(metricPercentile(durations, 95)),
+    p99ExecutionDurationMs: roundMetric(metricPercentile(durations, 99)),
+    executionStartCount: started,
+    executionCompletionCount: completed,
+    executionAbandonmentCount: abandoned,
+  };
+}
+
+async function getExecutionBlockedEvents(days: number) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return memory.operationalEvents.filter(
+        (event) =>
+          event.type === "route_start_blocked" &&
+          new Date(event.createdAt).getTime() >= cutoff
+      );
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [rows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT id, userId, routeId, type, severity, source, title, message, metadata, createdAt
+      FROM operationalEvents FORCE INDEX (operationalEvents_type_createdAt_idx)
+      WHERE type = 'route_start_blocked'
+        AND createdAt >= ?
+      ORDER BY createdAt DESC
+      LIMIT 2000
+    `,
+    [cutoffDate]
+  );
+  return rows;
+}
+
+export async function getOperationExecutionReport() {
+  const metrics30 = await getRouteMetricsRows(30);
+  const blocked30 = await getExecutionBlockedEvents(30);
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const metrics7 = metrics30.filter(
+    (metric: any) => new Date(metric.createdAt).getTime() >= sevenDaysAgo
+  );
+  const blocked7 = blocked30.filter(
+    (event) => new Date(event.createdAt).getTime() >= sevenDaysAgo
+  );
+  const last7Days = buildExecutionReportPeriod(metrics7, blocked7, 7);
+  const last30Days = buildExecutionReportPeriod(metrics30, blocked30, 30);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    last7Days,
+    last30Days,
+    comparison: {
+      startRate: roundMetric(last7Days.startRate - last30Days.startRate),
+      completionRate: roundMetric(last7Days.completionRate - last30Days.completionRate),
+      abandonmentRate: roundMetric(last7Days.abandonmentRate - last30Days.abandonmentRate),
+      optimizedRoutes: last7Days.optimizedRoutes - last30Days.optimizedRoutes,
+      startedRoutes: last7Days.startedRoutes - last30Days.startedRoutes,
+      completedRoutes: last7Days.completedRoutes - last30Days.completedRoutes,
+      abandonedRoutes: last7Days.abandonedRoutes - last30Days.abandonedRoutes,
+    },
+  };
+}
+
 async function getRouteMetricsRows(days: number) {
   const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const db = await getDb();
@@ -2873,12 +4441,40 @@ async function getOperationalEventsRows(days: number) {
     requireConfiguredDatabase();
   }
 
-  return db
-    .select()
-    .from(operationalEvents)
-    .where(gte(operationalEvents.createdAt, cutoffDate))
-    .orderBy(desc(operationalEvents.createdAt))
-    .limit(5000);
+  const limit = 2000;
+  const [rows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT
+        id,
+        userId,
+        routeId,
+        stopId,
+        type,
+        severity,
+        source,
+        title,
+        message,
+        runtime,
+        url,
+        userAgent,
+        appVersion,
+        metadata,
+        createdAt
+      FROM operationalEvents FORCE INDEX (operationalEvents_type_idx)
+      WHERE createdAt >= ?
+        AND type IN (
+          'geocoding_cache_hit',
+          'geocoding_cache_miss',
+          'geocoding_low_confidence',
+          'geocoding_manual_correction',
+          'geocoding_provider_fallback'
+        )
+      LIMIT ${limit}
+    `,
+    [cutoffDate]
+  );
+
+  return rows;
 }
 
 async function getStopGeocodingRows(days: number) {
@@ -2903,8 +4499,7 @@ async function getStopGeocodingRows(days: number) {
       createdAt: stops.createdAt,
     })
     .from(stops)
-    .where(gte(stops.createdAt, cutoffDate))
-    .limit(20000);
+    .where(gte(stops.createdAt, cutoffDate));
 }
 
 async function getAddressCorrectionRows(days: number) {
@@ -2927,8 +4522,7 @@ async function getAddressCorrectionRows(days: number) {
     .select()
     .from(addressCorrections)
     .where(gte(addressCorrections.createdAt, cutoffDate))
-    .orderBy(desc(addressCorrections.createdAt))
-    .limit(5000);
+    .orderBy(desc(addressCorrections.createdAt));
 }
 
 function buildConfidenceBuckets(scores: number[]) {
@@ -3287,7 +4881,7 @@ function buildGeocodingCacheDashboard(events: any[]) {
   };
 }
 
-export async function getAdminOperationalDashboard() {
+async function buildAdminOperationalDashboardLive() {
   const db = await getDb();
   if (!db) {
     if (await shouldUseMemoryDb()) {
@@ -3314,6 +4908,9 @@ export async function getAdminOperationalDashboard() {
       const geocodingImpact = await getGeocodingImpactDashboard();
       const geocodingExecutiveReport = await getGeocodingExecutiveReport();
       const optimizationJobsSummary = await getOptimizationJobsDashboard(30);
+      const operationExecutionReport = await getOperationExecutionReport();
+      const performanceBenchmarks = await getPerformanceBenchmarkDashboard(30);
+      const goLive500 = await getGoLive500Dashboard(30);
 
       return {
         stats: {
@@ -3342,117 +4939,245 @@ export async function getAdminOperationalDashboard() {
         routeQuality,
         routeMetrics,
         optimizationJobs: optimizationJobsSummary,
+        operationExecutionReport,
+        performanceBenchmarks,
+        goLive500,
         geocodingCache,
         geocodingImpact,
         geocodingExecutiveReport,
         recentUsers,
         recentRoutes,
-        recentEvents: events.slice(0, 12),
+        recentEvents: [],
       };
     }
     requireConfiguredDatabase();
   }
 
-  const [usersTotal] = await db.select({ count: sql<number>`COUNT(*)` }).from(users);
-  const [usersToday] = await db
-    .select({ count: sql<number>`COUNT(*)` })
-    .from(users)
-    .where(sql`DATE(${users.createdAt}) = CURRENT_DATE()`);
-  const [activeUsers7d] = await db
-    .select({ count: sql<number>`COUNT(DISTINCT ${operationalEvents.userId})` })
-    .from(operationalEvents)
-    .where(sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 7 DAY)`);
-  const [routesTotal] = await db.select({ count: sql<number>`COUNT(*)` }).from(routes);
-  const [routesToday] = await db
-    .select({ count: sql<number>`COUNT(*)` })
-    .from(routes)
-    .where(sql`DATE(${routes.createdAt}) = CURRENT_DATE()`);
-  const [events24h] = await db
-    .select({ count: sql<number>`COUNT(*)` })
-    .from(operationalEvents)
-    .where(sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`);
-  const [criticalEvents24h] = await db
-    .select({ count: sql<number>`COUNT(*)` })
-    .from(operationalEvents)
-    .where(
-      and(
-        sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`,
-        sql`${operationalEvents.severity} IN ('error', 'fatal')`
-      )
-    );
-  const [routeWarnings24h] = await db
-    .select({ count: sql<number>`COUNT(*)` })
-    .from(operationalEvents)
-    .where(
-      and(
-        sql`${operationalEvents.createdAt} >= DATE_SUB(NOW(), INTERVAL 1 DAY)`,
-        eq(operationalEvents.severity, "warning"),
-        sql`${operationalEvents.type} LIKE 'route_%'`
-      )
-    );
-
-  const recentOperationalEvents = await getRecentOperationalEvents(200);
-  const routeMetricsSummary = await getRouteMetricsDashboard(30);
+  const [[statsRow], routeMetricsSummary, geocodingImpact, geocodingExecutiveReport, optimizationJobsSummary, operationExecutionReport, performanceBenchmarks, goLive500] =
+    await Promise.all([
+      _pool!.query<RowDataPacket[]>(`
+        SELECT
+          (SELECT COUNT(*) FROM users) AS usersTotal,
+          (SELECT COUNT(*) FROM users WHERE createdAt >= CURRENT_DATE()) AS usersToday,
+          (SELECT COUNT(DISTINCT userId) FROM operationalEvents WHERE createdAt >= DATE_SUB(NOW(), INTERVAL 7 DAY)) AS activeUsers7d,
+          (SELECT COUNT(*) FROM routes) AS routesTotal,
+          (SELECT COUNT(*) FROM routes WHERE createdAt >= CURRENT_DATE()) AS routesToday,
+          (SELECT COUNT(*) FROM operationalEvents WHERE createdAt >= DATE_SUB(NOW(), INTERVAL 1 DAY)) AS events24h,
+          (SELECT COUNT(*) FROM operationalEvents WHERE createdAt >= DATE_SUB(NOW(), INTERVAL 1 DAY) AND severity IN ('error', 'fatal')) AS criticalEvents24h,
+          (SELECT COUNT(*) FROM operationalEvents WHERE createdAt >= DATE_SUB(NOW(), INTERVAL 1 DAY) AND severity = 'warning' AND type LIKE 'route_%') AS routeWarnings24h
+      `).then(([rows]) => rows),
+      getRouteMetricsDashboard(30),
+      getGeocodingImpactDashboard(),
+      getGeocodingExecutiveReport(),
+      getOptimizationJobsDashboard(30),
+      getOperationExecutionReport(),
+      getPerformanceBenchmarkDashboard(30),
+      getGoLive500Dashboard(30),
+    ]);
   const routeQuality = buildRouteQualityDashboardFromMetrics(
     routeMetricsSummary,
-    buildRouteQualityDashboard(recentOperationalEvents)
+    buildRouteQualityDashboard([])
   );
-  const geocodingCache = buildGeocodingCacheDashboard(recentOperationalEvents);
-  const geocodingImpact = await getGeocodingImpactDashboard();
-  const geocodingExecutiveReport = await getGeocodingExecutiveReport();
-  const optimizationJobsSummary = await getOptimizationJobsDashboard(30);
+  const geocodingCache = geocodingImpact.last30Days.cache;
 
-  const recentUsers = await db
-    .select({
-      id: users.id,
-      name: users.name,
-      email: users.email,
-      role: users.role,
-      createdAt: users.createdAt,
-      lastSignedIn: users.lastSignedIn,
-    })
-    .from(users)
-    .orderBy(desc(users.createdAt))
-    .limit(8);
-
-  const recentRoutes = await db
-    .select({
-      id: routes.id,
-      userId: routes.userId,
-      name: routes.name,
-      status: routes.status,
-      totalDistance: routes.totalDistance,
-      totalTime: routes.totalTime,
-      createdAt: routes.createdAt,
-      updatedAt: routes.updatedAt,
-      userName: users.name,
-      userEmail: users.email,
-    })
-    .from(routes)
-    .leftJoin(users, eq(routes.userId, users.id))
-    .orderBy(desc(routes.createdAt))
-    .limit(8);
+  const [recentUsers, recentRoutes] = await Promise.all([
+    db
+      .select({
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        role: users.role,
+        createdAt: users.createdAt,
+        lastSignedIn: users.lastSignedIn,
+      })
+      .from(users)
+      .orderBy(desc(users.createdAt))
+      .limit(8),
+    db
+      .select({
+        id: routes.id,
+        userId: routes.userId,
+        name: routes.name,
+        status: routes.status,
+        totalDistance: routes.totalDistance,
+        totalTime: routes.totalTime,
+        createdAt: routes.createdAt,
+        updatedAt: routes.updatedAt,
+        userName: users.name,
+        userEmail: users.email,
+      })
+      .from(routes)
+      .leftJoin(users, eq(routes.userId, users.id))
+      .orderBy(desc(routes.createdAt))
+      .limit(8),
+  ]);
 
   return {
     stats: {
-      usersTotal: Number(usersTotal?.count || 0),
-      usersToday: Number(usersToday?.count || 0),
-      activeUsers7d: Number(activeUsers7d?.count || 0),
-      routesTotal: Number(routesTotal?.count || 0),
-      routesToday: Number(routesToday?.count || 0),
-      events24h: Number(events24h?.count || 0),
-      criticalEvents24h: Number(criticalEvents24h?.count || 0),
-      routeWarnings24h: Number(routeWarnings24h?.count || 0),
+      usersTotal: Number(statsRow?.usersTotal || 0),
+      usersToday: Number(statsRow?.usersToday || 0),
+      activeUsers7d: Number(statsRow?.activeUsers7d || 0),
+      routesTotal: Number(statsRow?.routesTotal || 0),
+      routesToday: Number(statsRow?.routesToday || 0),
+      events24h: Number(statsRow?.events24h || 0),
+      criticalEvents24h: Number(statsRow?.criticalEvents24h || 0),
+      routeWarnings24h: Number(statsRow?.routeWarnings24h || 0),
     },
     routeQuality,
     routeMetrics: routeMetricsSummary,
     optimizationJobs: optimizationJobsSummary,
+    operationExecutionReport,
+    performanceBenchmarks,
+    goLive500,
     geocodingCache,
     geocodingImpact,
     geocodingExecutiveReport,
     recentUsers,
     recentRoutes,
-    recentEvents: recentOperationalEvents.slice(0, 12),
+    recentEvents: [],
+  };
+}
+
+function parseDashboardPayload(payload: unknown) {
+  if (!payload) return null;
+  if (typeof payload === "string") {
+    try {
+      return JSON.parse(payload);
+    } catch {
+      return null;
+    }
+  }
+  return typeof payload === "object" ? payload as Record<string, any> : null;
+}
+
+export async function refreshAdminDashboardMetrics() {
+  const dashboard = await buildAdminOperationalDashboardLive();
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) return dashboard;
+    requireConfiguredDatabase();
+  }
+
+  await db.insert(adminDashboardMetrics).values({
+    generatedAt: new Date(),
+    usersTotal: dashboard.stats.usersTotal,
+    activeUsers7d: dashboard.stats.activeUsers7d,
+    routesTotal: dashboard.stats.routesTotal,
+    routesToday: dashboard.stats.routesToday,
+    jobsWaiting: dashboard.optimizationJobs.queued,
+    jobsRunning: dashboard.optimizationJobs.running,
+    jobsFailed: dashboard.optimizationJobs.failed,
+    avgOptimizationRuntime: Math.round(
+      dashboard.routeMetrics.averageOptimizationRuntimeMs || 0
+    ),
+    avgGeocodingConfidence: Math.round(
+      dashboard.routeMetrics.geocodingConfidence?.averageScore || 0
+    ),
+    events24h: dashboard.stats.events24h,
+    errors24h: dashboard.stats.criticalEvents24h,
+    warnings24h: dashboard.stats.routeWarnings24h,
+    payload: dashboard,
+  });
+
+  return {
+    ...dashboard,
+    materialized: {
+      generatedAt: new Date().toISOString(),
+      refreshed: true,
+      stale: false,
+    },
+  };
+}
+
+export async function getAdminOperationalDashboard() {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) return buildAdminOperationalDashboardLive();
+    requireConfiguredDatabase();
+  }
+
+  try {
+    const latest = await db
+      .select()
+      .from(adminDashboardMetrics)
+      .orderBy(desc(adminDashboardMetrics.generatedAt))
+      .limit(1);
+    const row = latest[0];
+    const payload = parseDashboardPayload(row?.payload);
+    if (row && payload) {
+      const generatedAt = new Date(row.generatedAt);
+      const ageMs = Date.now() - generatedAt.getTime();
+      return {
+        ...payload,
+        recentEvents: [],
+        materialized: {
+          generatedAt: generatedAt.toISOString(),
+          refreshed: false,
+          stale: ageMs > 5 * 60 * 1000,
+          ageMs,
+        },
+      };
+    }
+  } catch (error) {
+    console.warn("[Admin] Failed to load materialized dashboard:", error);
+  }
+
+  return refreshAdminDashboardMetrics();
+}
+
+export async function getAdminDashboardEvents(page = 1, limit = 30) {
+  const safeLimit = Math.min(Math.max(Math.round(limit), 1), 100);
+  const safePage = Math.max(Math.round(page), 1);
+  const offset = (safePage - 1) * safeLimit;
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const rows = sortByDateDesc(memory.operationalEvents, "createdAt");
+      return {
+        page: safePage,
+        limit: safeLimit,
+        events: rows.slice(offset, offset + safeLimit),
+        hasMore: rows.length > offset + safeLimit,
+      };
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [rows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT
+        e.id,
+        e.userId,
+        e.routeId,
+        e.stopId,
+        e.type,
+        e.severity,
+        e.source,
+        e.title,
+        e.message,
+        e.runtime,
+        e.url,
+        e.userAgent,
+        e.appVersion,
+        e.metadata,
+        e.createdAt,
+        u.name as userName,
+        u.email as userEmail,
+        r.name as routeName
+      FROM operationalEvents e FORCE INDEX (operationalEvents_createdAt_idx)
+      LEFT JOIN users u ON e.userId = u.id
+      LEFT JOIN routes r ON e.routeId = r.id
+      ORDER BY e.createdAt DESC
+      LIMIT ${safeLimit + 1}
+      OFFSET ${offset}
+    `
+  );
+
+  return {
+    page: safePage,
+    limit: safeLimit,
+    events: rows.slice(0, safeLimit),
+    hasMore: rows.length > safeLimit,
   };
 }
 

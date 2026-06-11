@@ -1,4 +1,5 @@
 import DashboardLayout from "@/components/DashboardLayout";
+import { useAuth } from "@/_core/hooks/useAuth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -25,6 +26,12 @@ function severityVariant(severity: string) {
   if (severity === "fatal" || severity === "error") return "destructive";
   if (severity === "warning") return "secondary";
   return "outline";
+}
+
+function readinessVariant(status: string) {
+  if (status === "READY") return "outline";
+  if (status === "NO-GO" || status === "NO_GO") return "destructive";
+  return "secondary";
 }
 
 function StatCard({
@@ -61,6 +68,14 @@ function formatMs(value: unknown) {
   if (!Number.isFinite(number) || number <= 0) return "0 ms";
   if (number >= 1000) return `${(number / 1000).toFixed(1)} s`;
   return `${Math.round(number)} ms`;
+}
+
+function formatHours(value: unknown) {
+  if (value == null) return "-";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  if (number < 1) return `${Math.round(number * 60)} min`;
+  return `${number.toFixed(number >= 10 ? 0 : 1)} h`;
 }
 
 function PerformanceStageRow({
@@ -179,9 +194,28 @@ function MiniBar({
 }
 
 export default function Operations() {
+  const { loading: authLoading, user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const utils = trpc.useUtils();
   const dashboardQuery = trpc.admin.dashboard.useQuery(undefined, {
-    refetchInterval: 30_000,
+    enabled: isAdmin,
+    refetchInterval: isAdmin ? 30_000 : false,
+  });
+  const eventsQuery = trpc.admin.events.useQuery(
+    { page: 1, limit: 30 },
+    {
+      enabled: isAdmin,
+      refetchInterval: isAdmin ? 30_000 : false,
+    }
+  );
+  const refreshDashboardMutation = trpc.admin.refreshDashboard.useMutation({
+    onSuccess: async () => {
+      await utils.admin.dashboard.invalidate();
+      toast.success("Metricas do painel atualizadas.");
+    },
+    onError: (error) => {
+      toast.error(error.message || "Nao foi possivel atualizar as metricas.");
+    },
   });
   const cleanupE2eUsersMutation = trpc.admin.cleanupE2eUsers.useMutation({
     onSuccess: async (result) => {
@@ -198,9 +232,21 @@ export default function Operations() {
   const routeMetrics = (data as any)?.routeMetrics;
   const optimizationJobs = (data as any)?.optimizationJobs;
   const optimizationQueue = (data as any)?.optimizationQueue;
+  const optimizationWorkers = (data as any)?.optimizationWorkers;
+  const queueIntegrity = (data as any)?.queueIntegrity;
+  const disasterReadiness = (data as any)?.disasterReadiness;
+  const performanceBenchmarks = (data as any)?.performanceBenchmarks;
+  const goLive500 = (data as any)?.goLive500;
+  const multiVehicleReadiness = (data as any)?.multiVehicleReadiness;
   const geocodingCache = (data as any)?.geocodingCache;
   const geocodingImpact = (data as any)?.geocodingImpact;
   const executiveReport = (data as any)?.geocodingExecutiveReport;
+  const operationExecutionReport = (data as any)?.operationExecutionReport;
+  const execution30 = operationExecutionReport?.last30Days;
+  const execution7 = operationExecutionReport?.last7Days;
+  const executionComparison = operationExecutionReport?.comparison;
+  const materialized = (data as any)?.materialized;
+  const recentEvents = eventsQuery.data?.events ?? [];
   const impact7 = geocodingImpact?.last7Days;
   const impact30 = geocodingImpact?.last30Days;
   const impactComparison = geocodingImpact?.comparison;
@@ -213,6 +259,33 @@ export default function Operations() {
     ...confidenceItems.map((item) => Number(item.value || 0))
   );
   const providerItems = impact30?.providers ?? [];
+
+  if (authLoading) {
+    return (
+      <DashboardLayout>
+        <div className="space-y-4">
+          <Skeleton className="h-32 w-full rounded-lg" />
+          <Skeleton className="h-32 w-full rounded-lg" />
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <DashboardLayout>
+        <Card>
+          <CardHeader>
+            <CardTitle>Acesso restrito ao administrador</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            Esta area mostra metricas operacionais e eventos internos do
+            sistema. Entre com uma conta administradora para acessar.
+          </CardContent>
+        </Card>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>
@@ -227,6 +300,12 @@ export default function Operations() {
           <p className="text-sm text-muted-foreground">
             Controle de usuários, rotas, erros e sinais de otimização ruim.
           </p>
+          {materialized?.generatedAt ? (
+            <p className="text-xs text-muted-foreground">
+              Ultima atualizacao das metricas: {formatDate(materialized.generatedAt)}
+              {materialized.stale ? " · snapshot aguardando atualizacao" : ""}
+            </p>
+          ) : null}
         </div>
 
         {dashboardQuery.isLoading ? (
@@ -235,6 +314,27 @@ export default function Operations() {
               <Skeleton key={index} className="h-28 rounded-xl" />
             ))}
           </div>
+        ) : dashboardQuery.isError ? (
+          <Card className="border-destructive/40 bg-destructive/5">
+            <CardContent className="py-4">
+              <p className="text-sm font-medium text-destructive">
+                Falha ao carregar metricas administrativas.
+              </p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {dashboardQuery.error?.message ||
+                  "Tente atualizar o painel. Os valores nao serao substituidos por zero."}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                className="mt-3"
+                disabled={refreshDashboardMutation.isPending}
+                onClick={() => refreshDashboardMutation.mutate()}
+              >
+                {refreshDashboardMutation.isPending ? "Atualizando..." : "Atualizar metricas"}
+              </Button>
+            </CardContent>
+          </Card>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
             <StatCard title="Usuários cadastrados" value={stats?.usersTotal ?? 0} icon={Users} />
@@ -245,6 +345,137 @@ export default function Operations() {
           </div>
         )}
 
+        {!dashboardQuery.isLoading && operationExecutionReport ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Route className="h-5 w-5 text-primary" />
+                Execução operacional
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+                <StatCard
+                  title="Rotas otimizadas"
+                  value={execution30?.optimizedRoutes ?? 0}
+                  icon={Route}
+                />
+                <StatCard
+                  title="Rotas iniciadas"
+                  value={execution30?.startedRoutes ?? 0}
+                  icon={Activity}
+                />
+                <StatCard
+                  title="Rotas concluídas"
+                  value={execution30?.completedRoutes ?? 0}
+                  icon={ShieldCheck}
+                />
+                <StatCard
+                  title="Rotas abandonadas"
+                  value={execution30?.abandonedRoutes ?? 0}
+                  icon={AlertTriangle}
+                />
+                <StatCard
+                  title="Taxa de início"
+                  value={Math.round(execution30?.startRate ?? 0)}
+                  suffix="%"
+                  icon={Gauge}
+                />
+                <StatCard
+                  title="Taxa de conclusão"
+                  value={Math.round(execution30?.completionRate ?? 0)}
+                  suffix="%"
+                  icon={Gauge}
+                />
+              </div>
+
+              <div className="rounded-lg border border-border/80 p-4">
+                <div className="mb-2 grid grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr] gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <span>Métrica</span>
+                  <span>7 dias</span>
+                  <span>30 dias</span>
+                  <span>Variação</span>
+                </div>
+                <ImpactMetricRow
+                  label="Rotas otimizadas"
+                  value7={execution7?.optimizedRoutes}
+                  value30={execution30?.optimizedRoutes}
+                  variation={executionComparison?.optimizedRoutes}
+                />
+                <ImpactMetricRow
+                  label="Rotas iniciadas"
+                  value7={execution7?.startedRoutes}
+                  value30={execution30?.startedRoutes}
+                  variation={executionComparison?.startedRoutes}
+                />
+                <ImpactMetricRow
+                  label="Rotas concluídas"
+                  value7={execution7?.completedRoutes}
+                  value30={execution30?.completedRoutes}
+                  variation={executionComparison?.completedRoutes}
+                />
+                <ImpactMetricRow
+                  label="Taxa de início"
+                  value7={execution7?.startRate}
+                  value30={execution30?.startRate}
+                  variation={executionComparison?.startRate}
+                  suffix="%"
+                />
+                <ImpactMetricRow
+                  label="Taxa de conclusão"
+                  value7={execution7?.completionRate}
+                  value30={execution30?.completionRate}
+                  variation={executionComparison?.completionRate}
+                  suffix="%"
+                />
+                <ImpactMetricRow
+                  label="Taxa de abandono"
+                  value7={execution7?.abandonmentRate}
+                  value30={execution30?.abandonmentRate}
+                  variation={executionComparison?.abandonmentRate}
+                  suffix="%"
+                />
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="rounded-lg border border-border/80 p-4">
+                  <p className="text-sm font-medium text-muted-foreground">
+                    Bloqueios de início
+                  </p>
+                  <p className="mt-2 text-3xl font-semibold">
+                    {execution30?.startBlockedAttempts ?? 0}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Tentativas bloqueadas em 30 dias
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border/80 p-4">
+                  <p className="text-sm font-medium text-muted-foreground">
+                    Tempo médio de execução
+                  </p>
+                  <p className="mt-2 text-3xl font-semibold">
+                    {formatMs(execution30?.averageExecutionDurationMs)}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Entre início e conclusão
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border/80 p-4">
+                  <p className="text-sm font-medium text-muted-foreground">
+                    Pendentes após otimização
+                  </p>
+                  <p className="mt-2 text-3xl font-semibold">
+                    {execution30?.pendingAfterOptimization ?? 0}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Otimizadas sem início registrado
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
         {!dashboardQuery.isLoading && routeMetrics?.performance ? (
           <Card>
             <CardHeader>
@@ -254,6 +485,78 @@ export default function Operations() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-5">
+              {multiVehicleReadiness ? (
+                <div
+                  className={`rounded-lg border p-4 ${
+                    multiVehicleReadiness.status === "READY"
+                      ? "border-emerald-200 bg-emerald-50/50"
+                      : multiVehicleReadiness.status === "NO-GO"
+                        ? "border-destructive/40 bg-destructive/5"
+                        : "border-amber-300 bg-amber-50/60"
+                  }`}
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-medium">
+                        Backlog Enterprise: Multi-Vehicle
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Fora do Go Live 500. Usado apenas como portao futuro para frota,
+                        VRP e operacoes acima do produto comercial atual.
+                      </p>
+                    </div>
+                    <Badge variant={readinessVariant(multiVehicleReadiness.status)}>
+                      {multiVehicleReadiness.status}
+                    </Badge>
+                  </div>
+
+                  <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                    {Object.entries(multiVehicleReadiness.items ?? {}).map(
+                      ([key, item]: [string, any]) => (
+                        <div
+                          key={key}
+                          className="rounded-lg border border-border/70 bg-background/80 p-3 text-sm"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-medium">
+                              {key
+                                .replace(/([A-Z])/g, " $1")
+                                .replace(/^./, (letter) => letter.toUpperCase())}
+                            </p>
+                            <Badge variant={readinessVariant(item.status)}>
+                              {item.status}
+                            </Badge>
+                          </div>
+                          {Array.isArray(item.blockers) && item.blockers.length > 0 ? (
+                            <p className="mt-2 text-xs text-muted-foreground">
+                              {item.blockers[0]}
+                            </p>
+                          ) : (
+                            <p className="mt-2 text-xs text-muted-foreground">
+                              Evidencia comprovada.
+                            </p>
+                          )}
+                        </div>
+                      )
+                    )}
+                  </div>
+
+                  {Array.isArray(multiVehicleReadiness.multiVehicle?.blockers) &&
+                  multiVehicleReadiness.multiVehicle.blockers.length > 0 ? (
+                    <div className="mt-4 rounded-lg border border-border/70 bg-background/80 p-3 text-sm">
+                      <p className="font-medium">Bloqueios principais</p>
+                      <ul className="mt-2 space-y-1 text-muted-foreground">
+                        {multiVehicleReadiness.multiVehicle.blockers
+                          .slice(0, 6)
+                          .map((blocker: string) => (
+                            <li key={blocker}>- {blocker}</li>
+                          ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
                 <StatCard
                   title="Jobs em fila"
@@ -267,7 +570,7 @@ export default function Operations() {
                 />
                 <StatCard
                   title="Workers"
-                  value={optimizationQueue?.workerCount ?? 0}
+                  value={optimizationWorkers?.workerCount ?? optimizationQueue?.workerCount ?? 0}
                   icon={ShieldCheck}
                 />
                 <StatCard
@@ -287,6 +590,474 @@ export default function Operations() {
                   icon={Activity}
                 />
               </div>
+
+              {optimizationWorkers ? (
+                <div
+                  className={`rounded-lg border p-4 ${
+                    optimizationWorkers.alert
+                      ? "border-amber-300 bg-amber-50/60"
+                      : "border-border/80"
+                  }`}
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-medium">
+                        Workers online: {optimizationWorkers.workerCount ?? 0}/
+                        {optimizationWorkers.minimumWorkerCount ?? 2}
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        {optimizationWorkers.alert?.message ??
+                          "Redundancia operacional dentro da meta."}
+                      </p>
+                    </div>
+                    <Badge
+                      variant={optimizationWorkers.alert ? "secondary" : "outline"}
+                    >
+                      {optimizationWorkers.status === "healthy" ? "Saudavel" : "Atencao"}
+                    </Badge>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-3">
+                    <div className="rounded-lg border border-border/70 bg-background/80 p-3">
+                      <p className="text-xs font-medium uppercase text-muted-foreground">
+                        Jobs processados
+                      </p>
+                      <p className="mt-1 text-2xl font-semibold">
+                        {optimizationWorkers.workerJobsProcessed ?? 0}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-background/80 p-3">
+                      <p className="text-xs font-medium uppercase text-muted-foreground">
+                        Jobs falhos
+                      </p>
+                      <p className="mt-1 text-2xl font-semibold">
+                        {optimizationWorkers.workerJobsFailed ?? 0}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-background/80 p-3">
+                      <p className="text-xs font-medium uppercase text-muted-foreground">
+                        Runtime medio
+                      </p>
+                      <p className="mt-1 text-2xl font-semibold">
+                        {formatMs(optimizationWorkers.workerAverageRuntime)}
+                      </p>
+                    </div>
+                  </div>
+
+                  {Array.isArray(optimizationWorkers.workers) &&
+                  optimizationWorkers.workers.length > 0 ? (
+                    <div className="mt-4 space-y-2">
+                      {optimizationWorkers.workers.map((worker: any) => (
+                        <div
+                          key={worker.workerId}
+                          className="grid gap-2 rounded-lg border border-border/70 bg-background/80 p-3 text-sm md:grid-cols-[1.4fr_1fr_0.8fr_0.8fr_0.8fr]"
+                        >
+                          <span className="font-medium">{worker.workerId}</span>
+                          <span className="text-muted-foreground">
+                            {worker.hostname ?? "host desconhecido"}
+                          </span>
+                          <span>OK</span>
+                          <span>{worker.jobsProcessed ?? 0} concluido(s)</span>
+                          <span>{formatDate(worker.lastHeartbeat)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-4 text-sm text-muted-foreground">
+                      Nenhum heartbeat de worker online encontrado.
+                    </p>
+                  )}
+                </div>
+              ) : null}
+
+              {queueIntegrity ? (
+                <div
+                  className={`rounded-lg border p-4 ${
+                    queueIntegrity.status === "healthy"
+                      ? "border-emerald-200 bg-emerald-50/50"
+                      : "border-amber-300 bg-amber-50/60"
+                  }`}
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-medium">Integridade da fila</p>
+                      <p className="text-sm text-muted-foreground">
+                        Meta: 0 jobs duplicados, 0 jobs perdidos e recuperacao apos falha.
+                      </p>
+                    </div>
+                    <Badge
+                      variant={queueIntegrity.status === "healthy" ? "outline" : "secondary"}
+                    >
+                      {queueIntegrity.status === "healthy" ? "Saudavel" : "Atencao"}
+                    </Badge>
+                  </div>
+                  <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                    <StatCard
+                      title="Jobs duplicados"
+                      value={queueIntegrity.duplicateJobs ?? 0}
+                      icon={AlertTriangle}
+                    />
+                    <StatCard
+                      title="Jobs travados"
+                      value={queueIntegrity.stalledJobs ?? queueIntegrity.stalledCount ?? 0}
+                      icon={AlertTriangle}
+                    />
+                    <StatCard
+                      title="Jobs recuperados"
+                      value={queueIntegrity.stalledRecoveredCount ?? queueIntegrity.recoveredJobs ?? 0}
+                      icon={ShieldCheck}
+                    />
+                    <StatCard
+                      title="Falhas recuperacao"
+                      value={queueIntegrity.failedRecoveries ?? 0}
+                      icon={AlertTriangle}
+                    />
+                    <StatCard
+                      title="Redis reconexoes"
+                      value={queueIntegrity.redisReconnectCount ?? 0}
+                      icon={Activity}
+                    />
+                    <StatCard
+                      title="Em execucao longa"
+                      value={queueIntegrity.runningStalledJobs ?? 0}
+                      icon={Gauge}
+                    />
+                  </div>
+                  {Array.isArray(queueIntegrity.longRunningJobs) &&
+                  queueIntegrity.longRunningJobs.length > 0 ? (
+                    <div className="mt-4 space-y-2">
+                      {queueIntegrity.longRunningJobs.slice(0, 5).map((job: any) => (
+                        <div
+                          key={job.jobId}
+                          className="rounded-lg border border-amber-200 bg-background/80 p-3 text-sm"
+                        >
+                          <p className="font-medium">
+                            Job {job.jobId} acima de {job.thresholdMultiplier}x o runtime medio
+                          </p>
+                          <p className="text-muted-foreground">
+                            Em execucao ha {formatMs(job.runningMs)}. Worker:{" "}
+                            {job.workerId ?? "desconhecido"}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Ultima checagem: {formatDate(queueIntegrity.lastIntegrityCheck)}
+                  </p>
+                </div>
+              ) : null}
+
+              {disasterReadiness ? (
+                <div
+                  className={`rounded-lg border p-4 ${
+                    disasterReadiness.status === "healthy"
+                      ? "border-emerald-200 bg-emerald-50/50"
+                      : disasterReadiness.status === "critical"
+                        ? "border-destructive/40 bg-destructive/5"
+                        : "border-amber-300 bg-amber-50/60"
+                  }`}
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-medium">Disaster recovery</p>
+                      <p className="text-sm text-muted-foreground">
+                        Meta: RPO &lt; {disasterReadiness.rpoTargetHours ?? 24}h e RTO &lt;{" "}
+                        {disasterReadiness.rtoTargetHours ?? 4}h.
+                      </p>
+                    </div>
+                    <Badge
+                      variant={
+                        disasterReadiness.status === "critical"
+                          ? "destructive"
+                          : disasterReadiness.status === "healthy"
+                            ? "outline"
+                            : "secondary"
+                      }
+                    >
+                      {disasterReadiness.status === "healthy"
+                        ? "Saudavel"
+                        : disasterReadiness.status === "critical"
+                          ? "Critico"
+                          : "Atencao"}
+                    </Badge>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-4">
+                    <div className="rounded-lg border border-border/70 bg-background/80 p-3">
+                      <p className="text-xs font-medium uppercase text-muted-foreground">
+                        Ultimo backup
+                      </p>
+                      <p className="mt-1 text-sm font-semibold">
+                        {formatDate(disasterReadiness.lastBackupAt)}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Idade: {formatHours(disasterReadiness.backupAgeHours)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-background/80 p-3">
+                      <p className="text-xs font-medium uppercase text-muted-foreground">
+                        Restore test
+                      </p>
+                      <p className="mt-1 text-sm font-semibold">
+                        {disasterReadiness.restoreTestPassed ? "Aprovado" : "Sem evidencia"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatDate(disasterReadiness.restoreTestAt)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-background/80 p-3">
+                      <p className="text-xs font-medium uppercase text-muted-foreground">
+                        Tabelas criticas
+                      </p>
+                      <p className="mt-1 text-2xl font-semibold">
+                        {Array.isArray(disasterReadiness.criticalTables)
+                          ? disasterReadiness.criticalTables.length
+                          : 0}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {Array.isArray(disasterReadiness.criticalTables)
+                          ? `${disasterReadiness.criticalTables.filter((table: any) => table.status !== "ok").length} com falha`
+                          : "Nao verificado"}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-background/80 p-3">
+                      <p className="text-xs font-medium uppercase text-muted-foreground">
+                        Alertas DR
+                      </p>
+                      <p className="mt-1 text-2xl font-semibold">
+                        {Array.isArray(disasterReadiness.alerts)
+                          ? disasterReadiness.alerts.length
+                          : 0}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Checado em {formatDate(disasterReadiness.checkedAt)}
+                      </p>
+                    </div>
+                  </div>
+
+                  {Array.isArray(disasterReadiness.alerts) &&
+                  disasterReadiness.alerts.length > 0 ? (
+                    <div className="mt-4 space-y-2">
+                      {disasterReadiness.alerts.slice(0, 4).map((alert: any) => (
+                        <div
+                          key={`${alert.type}-${alert.title}`}
+                          className="rounded-lg border border-border/70 bg-background/80 p-3 text-sm"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-medium">{alert.title}</p>
+                            <Badge variant={severityVariant(alert.severity)}>
+                              {alert.severityLabel ?? alert.severity}
+                            </Badge>
+                          </div>
+                          <p className="mt-1 text-muted-foreground">{alert.message}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {goLive500 ? (
+                <div
+                  className={`rounded-lg border p-4 ${
+                    goLive500.verdict === "READY"
+                      ? "border-emerald-200 bg-emerald-50/50"
+                      : goLive500.verdict === "NO_GO"
+                        ? "border-destructive/40 bg-destructive/5"
+                        : "border-amber-300 bg-amber-50/60"
+                  }`}
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-medium">Go Live 500</p>
+                      <p className="text-sm text-muted-foreground">
+                        Capacidade comercial limitada a 500 paradas, 20 usuarios simultaneos e 5 otimizacoes simultaneas.
+                      </p>
+                    </div>
+                    <Badge variant={readinessVariant(goLive500.verdict)}>
+                      {goLive500.verdict === "NO_GO" ? "NO-GO" : goLive500.verdict}
+                    </Badge>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-4">
+                    <StatCard
+                      title="Maior rota"
+                      value={goLive500.routes?.largestRouteStops ?? 0}
+                      suffix={`/${goLive500.maxRouteStops ?? 500}`}
+                      icon={Route}
+                    />
+                    <StatCard
+                      title="Acima do limite"
+                      value={goLive500.routes?.routesAbove500 ?? 0}
+                      icon={AlertTriangle}
+                    />
+                    <StatCard
+                      title="P95 ate 500"
+                      value={formatMs(goLive500.runtime?.p95Ms)}
+                      icon={Gauge}
+                    />
+                    <StatCard
+                      title="Benchmark 500"
+                      value={
+                        goLive500.benchmark500?.status === "ready"
+                          ? "OK"
+                          : goLive500.benchmark500?.status === "no-go"
+                            ? "NO-GO"
+                            : "Pendente"
+                      }
+                      icon={ShieldCheck}
+                    />
+                  </div>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    <div className="rounded-lg border border-border/70 bg-background/80 p-3">
+                      <MiniBar
+                        label="Utilizacao do limite"
+                        value={Math.round(goLive500.routes?.utilizationPercent ?? 0)}
+                        max={100}
+                      />
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+                        <span>Rotas totais: {goLive500.routes?.total ?? 0}</span>
+                        <span>Media: {goLive500.routes?.averageStops ?? 0} paradas</span>
+                        <span>&gt;250: {goLive500.routes?.routesAbove250 ?? 0}</span>
+                        <span>Perto do limite: {goLive500.routes?.routesNearLimit ?? 0}</span>
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-background/80 p-3 text-sm">
+                      <div className="grid grid-cols-2 gap-2">
+                        <span className="text-muted-foreground">Media</span>
+                        <span>{formatMs(goLive500.runtime?.averageMs)}</span>
+                        <span className="text-muted-foreground">P50</span>
+                        <span>{formatMs(goLive500.runtime?.p50Ms)}</span>
+                        <span className="text-muted-foreground">P95</span>
+                        <span>{formatMs(goLive500.runtime?.p95Ms)}</span>
+                        <span className="text-muted-foreground">P99</span>
+                        <span>{formatMs(goLive500.runtime?.p99Ms)}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {Array.isArray(goLive500.issues) && goLive500.issues.length > 0 ? (
+                    <div className="mt-4 space-y-2">
+                      {goLive500.issues.map((issue: any, index: number) => (
+                        <div
+                          key={`${issue.message}-${index}`}
+                          className="rounded-lg border border-border/70 bg-background/80 p-3 text-sm"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-medium">{issue.message}</p>
+                            <Badge variant={issue.severity === "critical" ? "destructive" : "secondary"}>
+                              {issue.severity === "critical" ? "Critico" : "Atencao"}
+                            </Badge>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {performanceBenchmarks ? (
+                <div
+                  className={`rounded-lg border p-4 ${
+                    performanceBenchmarks.status === "ready"
+                      ? "border-emerald-200 bg-emerald-50/50"
+                      : performanceBenchmarks.status === "no-go"
+                        ? "border-destructive/40 bg-destructive/5"
+                        : "border-amber-300 bg-amber-50/60"
+                  }`}
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-medium">Performance historica</p>
+                      <p className="text-sm text-muted-foreground">
+                        Benchmark automatizado para 250, 500, 1000 e 2000 paradas.
+                      </p>
+                    </div>
+                    <Badge
+                      variant={
+                        performanceBenchmarks.status === "ready"
+                          ? "outline"
+                          : performanceBenchmarks.status === "no-go"
+                            ? "destructive"
+                            : "secondary"
+                      }
+                    >
+                      {performanceBenchmarks.status === "ready"
+                        ? "READY"
+                        : performanceBenchmarks.status === "no-go"
+                          ? "NO-GO"
+                          : performanceBenchmarks.status === "unavailable"
+                            ? "Indisponivel"
+                            : "PARTIAL"}
+                    </Badge>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-4">
+                    <StatCard
+                      title="Execucoes"
+                      value={performanceBenchmarks.totalRuns ?? 0}
+                      icon={Gauge}
+                    />
+                    <StatCard
+                      title="Sucesso"
+                      value={Math.round(performanceBenchmarks.successRate ?? 0)}
+                      suffix="%"
+                      icon={ShieldCheck}
+                    />
+                    <StatCard
+                      title="Dentro da meta"
+                      value={Math.round(performanceBenchmarks.criteriaMetRate ?? 0)}
+                      suffix="%"
+                      icon={Activity}
+                    />
+                    <StatCard
+                      title="Falha OSRM"
+                      value={Math.round(performanceBenchmarks.osrmFailureRate ?? 0)}
+                      suffix="%"
+                      icon={AlertTriangle}
+                    />
+                  </div>
+
+                  {performanceBenchmarks.tableAvailable === false ? (
+                    <p className="mt-3 text-sm text-muted-foreground">
+                      Tabela de benchmarks ainda indisponivel. Aplique a migration antes de
+                      executar a suite oficial.
+                    </p>
+                  ) : null}
+
+                  <div className="mt-4 grid gap-2">
+                    {(performanceBenchmarks.targets ?? []).map((target: any) => (
+                      <div
+                        key={target.stopCount}
+                        className="grid gap-2 rounded-lg border border-border/70 bg-background/80 p-3 text-sm md:grid-cols-[0.8fr_1fr_1fr_1fr_1fr_0.8fr]"
+                      >
+                        <span className="font-medium">{target.stopCount} paradas</span>
+                        <span>Meta: {formatMs(target.targetMs)}</span>
+                        <span>Ultimo: {formatMs(target.latestRuntimeMs)}</span>
+                        <span>P95: {formatMs(target.p95RuntimeMs)}</span>
+                        <span>Pico: {target.latestPeakMemoryMb ?? 0} MB</span>
+                        <Badge
+                          variant={
+                            target.status === "ready"
+                              ? "outline"
+                              : target.status === "no-go"
+                                ? "destructive"
+                                : "secondary"
+                          }
+                        >
+                          {target.status === "ready"
+                            ? "READY"
+                            : target.status === "no-go"
+                              ? "NO-GO"
+                              : "Sem dado"}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
                 <StatCard
@@ -805,12 +1576,22 @@ export default function Operations() {
               <CardTitle>Eventos recentes</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {dashboardQuery.isLoading ? (
+              {eventsQuery.isLoading ? (
                 Array.from({ length: 6 }).map((_, index) => (
                   <Skeleton key={index} className="h-16 rounded-lg" />
                 ))
-              ) : data?.recentEvents?.length ? (
-                data.recentEvents.map((event: any) => (
+              ) : eventsQuery.isError ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+                  <p className="text-sm font-medium text-destructive">
+                    Falha ao carregar eventos.
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {eventsQuery.error?.message ||
+                      "Eventos ficam em consulta separada para manter o painel rapido."}
+                  </p>
+                </div>
+              ) : recentEvents.length ? (
+                recentEvents.map((event: any) => (
                   <div
                     key={event.id}
                     className="rounded-lg border border-border/80 bg-white p-3"

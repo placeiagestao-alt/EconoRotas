@@ -28,7 +28,9 @@ export const users = mysqlTable("users", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
-});
+}, (table) => ({
+  createdAtIdx: index("users_createdAt_idx").on(table.createdAt),
+}));
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
@@ -55,6 +57,7 @@ export const routes = mysqlTable("routes", {
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => ({
   userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("cascade"),
+  createdAtIdx: index("routes_createdAt_idx").on(table.createdAt),
 }));
 
 export type Route = typeof routes.$inferSelect;
@@ -80,10 +83,23 @@ export const stops = mysqlTable("stops", {
   ]).default("city_match").notNull(),
   geocodingSuspect: boolean("geocodingSuspect").default(true).notNull(),
   sequence: int("sequence").notNull(), // order in the optimized route
+  sourceProvider: mysqlEnum("sourceProvider", [
+    "manual",
+    "shopee",
+    "imile",
+    "mercado_livre",
+    "amazon",
+    "correios",
+    "generic",
+  ]).default("generic").notNull(),
+  originalStop: int("originalStop"),
+  isUnsequencedStop: boolean("isUnsequencedStop").default(false).notNull(),
+  metadata: json("metadata"),
   notes: text("notes"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => ({
   routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("cascade"),
+  createdAtIdx: index("stops_createdAt_idx").on(table.createdAt),
 }));
 
 export type Stop = typeof stops.$inferSelect;
@@ -214,6 +230,9 @@ export const operationalEvents = mysqlTable("operationalEvents", {
   createdAtIdx: index("operationalEvents_createdAt_idx").on(table.createdAt),
   severityIdx: index("operationalEvents_severity_idx").on(table.severity),
   typeIdx: index("operationalEvents_type_idx").on(table.type),
+  createdAtUserIdIdx: index("operationalEvents_createdAt_userId_idx").on(table.createdAt, table.userId),
+  severityCreatedAtIdx: index("operationalEvents_severity_createdAt_idx").on(table.severity, table.createdAt),
+  typeCreatedAtIdx: index("operationalEvents_type_createdAt_idx").on(table.type, table.createdAt),
 }));
 
 export type OperationalEvent = typeof operationalEvents.$inferSelect;
@@ -253,14 +272,33 @@ export const routeMetrics = mysqlTable("route_metrics", {
   osrmFailureCount: int("osrmFailureCount").default(0).notNull(),
   osrmTotalMs: int("osrmTotalMs").default(0).notNull(),
   osrmAverageMs: int("osrmAverageMs").default(0).notNull(),
+  osrmProvider: varchar("osrmProvider", { length: 64 }),
+  osrmAvailability: mysqlEnum("osrmAvailability", ["unknown", "available", "degraded", "unavailable"]).default("unknown").notNull(),
+  osrmLatencyMs: int("osrmLatencyMs").default(0).notNull(),
+  osrmMatrixCount: int("osrmMatrixCount").default(0).notNull(),
+  osrmMatrixSize: int("osrmMatrixSize").default(0).notNull(),
+  osrmFailureReason: varchar("osrmFailureReason", { length: 255 }),
+  matrixCacheHit: int("matrixCacheHit").default(0).notNull(),
+  matrixCacheMiss: int("matrixCacheMiss").default(0).notNull(),
+  matrixGenerationMs: int("matrixGenerationMs").default(0).notNull(),
+  macroClusterCount: int("macroClusterCount").default(0).notNull(),
+  microClusterCount: int("microClusterCount").default(0).notNull(),
+  largestClusterSize: int("largestClusterSize").default(0).notNull(),
   issuesDetectedCount: int("issuesDetectedCount").default(0).notNull(),
   issuesCorrectedCount: int("issuesCorrectedCount").default(0).notNull(),
   issuesBlockedCount: int("issuesBlockedCount").default(0).notNull(),
+  auditCycles: int("auditCycles").default(0).notNull(),
+  issuesRemainingCount: int("issuesRemainingCount").default(0).notNull(),
+  batchCorrectionCount: int("batchCorrectionCount").default(0).notNull(),
   auditStatus: mysqlEnum("auditStatus", ["approved", "attention", "critical"]).notNull(),
   auditQuality: mysqlEnum("auditQuality", ["excellent", "good", "attention", "poor", "blocked"]).notNull(),
   auditSource: varchar("auditSource", { length: 128 }),
   routeMode: mysqlEnum("routeMode", ["shortest_distance", "shortest_time", "balanced"]),
   localityMode: mysqlEnum("localityMode", ["balanced", "local", "strict"]),
+  startedAt: timestamp("startedAt"),
+  completedAt: timestamp("completedAt"),
+  executionDurationMs: int("executionDurationMs"),
+  executionStatus: mysqlEnum("executionStatus", ["pending", "started", "completed", "abandoned"]).default("pending").notNull(),
   stopCount: int("stopCount").default(0).notNull(),
   totalDistanceKm: decimal("totalDistanceKm", { precision: 10, scale: 2 }).default("0").notNull(),
   totalTimeMinutes: int("totalTimeMinutes").default(0).notNull(),
@@ -273,10 +311,36 @@ export const routeMetrics = mysqlTable("route_metrics", {
   routeIdIdx: index("route_metrics_routeId_idx").on(table.routeId),
   auditStatusIdx: index("route_metrics_auditStatus_idx").on(table.auditStatus),
   osrmFallbackIdx: index("route_metrics_osrmFallback_idx").on(table.osrmFallback),
+  executionStatusIdx: index("route_metrics_executionStatus_idx").on(table.executionStatus),
 }));
 
 export type RouteMetric = typeof routeMetrics.$inferSelect;
 export type InsertRouteMetric = typeof routeMetrics.$inferInsert;
+
+export const osrmMatrixCache = mysqlTable("osrm_matrix_cache", {
+  id: int("id").autoincrement().primaryKey(),
+  matrixHash: varchar("matrixHash", { length: 128 }).notNull(),
+  clusterHash: varchar("clusterHash", { length: 128 }).notNull(),
+  stopCount: int("stopCount").notNull(),
+  durationMatrix: json("durationMatrix").notNull(),
+  distanceMatrix: json("distanceMatrix").notNull(),
+  profile: varchar("profile", { length: 32 }).default("driving").notNull(),
+  provider: varchar("provider", { length: 64 }).default("osrm").notNull(),
+  osrmBaseUrl: varchar("osrmBaseUrl", { length: 500 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  lastUsedAt: timestamp("lastUsedAt").defaultNow().notNull(),
+  expiresAt: timestamp("expiresAt"),
+  hitCount: int("hitCount").default(0).notNull(),
+}, (table) => ({
+  matrixHashIdx: uniqueIndex("osrm_matrix_cache_matrixHash_idx").on(table.matrixHash),
+  clusterHashIdx: index("osrm_matrix_cache_clusterHash_idx").on(table.clusterHash),
+  stopCountIdx: index("osrm_matrix_cache_stopCount_idx").on(table.stopCount),
+  lastUsedAtIdx: index("osrm_matrix_cache_lastUsedAt_idx").on(table.lastUsedAt),
+  expiresAtIdx: index("osrm_matrix_cache_expiresAt_idx").on(table.expiresAt),
+}));
+
+export type OsrmMatrixCache = typeof osrmMatrixCache.$inferSelect;
+export type InsertOsrmMatrixCache = typeof osrmMatrixCache.$inferInsert;
 
 /**
  * Optimization jobs - async processing control for large routes.
@@ -297,6 +361,13 @@ export const optimizationJobs = mysqlTable("optimization_jobs", {
   finishedAt: timestamp("finished_at"),
   runtimeMs: int("runtime_ms"),
   queueWaitMs: int("queue_wait_ms"),
+  executionMs: int("execution_ms"),
+  workerMemoryMb: int("worker_memory_mb"),
+  peakMemoryMb: int("peak_memory_mb"),
+  workerId: varchar("worker_id", { length: 191 }),
+  workerHostname: varchar("worker_hostname", { length: 191 }),
+  workerStartedAt: timestamp("worker_started_at"),
+  workerFinishedAt: timestamp("worker_finished_at"),
   attemptCount: int("attempt_count").default(0).notNull(),
   maxAttempts: int("max_attempts").default(3).notNull(),
   providerJobId: varchar("provider_job_id", { length: 191 }),
@@ -309,10 +380,64 @@ export const optimizationJobs = mysqlTable("optimization_jobs", {
   routeIdIdx: index("optimization_jobs_route_id_idx").on(table.routeId),
   statusIdx: index("optimization_jobs_status_idx").on(table.status),
   createdAtIdx: index("optimization_jobs_created_at_idx").on(table.createdAt),
+  workerIdIdx: index("optimization_jobs_worker_id_idx").on(table.workerId),
 }));
 
 export type OptimizationJob = typeof optimizationJobs.$inferSelect;
 export type InsertOptimizationJob = typeof optimizationJobs.$inferInsert;
+
+export const performanceBenchmarks = mysqlTable("performance_benchmarks", {
+  id: int("id").autoincrement().primaryKey(),
+  scenario: varchar("scenario", { length: 64 }).notNull(),
+  stopCount: int("stop_count").notNull(),
+  runtimeMs: int("runtime_ms").default(0).notNull(),
+  peakMemoryMb: int("peak_memory_mb").default(0).notNull(),
+  queueWaitMs: int("queue_wait_ms").default(0).notNull(),
+  osrmLatencyMs: int("osrm_latency_ms").default(0).notNull(),
+  auditCycles: int("audit_cycles").default(0).notNull(),
+  microClusterCount: int("micro_cluster_count").default(0).notNull(),
+  osrmCalls: int("osrm_calls").default(0).notNull(),
+  osrmFailures: int("osrm_failures").default(0).notNull(),
+  matrixCacheHit: int("matrix_cache_hit").default(0).notNull(),
+  matrixCacheMiss: int("matrix_cache_miss").default(0).notNull(),
+  success: boolean("success").default(false).notNull(),
+  criteriaMet: boolean("criteria_met").default(false).notNull(),
+  metadata: json("metadata"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  createdAtIdx: index("performance_benchmarks_created_at_idx").on(table.createdAt),
+  stopCountIdx: index("performance_benchmarks_stop_count_idx").on(table.stopCount),
+  scenarioIdx: index("performance_benchmarks_scenario_idx").on(table.scenario),
+}));
+
+export type PerformanceBenchmark = typeof performanceBenchmarks.$inferSelect;
+export type InsertPerformanceBenchmark = typeof performanceBenchmarks.$inferInsert;
+
+/**
+ * Admin dashboard metrics - latest materialized snapshot for fast admin panels.
+ */
+export const adminDashboardMetrics = mysqlTable("admin_dashboard_metrics", {
+  id: int("id").autoincrement().primaryKey(),
+  generatedAt: timestamp("generatedAt").defaultNow().notNull(),
+  usersTotal: int("usersTotal").default(0).notNull(),
+  activeUsers7d: int("activeUsers7d").default(0).notNull(),
+  routesTotal: int("routesTotal").default(0).notNull(),
+  routesToday: int("routesToday").default(0).notNull(),
+  jobsWaiting: int("jobsWaiting").default(0).notNull(),
+  jobsRunning: int("jobsRunning").default(0).notNull(),
+  jobsFailed: int("jobsFailed").default(0).notNull(),
+  avgOptimizationRuntime: int("avgOptimizationRuntime").default(0).notNull(),
+  avgGeocodingConfidence: int("avgGeocodingConfidence").default(0).notNull(),
+  events24h: int("events24h").default(0).notNull(),
+  errors24h: int("errors24h").default(0).notNull(),
+  warnings24h: int("warnings24h").default(0).notNull(),
+  payload: json("payload"),
+}, (table) => ({
+  generatedAtIdx: index("admin_dashboard_metrics_generatedAt_idx").on(table.generatedAt),
+}));
+
+export type AdminDashboardMetric = typeof adminDashboardMetrics.$inferSelect;
+export type InsertAdminDashboardMetric = typeof adminDashboardMetrics.$inferInsert;
 
 /**
  * Geocode cache - shared address lookup memory for PWA, Android and site.

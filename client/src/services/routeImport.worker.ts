@@ -1,9 +1,11 @@
 import * as XLSX from "xlsx";
 import { parseRouteRows } from "./routeImportService";
+import type { StopSourceProvider } from "@shared/stopMetadata";
 
 type ParseWorkbookRequest = {
   type: "parse-workbook";
   fileName: string;
+  sourceProvider?: StopSourceProvider | string;
   buffer: ArrayBuffer;
 };
 
@@ -28,7 +30,7 @@ self.onmessage = (event: MessageEvent<ParseWorkbookRequest>) => {
       raw: true,
     });
 
-    const parsed = parseRouteRows(rows, payload.fileName);
+    const parsed = parseRouteRows(rows, payload.fileName, payload.sourceProvider);
     self.postMessage({ ok: true, parsed });
   } catch (error: any) {
     self.postMessage({
