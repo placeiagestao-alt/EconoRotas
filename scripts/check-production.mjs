@@ -24,9 +24,11 @@ const required = [
   },
   {
     name: "INTEGRATION_CREDENTIALS_SECRET",
-    check: (value) => typeof value === "string" && value.length >= 32,
+    check: (value) =>
+      typeof (value || process.env.JWT_SECRET) === "string" &&
+      (value || process.env.JWT_SECRET).length >= 32,
     message:
-      "use um segredo aleatorio com pelo menos 32 caracteres para criptografar credenciais externas",
+      "use um segredo aleatorio com pelo menos 32 caracteres para criptografar credenciais externas; JWT_SECRET e aceito como fallback",
   },
   {
     name: "PUBLIC_APP_URL",

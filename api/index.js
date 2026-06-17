@@ -11,7 +11,7 @@ var __export = (target, all) => {
 // drizzle/schema.ts
 import { decimal, int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, json, foreignKey, uniqueIndex, index } from "drizzle-orm/mysql-core";
 import { relations } from "drizzle-orm";
-var users, routes, stops, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, routeMetrics, osrmMatrixCache, optimizationJobs, performanceBenchmarks, adminDashboardMetrics, geocodeCache, addressCorrections, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations, routeMetricsRelations, addressCorrectionsRelations, optimizationJobsRelations;
+var users, routes, stops, locationCommercialCache, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, routeMetrics, osrmMatrixCache, optimizationJobs, performanceBenchmarks, adminDashboardMetrics, geocodeCache, addressCorrections, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations, routeMetricsRelations, addressCorrectionsRelations, optimizationJobsRelations;
 var init_schema = __esm({
   "drizzle/schema.ts"() {
     "use strict";
@@ -92,11 +92,34 @@ var init_schema = __esm({
       originalStop: int("originalStop"),
       isUnsequencedStop: boolean("isUnsequencedStop").default(false).notNull(),
       metadata: json("metadata"),
+      commercialDetectionStatus: mysqlEnum("commercialDetectionStatus", [
+        "unknown",
+        "suspected",
+        "confirmed"
+      ]).default("unknown").notNull(),
+      commercialConfidence: int("commercialConfidence").default(0).notNull(),
+      commercialPlaceName: varchar("commercialPlaceName", { length: 255 }),
+      commercialCategory: varchar("commercialCategory", { length: 128 }),
+      commercialOpeningHours: varchar("commercialOpeningHours", { length: 255 }),
+      commercialSource: varchar("commercialSource", { length: 64 }),
+      commercialLastCheckedAt: timestamp("commercialLastCheckedAt"),
       notes: text("notes"),
       createdAt: timestamp("createdAt").defaultNow().notNull()
     }, (table) => ({
       routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("cascade"),
-      createdAtIdx: index("stops_createdAt_idx").on(table.createdAt)
+      createdAtIdx: index("stops_createdAt_idx").on(table.createdAt),
+      commercialStatusIdx: index("stops_commercialDetectionStatus_idx").on(table.commercialDetectionStatus)
+    }));
+    locationCommercialCache = mysqlTable("location_commercial_cache", {
+      id: int("id").autoincrement().primaryKey(),
+      lat: decimal("lat", { precision: 10, scale: 8 }).notNull(),
+      lng: decimal("lng", { precision: 11, scale: 8 }).notNull(),
+      radius: int("radius").notNull(),
+      response: json("response"),
+      createdAt: timestamp("createdAt").defaultNow().notNull()
+    }, (table) => ({
+      lookupIdx: index("location_commercial_cache_lookup_idx").on(table.lat, table.lng, table.radius),
+      createdAtIdx: index("location_commercial_cache_createdAt_idx").on(table.createdAt)
     }));
     routeSchedules = mysqlTable("routeSchedules", {
       id: int("id").autoincrement().primaryKey(),
@@ -548,7 +571,7 @@ var init_env = __esm({
         process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS,
         100
       ),
-      bullmqRedisUrl: process.env.BULLMQ_REDIS_URL ?? process.env.REDIS_URL ?? "",
+      bullmqRedisUrl: process.env.BULLMQ_REDIS_URL ?? process.env.ECONOROTAS_REDIS_URL ?? process.env.REDIS_URL ?? "",
       backupLastCompletedAt: process.env.BACKUP_LAST_COMPLETED_AT ?? "",
       backupStatus: process.env.BACKUP_STATUS ?? "",
       restoreTestLastPassedAt: process.env.RESTORE_TEST_LAST_PASSED_AT ?? "",
@@ -678,6 +701,71 @@ function normalizeStopMetadata(value) {
   }
   return metadata;
 }
+function parseLegacyStopNotes(notes) {
+  const raw = notes?.trim();
+  if (!raw) return { metadata: {} };
+  const metadata = {};
+  const remaining = [];
+  let originalStop;
+  let isUnsequencedStop;
+  raw.split("|").map((part) => part.trim()).filter(Boolean).forEach((part) => {
+    const match = part.match(/^([^:]+)\s*:\s*(.+)$/);
+    const key = match?.[1]?.trim().toLowerCase();
+    const value = match?.[2]?.trim();
+    if (!key || !value) {
+      remaining.push(part);
+      return;
+    }
+    if (key === "pacote") {
+      metadata.packageNumber ??= value;
+      return;
+    }
+    if (key === "stop") {
+      const numericStop = Number(value.replace(",", "."));
+      originalStop = Number.isFinite(numericStop) ? Math.round(numericStop) : 0;
+      isUnsequencedStop = !Number.isFinite(numericStop) || numericStop <= 0;
+      return;
+    }
+    if (key === "rastreio") {
+      metadata.trackingNumber ??= value;
+      return;
+    }
+    if (key === "rota origem") {
+      metadata.sourceRouteId ??= value;
+      return;
+    }
+    if (key === "destinatario" || key === "destinat\xE1rio") {
+      metadata.recipientName ??= value;
+      return;
+    }
+    if (key === "telefone") {
+      metadata.recipientPhone ??= value;
+      return;
+    }
+    if (key === "status imile") {
+      metadata.externalStatus ??= value;
+      return;
+    }
+    if (key === "distancia app" || key === "dist\xE2ncia app") {
+      metadata.externalDistanceText ??= value;
+      return;
+    }
+    if (key === "entregas agrupadas") {
+      const count = Number(value.replace(",", "."));
+      if (Number.isFinite(count) && count > 0) {
+        metadata.groupedDeliveryCount ??= Math.round(count);
+      }
+      return;
+    }
+    remaining.push(part);
+  });
+  return {
+    metadata,
+    notes: remaining.length ? remaining.join(" | ") : void 0,
+    originalStop,
+    isUnsequencedStop
+  };
+}
 var STOP_SOURCE_PROVIDERS;
 var init_stopMetadata = __esm({
   "shared/stopMetadata.ts"() {
@@ -743,6 +831,7 @@ function hydrateMemory(data) {
   memory.performanceBenchmarks = Array.isArray(data.performanceBenchmarks) ? data.performanceBenchmarks : [];
   memory.geocodeCache = Array.isArray(data.geocodeCache) ? data.geocodeCache : [];
   memory.addressCorrections = Array.isArray(data.addressCorrections) ? data.addressCorrections : [];
+  memory.locationCommercialCache = Array.isArray(data.locationCommercialCache) ? data.locationCommercialCache : [];
   memory.ids = {
     users: Number(data.ids?.users) || 1,
     routes: Number(data.ids?.routes) || 1,
@@ -756,7 +845,8 @@ function hydrateMemory(data) {
     optimizationJobs: Number(data.ids?.optimizationJobs) || 1,
     performanceBenchmarks: Number(data.ids?.performanceBenchmarks) || 1,
     geocodeCache: Number(data.ids?.geocodeCache) || 1,
-    addressCorrections: Number(data.ids?.addressCorrections) || 1
+    addressCorrections: Number(data.ids?.addressCorrections) || 1,
+    locationCommercialCache: Number(data.ids?.locationCommercialCache) || 1
   };
 }
 function loadLocalDb() {
@@ -904,6 +994,78 @@ async function setGeocodeCache(data) {
       updatedAt: sql`CURRENT_TIMESTAMP`
     }
   });
+}
+function parseJsonMaybe(value) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+function normalizeCacheCoordinate(value) {
+  return Number(value).toFixed(6);
+}
+async function getLocationCommercialCache(data) {
+  const lat = normalizeCacheCoordinate(data.latitude);
+  const lng = normalizeCacheCoordinate(data.longitude);
+  const radius = Math.round(data.radius);
+  const cutoff = new Date(Date.now() - (data.ttlDays ?? 30) * 24 * 60 * 60 * 1e3);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cached2 = [...memory.locationCommercialCache].filter(
+        (item) => String(item.lat) === lat && String(item.lng) === lng && Number(item.radius) === radius && new Date(item.createdAt) >= cutoff
+      ).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+      if (!cached2) return null;
+      return {
+        lat: Number(cached2.lat),
+        lng: Number(cached2.lng),
+        radius,
+        response: parseJsonMaybe(cached2.response),
+        createdAt: cached2.createdAt
+      };
+    }
+    return null;
+  }
+  const rows = await db.select().from(locationCommercialCache).where(
+    and(
+      eq(locationCommercialCache.lat, lat),
+      eq(locationCommercialCache.lng, lng),
+      eq(locationCommercialCache.radius, radius),
+      gte(locationCommercialCache.createdAt, cutoff)
+    )
+  ).orderBy(desc(locationCommercialCache.createdAt)).limit(1);
+  const cached = rows[0];
+  if (!cached) return null;
+  return {
+    lat: Number(cached.lat),
+    lng: Number(cached.lng),
+    radius,
+    response: parseJsonMaybe(cached.response),
+    createdAt: cached.createdAt
+  };
+}
+async function setLocationCommercialCache(data) {
+  const payload = {
+    lat: normalizeCacheCoordinate(data.latitude),
+    lng: normalizeCacheCoordinate(data.longitude),
+    radius: Math.round(data.radius),
+    response: data.response
+  };
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      memory.locationCommercialCache.push({
+        id: memory.ids.locationCommercialCache++,
+        ...payload,
+        createdAt: /* @__PURE__ */ new Date()
+      });
+      await persistFallbackDb();
+    }
+    return;
+  }
+  await db.insert(locationCommercialCache).values(payload);
 }
 async function loadRemoteDb() {
   if (remoteDbLoaded) return;
@@ -1582,6 +1744,13 @@ async function createStops(routeId, stopsData) {
           originalStop: stop.originalStop ?? null,
           isUnsequencedStop: Boolean(stop.isUnsequencedStop),
           metadata: Object.keys(metadata).length ? metadata : null,
+          commercialDetectionStatus: stop.commercialDetectionStatus ?? "unknown",
+          commercialConfidence: Math.max(0, Math.min(100, Number(stop.commercialConfidence ?? 0))),
+          commercialPlaceName: stop.commercialPlaceName ?? null,
+          commercialCategory: stop.commercialCategory ?? null,
+          commercialOpeningHours: stop.commercialOpeningHours ?? null,
+          commercialSource: stop.commercialSource ?? null,
+          commercialLastCheckedAt: stop.commercialLastCheckedAt ? new Date(stop.commercialLastCheckedAt) : null,
           createdAt: now
         };
       });
@@ -1611,7 +1780,14 @@ async function createStops(routeId, stopsData) {
       sourceProvider: normalizeStopSourceProvider(s.sourceProvider),
       originalStop: s.originalStop ?? null,
       isUnsequencedStop: Boolean(s.isUnsequencedStop),
-      metadata: Object.keys(metadata).length ? metadata : null
+      metadata: Object.keys(metadata).length ? metadata : null,
+      commercialDetectionStatus: s.commercialDetectionStatus ?? "unknown",
+      commercialConfidence: Math.max(0, Math.min(100, Number(s.commercialConfidence ?? 0))),
+      commercialPlaceName: s.commercialPlaceName ?? null,
+      commercialCategory: s.commercialCategory ?? null,
+      commercialOpeningHours: s.commercialOpeningHours ?? null,
+      commercialSource: s.commercialSource ?? null,
+      commercialLastCheckedAt: s.commercialLastCheckedAt ? new Date(s.commercialLastCheckedAt) : null
     };
   });
   await db.insert(stops).values(values);
@@ -4387,6 +4563,7 @@ var init_db = __esm({
       performanceBenchmarks: [],
       geocodeCache: [],
       addressCorrections: [],
+      locationCommercialCache: [],
       ids: {
         users: 1,
         routes: 1,
@@ -4400,7 +4577,8 @@ var init_db = __esm({
         optimizationJobs: 1,
         performanceBenchmarks: 1,
         geocodeCache: 1,
-        addressCorrections: 1
+        addressCorrections: 1,
+        locationCommercialCache: 1
       }
     };
     REQUIRED_SCHEMA_COLUMNS = [
@@ -4420,6 +4598,17 @@ var init_db = __esm({
       ["stops", "originalStop"],
       ["stops", "isUnsequencedStop"],
       ["stops", "metadata"],
+      ["stops", "commercialDetectionStatus"],
+      ["stops", "commercialConfidence"],
+      ["stops", "commercialPlaceName"],
+      ["stops", "commercialCategory"],
+      ["stops", "commercialOpeningHours"],
+      ["stops", "commercialSource"],
+      ["stops", "commercialLastCheckedAt"],
+      ["location_commercial_cache", "lat"],
+      ["location_commercial_cache", "lng"],
+      ["location_commercial_cache", "radius"],
+      ["location_commercial_cache", "response"],
       ["userIntegrations", "authTokenEncrypted"],
       ["operationalEvents", "type"],
       ["operationalEvents", "severity"],
@@ -6686,15 +6875,7 @@ function optimizePartitionedOpenRoute(locations, mode = "balanced", options = {}
     const partitionIndex = chooseNextGeographicPartition(remaining, currentLocation);
     const [partition] = remaining.splice(partitionIndex, 1);
     const isLastPartition = remaining.length === 0;
-    const partitionLocations = partition.stops.map((stop) => ({
-      latitude: stop.latitude,
-      longitude: stop.longitude,
-      address: stop.address,
-      notes: stop.notes,
-      geocodingConfidenceScore: stop.geocodingConfidenceScore,
-      geocodingMethod: stop.geocodingMethod,
-      geocodingSuspect: stop.geocodingSuspect
-    }));
+    const partitionLocations = partition.stops.map(({ originalIndex, ...stop }) => stop);
     const optimizedPartition = optimizeOpenRoute(partitionLocations, mode, 0, {
       ...options,
       startLocation: currentLocation,
@@ -6707,14 +6888,9 @@ function optimizePartitionedOpenRoute(locations, mode = "balanced", options = {}
       const originalStop = partition.stops[localIndex];
       if (!originalStop) return null;
       finalSequence.push(originalStop.originalIndex);
+      const { originalIndex, ...waypoint } = originalStop;
       finalWaypoints.push({
-        latitude: originalStop.latitude,
-        longitude: originalStop.longitude,
-        address: originalStop.address,
-        notes: originalStop.notes,
-        geocodingConfidenceScore: originalStop.geocodingConfidenceScore,
-        geocodingMethod: originalStop.geocodingMethod,
-        geocodingSuspect: originalStop.geocodingSuspect,
+        ...waypoint,
         sequence: finalWaypoints.length
       });
     }
@@ -7320,12 +7496,7 @@ async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options 
     const partitionIndex = chooseNextPartition(remaining, currentLocation);
     const [partition] = remaining.splice(partitionIndex, 1);
     const isLastPartition = remaining.length === 0;
-    const partitionLocations = partition.stops.map((stop) => ({
-      latitude: stop.latitude,
-      longitude: stop.longitude,
-      address: stop.address,
-      notes: stop.notes
-    }));
+    const partitionLocations = partition.stops.map(({ originalIndex, ...stop }) => stop);
     const optimizedPartition = await optimizeRouteWithRoadMetrics(
       partitionLocations,
       mode,
@@ -7344,11 +7515,9 @@ async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options 
       const originalStop = partition.stops[localIndex];
       if (!originalStop) return null;
       finalSequence.push(originalStop.originalIndex);
+      const { originalIndex, ...waypoint } = originalStop;
       finalWaypoints.push({
-        latitude: originalStop.latitude,
-        longitude: originalStop.longitude,
-        address: originalStop.address,
-        notes: originalStop.notes,
+        ...waypoint,
         sequence: finalWaypoints.length
       });
     }
@@ -8569,6 +8738,232 @@ function decryptIntegrationSecret(value) {
 init_geocodingConfidence();
 init_stopMetadata();
 
+// server/commercialDetection.ts
+init_db();
+var OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+var CACHE_TTL_DAYS = 30;
+var PRIMARY_RADIUS_METERS = 20;
+var SECONDARY_RADIUS_METERS = 30;
+var COMMERCIAL_AMENITIES = [
+  "pharmacy",
+  "bank",
+  "school",
+  "hospital",
+  "clinic",
+  "restaurant",
+  "cafe",
+  "fast_food",
+  "marketplace"
+];
+function hasValidCoordinate(latitude, longitude) {
+  return Number.isFinite(latitude) && Number.isFinite(longitude) && !(latitude === 0 && longitude === 0);
+}
+function buildOverpassQuery(latitude, longitude, radius) {
+  const amenityRegex = COMMERCIAL_AMENITIES.join("|");
+  return `
+[out:json][timeout:8];
+(
+  node(around:${radius},${latitude},${longitude})["shop"];
+  way(around:${radius},${latitude},${longitude})["shop"];
+  relation(around:${radius},${latitude},${longitude})["shop"];
+  node(around:${radius},${latitude},${longitude})["office"];
+  way(around:${radius},${latitude},${longitude})["office"];
+  relation(around:${radius},${latitude},${longitude})["office"];
+  node(around:${radius},${latitude},${longitude})["amenity"~"^(${amenityRegex})$"];
+  way(around:${radius},${latitude},${longitude})["amenity"~"^(${amenityRegex})$"];
+  relation(around:${radius},${latitude},${longitude})["amenity"~"^(${amenityRegex})$"];
+);
+out center tags;
+`;
+}
+function getElementCoordinate(element) {
+  const latitude = Number(element.lat ?? element.center?.lat);
+  const longitude = Number(element.lon ?? element.center?.lon);
+  if (!hasValidCoordinate(latitude, longitude)) return null;
+  return { latitude, longitude };
+}
+function getCommercialCategory(tags) {
+  if (tags.shop) return `shop:${tags.shop}`;
+  if (tags.office) return `office:${tags.office}`;
+  if (tags.amenity && COMMERCIAL_AMENITIES.includes(tags.amenity)) {
+    return `amenity:${tags.amenity}`;
+  }
+  return null;
+}
+function chooseBestCommercialElement(elements, latitude, longitude) {
+  return elements.map((element) => {
+    const tags = element.tags ?? {};
+    const category = getCommercialCategory(tags);
+    const coordinate = getElementCoordinate(element);
+    if (!category || !coordinate) return null;
+    return {
+      element,
+      tags,
+      category,
+      distanceKm: calculateDistance(
+        { latitude, longitude },
+        { latitude: coordinate.latitude, longitude: coordinate.longitude }
+      )
+    };
+  }).filter(Boolean).sort((a, b) => {
+    const namedDiff = Number(Boolean(b.tags.name)) - Number(Boolean(a.tags.name));
+    if (namedDiff !== 0) return namedDiff;
+    const hoursDiff = Number(Boolean(b.tags.opening_hours)) - Number(Boolean(a.tags.opening_hours));
+    if (hoursDiff !== 0) return hoursDiff;
+    return a.distanceKm - b.distanceKm;
+  })[0] ?? null;
+}
+function classifyCommercialEvidence(response, latitude, longitude) {
+  const elements = Array.isArray(response?.elements) ? response.elements : [];
+  const best = chooseBestCommercialElement(elements, latitude, longitude);
+  const checkedAt = /* @__PURE__ */ new Date();
+  if (!best) {
+    return {
+      commercialDetectionStatus: "unknown",
+      commercialConfidence: 0,
+      commercialPlaceName: null,
+      commercialCategory: null,
+      commercialOpeningHours: null,
+      commercialSource: "osm",
+      commercialLastCheckedAt: checkedAt
+    };
+  }
+  const hasCompleteEvidence = Boolean(best.tags.name && best.tags.opening_hours);
+  return {
+    commercialDetectionStatus: hasCompleteEvidence ? "confirmed" : "suspected",
+    commercialConfidence: hasCompleteEvidence ? 95 : 70,
+    commercialPlaceName: best.tags.name ?? null,
+    commercialCategory: best.category,
+    commercialOpeningHours: best.tags.opening_hours ?? null,
+    commercialSource: "osm",
+    commercialLastCheckedAt: checkedAt
+  };
+}
+async function fetchOverpass(latitude, longitude, radius) {
+  const cached = await getLocationCommercialCache({
+    latitude,
+    longitude,
+    radius,
+    ttlDays: CACHE_TTL_DAYS
+  });
+  if (cached) return cached.response;
+  const body = buildOverpassQuery(latitude, longitude, radius);
+  const response = await fetch(OVERPASS_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "user-agent": "EconoRota/1.0 commercial-detection"
+    },
+    body: new URLSearchParams({ data: body }).toString()
+  });
+  if (!response.ok) {
+    throw new Error(`Overpass retornou HTTP ${response.status}`);
+  }
+  const payload = await response.json();
+  await setLocationCommercialCache({
+    latitude,
+    longitude,
+    radius,
+    response: payload
+  });
+  return payload;
+}
+async function detectCommercialAtLocation(latitude, longitude) {
+  if (!hasValidCoordinate(latitude, longitude)) {
+    return classifyCommercialEvidence({ elements: [] }, latitude, longitude);
+  }
+  const primary = await fetchOverpass(latitude, longitude, PRIMARY_RADIUS_METERS);
+  const primaryDetection = classifyCommercialEvidence(primary, latitude, longitude);
+  if (primaryDetection.commercialDetectionStatus !== "unknown") {
+    return primaryDetection;
+  }
+  const secondary = await fetchOverpass(latitude, longitude, SECONDARY_RADIUS_METERS);
+  return classifyCommercialEvidence(secondary, latitude, longitude);
+}
+var WEEKDAY_KEYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+function parseTimeToMinutes(value) {
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 24 || minute < 0 || minute > 59) return null;
+  return hour * 60 + minute;
+}
+function weekdayMatches(token, date) {
+  const today = WEEKDAY_KEYS[date.getDay()];
+  const parts = token.split("-");
+  if (parts.length === 1) return parts[0] === today;
+  const start = WEEKDAY_KEYS.indexOf(parts[0]);
+  const end = WEEKDAY_KEYS.indexOf(parts[1]);
+  const current = WEEKDAY_KEYS.indexOf(today);
+  if (start < 0 || end < 0 || current < 0) return false;
+  if (start <= end) return current >= start && current <= end;
+  return current >= start || current <= end;
+}
+function evaluateOpeningHours(openingHours, eta) {
+  if (!openingHours?.trim()) return "unknown";
+  const rules = openingHours.split(";").map((part) => part.trim()).filter(Boolean);
+  const etaMinutes = eta.getHours() * 60 + eta.getMinutes();
+  for (const rule of rules) {
+    const match = rule.match(/^([A-Za-z]{2}(?:-[A-Za-z]{2})?)\s+(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
+    if (!match) continue;
+    if (!weekdayMatches(match[1], eta)) continue;
+    const start = parseTimeToMinutes(match[2]);
+    const end = parseTimeToMinutes(match[3]);
+    if (start === null || end === null) continue;
+    if (start <= end && etaMinutes >= start && etaMinutes <= end) return "open";
+    if (start > end && (etaMinutes >= start || etaMinutes <= end)) return "open";
+    return "closed";
+  }
+  return "unknown";
+}
+function buildCommercialEtaAlert(detection, eta) {
+  if (detection.commercialDetectionStatus === "unknown") {
+    return {
+      status: "unknown",
+      severity: "neutral",
+      title: "Sem evid\xEAncia comercial",
+      message: "Nenhum estabelecimento comercial cadastrado foi encontrado neste local.",
+      etaIso: eta?.toISOString() ?? null
+    };
+  }
+  if (!detection.commercialOpeningHours || !eta) {
+    return {
+      status: "unknown",
+      severity: "warning",
+      title: "Estabelecimento identificado",
+      message: "Foi encontrada evid\xEAncia comercial neste local, mas o hor\xE1rio n\xE3o est\xE1 dispon\xEDvel.",
+      etaIso: eta?.toISOString() ?? null
+    };
+  }
+  const state = evaluateOpeningHours(detection.commercialOpeningHours, eta);
+  if (state === "open") {
+    return {
+      status: "compatible",
+      severity: "success",
+      title: "Hor\xE1rio compat\xEDvel",
+      message: "A chegada prevista est\xE1 dentro do hor\xE1rio cadastrado.",
+      etaIso: eta.toISOString()
+    };
+  }
+  if (state === "closed") {
+    return {
+      status: "risk",
+      severity: "danger",
+      title: "Risco alto",
+      message: "Estabelecimento cadastrado fecha antes do hor\xE1rio previsto de chegada.",
+      etaIso: eta.toISOString()
+    };
+  }
+  return {
+    status: "unknown",
+    severity: "warning",
+    title: "Hor\xE1rio n\xE3o interpretado",
+    message: "Foi encontrada evid\xEAncia comercial, mas o formato do hor\xE1rio n\xE3o p\xF4de ser validado.",
+    etaIso: eta.toISOString()
+  };
+}
+
 // server/optimizationQueue.ts
 import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
@@ -9072,6 +9467,11 @@ var MAX_PREMATURE_EXIT_FIXES = 50;
 var MAX_BATCH_AUDIT_REPAIR_PASSES = 3;
 var OSRM_CIRCUIT_MIN_CALLS = 20;
 var OSRM_CIRCUIT_FAILURE_RATE = 0.8;
+var STRUCTURAL_AUDIT_ISSUE_TYPES = /* @__PURE__ */ new Set([
+  "missing_coordinates",
+  "invalid_coordinates",
+  "empty_address"
+]);
 var imileCredentialInput = z2.object({
   label: z2.string().max(255).optional(),
   baseUrl: z2.string().url().optional().or(z2.literal("")),
@@ -9198,6 +9598,40 @@ function routeStopsToAuditableStops(routeStops) {
     geocodingSuspect: Boolean(stop.geocodingSuspect)
   }));
 }
+function isShopeeStopPreservedRoute(routeStops, respectInputSequence) {
+  if (!respectInputSequence) return false;
+  return routeStops.some((stop) => {
+    const legacy = parseLegacyStopNotes(
+      typeof stop.notes === "string" ? stop.notes : void 0
+    );
+    const sourceProvider = normalizeStopSourceProvider(
+      typeof stop.sourceProvider === "string" ? stop.sourceProvider : legacy.metadata.sourceRouteId || legacy.metadata.packageNumber === "0" || legacy.originalStop !== void 0 ? "shopee" : void 0
+    );
+    return sourceProvider === "shopee" && (stop.originalStop !== null && stop.originalStop !== void 0 || Boolean(stop.isUnsequencedStop) || legacy.originalStop !== void 0 || legacy.metadata.packageNumber === "0");
+  });
+}
+function asShopeeStructuralAudit(report) {
+  const structuralIssues = report.issues.filter(
+    (issue) => STRUCTURAL_AUDIT_ISSUE_TYPES.has(issue.type)
+  );
+  const criticalCount = structuralIssues.filter(
+    (issue) => issue.severity === "critical"
+  ).length;
+  const warningCount = structuralIssues.length - criticalCount;
+  return {
+    ...report,
+    status: criticalCount > 0 ? "critical" : warningCount > 0 ? "attention" : "approved",
+    score: criticalCount > 0 ? Math.min(report.score, 70) : 100,
+    quality: criticalCount > 0 ? "blocked" : warningCount > 0 ? "attention" : "excellent",
+    issueCount: structuralIssues.length,
+    criticalCount,
+    warningCount,
+    issues: structuralIssues
+  };
+}
+function applyShopeeStopAuditPolicy(report, auditPolicy) {
+  return auditPolicy === "shopee_stop_preserved" ? asShopeeStructuralAudit(report) : report;
+}
 function getBlockingAuditIssues(audit) {
   return audit.issues.filter((issue) => BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type));
 }
@@ -9275,8 +9709,82 @@ function routeWaypointsToLocations(waypoints) {
     metadata: waypoint.metadata,
     geocodingConfidenceScore: waypoint.geocodingConfidenceScore,
     geocodingMethod: waypoint.geocodingMethod,
-    geocodingSuspect: waypoint.geocodingSuspect
+    geocodingSuspect: waypoint.geocodingSuspect,
+    commercialDetectionStatus: waypoint.commercialDetectionStatus,
+    commercialConfidence: waypoint.commercialConfidence,
+    commercialPlaceName: waypoint.commercialPlaceName,
+    commercialCategory: waypoint.commercialCategory,
+    commercialOpeningHours: waypoint.commercialOpeningHours,
+    commercialSource: waypoint.commercialSource,
+    commercialLastCheckedAt: waypoint.commercialLastCheckedAt
   }));
+}
+function normalizeAddressForStopGrouping(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\b(ap|apto|apartamento|bloco|torre|casa|fundos|frente|sala|loja)\b.*$/i, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+function getStopAddressGroupKey(address) {
+  const parts = String(address || "").split(",").map(normalizeAddressForStopGrouping).filter(Boolean);
+  if (parts.length >= 2 && /^\d{1,6}[a-z]?$/.test(parts[1])) {
+    return `${parts[0]}|${parts[1]}`;
+  }
+  return normalizeAddressForStopGrouping(address);
+}
+function findShopeeFloatingInsertionIndex(orderedLocations, floatingLocation) {
+  const floatingKey = getStopAddressGroupKey(floatingLocation.address);
+  if (floatingKey) {
+    for (let index2 = orderedLocations.length - 1; index2 >= 0; index2 -= 1) {
+      if (getStopAddressGroupKey(orderedLocations[index2].address) === floatingKey) {
+        return index2 + 1;
+      }
+    }
+  }
+  let bestIndex = orderedLocations.length;
+  let bestCost = Infinity;
+  for (let index2 = 0; index2 <= orderedLocations.length; index2 += 1) {
+    const previous = orderedLocations[index2 - 1];
+    const next = orderedLocations[index2];
+    const cost = previous && next ? calculateDistance(previous, floatingLocation) + calculateDistance(floatingLocation, next) - calculateDistance(previous, next) : previous ? calculateDistance(previous, floatingLocation) : next ? calculateDistance(floatingLocation, next) : 0;
+    if (cost < bestCost) {
+      bestCost = cost;
+      bestIndex = index2;
+    }
+  }
+  return bestIndex;
+}
+function orderShopeeStopPreservedLocations(locations) {
+  const hasShopeeStop = locations.some(
+    (location) => normalizeStopSourceProvider(location.sourceProvider) === "shopee" && (Number(location.originalStop) > 0 || Boolean(location.isUnsequencedStop))
+  );
+  if (!hasShopeeStop) return locations;
+  const sequenced = locations.filter((location) => !location.isUnsequencedStop).sort((a, b) => {
+    const aStop = Number(a.originalStop);
+    const bStop = Number(b.originalStop);
+    if (Number.isFinite(aStop) && aStop > 0 && Number.isFinite(bStop) && bStop > 0) {
+      return aStop - bStop;
+    }
+    return 0;
+  });
+  const floating = locations.filter((location) => Boolean(location.isUnsequencedStop));
+  const ordered = [...sequenced];
+  floating.forEach((location) => {
+    ordered.splice(findShopeeFloatingInsertionIndex(ordered, location), 0, location);
+  });
+  return ordered;
+}
+function estimateEtaForStop(routeStops, stopId) {
+  const orderedStops = routeStops.map((stop) => ({
+    id: Number(stop.id),
+    latitude: Number(stop.latitude),
+    longitude: Number(stop.longitude)
+  })).filter((stop) => Number.isFinite(stop.latitude) && Number.isFinite(stop.longitude));
+  const index2 = orderedStops.findIndex((stop) => stop.id === stopId);
+  if (index2 < 0) return null;
+  let minutes = 0;
+  for (let stopIndex = 0; stopIndex < index2; stopIndex += 1) {
+    const distanceKm = calculateDistance(orderedStops[stopIndex], orderedStops[stopIndex + 1]);
+    minutes += estimateTravelTime(distanceKm);
+  }
+  return new Date(Date.now() + minutes * 60 * 1e3);
 }
 function correctionLimitForIssueType(type) {
   switch (type) {
@@ -9472,12 +9980,7 @@ function reorderRouteByAuditIssue(route, issue) {
     );
     if (insertionIndex < 0) return null;
     remainingWaypoints.splice(insertionIndex, 0, ...pendingWaypoints);
-    return remainingWaypoints.map((waypoint) => ({
-      latitude: waypoint.latitude,
-      longitude: waypoint.longitude,
-      address: waypoint.address,
-      notes: waypoint.notes
-    }));
+    return routeWaypointsToLocations(remainingWaypoints);
   }
   const nearestIndex = waypoints.findIndex(
     (waypoint) => waypoint.sequence === issue.nearestSequence
@@ -9490,12 +9993,7 @@ function reorderRouteByAuditIssue(route, issue) {
   }
   const [nearestWaypoint] = waypoints.splice(nearestIndex, 1);
   waypoints.splice(plannedIndex, 0, nearestWaypoint);
-  return waypoints.map((waypoint) => ({
-    latitude: waypoint.latitude,
-    longitude: waypoint.longitude,
-    address: waypoint.address,
-    notes: waypoint.notes
-  }));
+  return routeWaypointsToLocations(waypoints);
 }
 async function assertRouteStopsReadyForOptimization(routeStops, context) {
   const audit = auditRouteSequence(routeStopsToAuditableStops(routeStops));
@@ -9529,13 +10027,14 @@ async function assertRouteStopsReadyForOptimization(routeStops, context) {
   });
 }
 function auditOptimizedRoute(route, options = {}) {
-  return auditRouteSequence(routeToAuditableStops(route), {
+  const report = auditRouteSequence(routeToAuditableStops(route), {
     startLocation: options.startLocation,
     requireStartLocation: true,
     actualTotalDistanceKm: route.totalDistance,
     usedRoadMetrics: options.usedRoadMetrics,
     respectInputSequence: options.respectInputSequence
   });
+  return applyShopeeStopAuditPolicy(report, options.auditPolicy ?? null);
 }
 function readBooleanMetadata(metadata, key) {
   if (!metadata || typeof metadata !== "object") return void 0;
@@ -9630,6 +10129,10 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
   const routeStops = (await getRouteStops(routeId)).filter(
     (stop) => !excludedStopIds.has(Number(stop.id))
   );
+  const auditPolicy = isShopeeStopPreservedRoute(
+    routeStops,
+    Boolean(options?.respectInputSequence)
+  ) ? "shopee_stop_preserved" : null;
   runtimeBreakdown.dbFetchMs = Date.now() - dbFetchStartedAt;
   if (routeStops.length === 0) {
     throw new TRPCError3({
@@ -9654,6 +10157,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         routeMode: requestedMode || route.mode,
         localityMode: options?.localityMode ?? null,
         respectInputSequence: Boolean(options?.respectInputSequence),
+        auditPolicy,
         excludeStopIds: options?.excludeStopIds ?? [],
         requiresExternalWorker: true
       }
@@ -9743,19 +10247,38 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     });
   }
   await assertRouteStopsReadyForOptimization(routeStops, { userId, routeId });
-  const locations = routeStops.map((stop) => ({
-    latitude: parseFloat(String(stop.latitude ?? 0)),
-    longitude: parseFloat(String(stop.longitude ?? 0)),
-    address: stop.address,
-    notes: stop.notes ?? void 0,
-    sourceProvider: normalizeStopSourceProvider(stop.sourceProvider),
-    originalStop: stop.originalStop ?? null,
-    isUnsequencedStop: Boolean(stop.isUnsequencedStop),
-    metadata: normalizeStopMetadata(stop.metadata),
-    geocodingConfidenceScore: Number(stop.geocodingConfidenceScore ?? 0),
-    geocodingMethod: stop.geocodingMethod ?? void 0,
-    geocodingSuspect: Boolean(stop.geocodingSuspect)
-  }));
+  const locations = routeStops.map((stop) => {
+    const legacy = parseLegacyStopNotes(stop.notes ?? void 0);
+    const metadata = normalizeStopMetadata({
+      ...legacy.metadata,
+      ...normalizeStopMetadata(stop.metadata)
+    });
+    const sourceProvider = normalizeStopSourceProvider(
+      stop.sourceProvider || (legacy.metadata.sourceRouteId || legacy.metadata.packageNumber === "0" || legacy.originalStop !== void 0 ? "shopee" : void 0)
+    );
+    const legacyPackageZero = sourceProvider === "shopee" && stop.originalStop == null && legacy.originalStop === void 0 && legacy.metadata.packageNumber === "0";
+    return {
+      latitude: parseFloat(String(stop.latitude ?? 0)),
+      longitude: parseFloat(String(stop.longitude ?? 0)),
+      address: stop.address,
+      notes: stop.notes ?? void 0,
+      sourceProvider,
+      originalStop: stop.originalStop ?? legacy.originalStop ?? (legacyPackageZero ? 0 : null),
+      isUnsequencedStop: Boolean(stop.isUnsequencedStop) || Boolean(legacy.isUnsequencedStop) || legacyPackageZero,
+      metadata,
+      geocodingConfidenceScore: Number(stop.geocodingConfidenceScore ?? 0),
+      geocodingMethod: stop.geocodingMethod ?? void 0,
+      geocodingSuspect: Boolean(stop.geocodingSuspect),
+      commercialDetectionStatus: stop.commercialDetectionStatus ?? "unknown",
+      commercialConfidence: Number(stop.commercialConfidence ?? 0),
+      commercialPlaceName: stop.commercialPlaceName ?? null,
+      commercialCategory: stop.commercialCategory ?? null,
+      commercialOpeningHours: stop.commercialOpeningHours ?? null,
+      commercialSource: stop.commercialSource ?? null,
+      commercialLastCheckedAt: stop.commercialLastCheckedAt ?? null
+    };
+  });
+  const optimizationLocations = options?.respectInputSequence ? orderShopeeStopPreservedLocations(locations) : locations;
   const validation = validateLocations(locations);
   if (!validation.valid) {
     throw new TRPCError3({
@@ -9770,14 +10293,14 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       message: `Coordenadas ausentes na parada ${missingCoordinateIndex + 1}.`
     });
   }
-  const macroClusters = clusterStops(locations, {
+  const macroClusters = clusterStops(optimizationLocations, {
     localityMode: options?.localityMode
   });
-  const microClusters = partitionStopsForOptimization(locations, {
+  const microClusters = partitionStopsForOptimization(optimizationLocations, {
     localityMode: options?.localityMode
   });
   runtimeBreakdown.macroClusterCount = macroClusters.length;
-  runtimeBreakdown.microClusterCount = locations.length <= 100 ? macroClusters.length : microClusters.length;
+  runtimeBreakdown.microClusterCount = optimizationLocations.length <= 100 ? macroClusters.length : microClusters.length;
   runtimeBreakdown.largestClusterSize = Math.max(
     0,
     ...macroClusters.map((cluster) => cluster.stops.length)
@@ -9810,7 +10333,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
   clusterStops(locations, { localityMode: options?.localityMode });
   runtimeBreakdown.clusteringMs = Date.now() - clusteringStartedAt;
   async function buildOptimizationAttempt(attempt) {
-    const attemptLocations = attempt.orderedLocations ?? locations;
+    const attemptLocations = attempt.orderedLocations ?? optimizationLocations;
     const roadMetricOptions = {
       startLocation,
       endLocation,
@@ -9875,7 +10398,8 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       }
     }
     const shouldUseLargePartitionedFallback = !optimizedWithRoadMetrics && attemptLocations.length > ENV.maxGeographicFallbackStops && Boolean(options?.allowLargeSync);
-    if (!optimizedWithRoadMetrics && attemptLocations.length > ENV.maxGeographicFallbackStops && !shouldUseLargePartitionedFallback) {
+    const isShopeeStopPreservedSequentialRoute = attempt.respectInputSequence && auditPolicy === "shopee_stop_preserved";
+    if (!optimizedWithRoadMetrics && attemptLocations.length > ENV.maxGeographicFallbackStops && !shouldUseLargePartitionedFallback && !isShopeeStopPreservedSequentialRoute) {
       await createOperationalEvent({
         userId,
         routeId,
@@ -9949,6 +10473,32 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         console.warn("[Routes] Failed to record partitioned geographic fallback:", error);
       });
     }
+    if (!optimizedWithRoadMetrics && attemptLocations.length > ENV.maxGeographicFallbackStops && isShopeeStopPreservedSequentialRoute) {
+      await createOperationalEvent({
+        userId,
+        routeId,
+        stopId: null,
+        type: "shopee_stop_sequence_saved_without_osrm",
+        severity: "warning",
+        source: "routes.optimize",
+        title: "Sequencia STOP Shopee preservada sem OSRM",
+        message: "A rota Shopee foi salva seguindo a coluna STOP. Paradas sem STOP foram encaixadas por proximidade, sem bloquear o inicio da rota.",
+        runtime: null,
+        url: null,
+        userAgent: null,
+        appVersion: null,
+        metadata: {
+          stopCount: attemptLocations.length,
+          maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
+          osrmBaseUrl: ENV.osrmBaseUrl,
+          auditSource: auditSource2,
+          auditPolicy,
+          respectInputSequence: true
+        }
+      }).catch((error) => {
+        console.warn("[Routes] Failed to record Shopee STOP sequential fallback:", error);
+      });
+    }
     const optimized2 = optimizedWithRoadMetrics ?? (attempt.respectInputSequence ? buildSequentialRoute(attemptLocations, roadMetricOptions) : attempt.orderedLocations ? buildSequentialRoute(attemptLocations, roadMetricOptions) : optimizeRoute(attemptLocations, mode, 0, {
       ...roadMetricOptions,
       partitionLargeRoutes: shouldUseLargePartitionedFallback ? false : void 0
@@ -9958,7 +10508,8 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     const audit2 = auditOptimizedRoute(optimized2, {
       startLocation,
       usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
-      respectInputSequence: Boolean(attempt.respectInputSequence)
+      respectInputSequence: Boolean(attempt.respectInputSequence),
+      auditPolicy
     });
     runtimeBreakdown.auditMs += Date.now() - auditStartedAt;
     return {
@@ -9967,7 +10518,8 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       auditSource: attempt.auditSourceSuffix ? `${auditSource2}-${attempt.auditSourceSuffix}` : auditSource2,
       usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
       localityMode: attempt.localityMode,
-      respectInputSequence: Boolean(attempt.respectInputSequence)
+      respectInputSequence: Boolean(attempt.respectInputSequence),
+      auditPolicy
     };
   }
   let optimizationAttempt = await buildOptimizationAttempt({
@@ -10135,6 +10687,9 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         correctionAttempts,
         localityMode: optimizationAttempt.localityMode,
         respectInputSequence: optimizationAttempt.respectInputSequence,
+        auditPolicy: optimizationAttempt.auditPolicy,
+        structuralAuditOnly: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
+        coherenceAuditSkipped: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
         auditSource: optimizationAttempt.auditSource,
         routeMetadata: optimizationAttempt.optimized.metadata ?? null
       }
@@ -10237,7 +10792,10 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         correctionAttempts,
         finalIssues: attemptAudit.issues.slice(0, 12),
         routeMetadata: optimizationAttempt.optimized.metadata ?? null,
-        geocodingConfidence
+        geocodingConfidence,
+        auditPolicy: optimizationAttempt.auditPolicy,
+        structuralAuditOnly: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
+        coherenceAuditSkipped: optimizationAttempt.auditPolicy === "shopee_stop_preserved"
       }
     }).catch((error) => {
       console.warn("[Routes] Failed to record route metric:", error);
@@ -10328,12 +10886,19 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     sourceProvider: normalizeStopSourceProvider(wp.sourceProvider),
     originalStop: wp.originalStop ?? null,
     isUnsequencedStop: Boolean(wp.isUnsequencedStop),
-    metadata: normalizeStopMetadata(wp.metadata)
+    metadata: normalizeStopMetadata(wp.metadata),
+    commercialDetectionStatus: wp.commercialDetectionStatus ?? "unknown",
+    commercialConfidence: Number(wp.commercialConfidence ?? 0),
+    commercialPlaceName: wp.commercialPlaceName ?? null,
+    commercialCategory: wp.commercialCategory ?? null,
+    commercialOpeningHours: wp.commercialOpeningHours ?? null,
+    commercialSource: wp.commercialSource ?? null,
+    commercialLastCheckedAt: wp.commercialLastCheckedAt ?? null
   }));
   await createStops(routeId, updatedStops);
   runtimeBreakdown.dbSaveMs += Date.now() - dbSaveStartedAt;
   await recordRouteMetricForAttempt(null);
-  return { ...optimized, audit, auditSource };
+  return { ...optimized, audit, auditSource, auditPolicy: optimizationAttempt.auditPolicy };
 }
 var credentialsSchema = z2.object({
   email: z2.string().email("Informe um e-mail valido."),
@@ -10768,6 +11333,7 @@ var appRouter = router({
       );
       const latestMetadata = hasFreshOptimizationContext ? latestOptimizationEvent?.metadata : void 0;
       const auditSource = readStringMetadata(latestMetadata, "auditSource");
+      const auditPolicy = readStringMetadata(latestMetadata, "auditPolicy") ?? (isShopeeStopPreservedRoute(routeStops, readBooleanMetadata(latestMetadata, "respectInputSequence")) ? "shopee_stop_preserved" : null);
       const usedRoadMetrics = readBooleanMetadata(
         latestMetadata,
         "auditUsedRoadMetrics"
@@ -10785,15 +11351,18 @@ var appRouter = router({
         route.startLatitude,
         route.startLongitude
       );
-      const report = auditRouteSequence(
-        routeStopsToAuditableStops(routeStops),
-        {
-          startLocation,
-          requireStartLocation,
-          actualTotalDistanceKm: Number(route.totalDistance ?? 0),
-          usedRoadMetrics,
-          respectInputSequence
-        }
+      const report = applyShopeeStopAuditPolicy(
+        auditRouteSequence(
+          routeStopsToAuditableStops(routeStops),
+          {
+            startLocation,
+            requireStartLocation,
+            actualTotalDistanceKm: Number(route.totalDistance ?? 0),
+            usedRoadMetrics,
+            respectInputSequence
+          }
+        ),
+        auditPolicy
       );
       return {
         ...report,
@@ -10802,6 +11371,9 @@ var appRouter = router({
           usedRoadMetrics: usedRoadMetrics ?? null,
           respectInputSequence: respectInputSequence ?? null,
           requireStartLocation,
+          auditPolicy,
+          structuralAuditOnly: auditPolicy === "shopee_stop_preserved",
+          coherenceAuditSkipped: auditPolicy === "shopee_stop_preserved",
           lastOptimizationEventId: latestOptimizationEvent?.id ?? null,
           staleOptimizationContext: !hasFreshOptimizationContext && Boolean(latestOptimizationEvent)
         }
@@ -10863,7 +11435,10 @@ var appRouter = router({
             auditScore: optimized.audit?.score,
             auditIssueCount: optimized.audit?.issueCount,
             auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
-            auditRequireStartLocation: true
+            auditRequireStartLocation: true,
+            auditPolicy: optimized.auditPolicy ?? null,
+            structuralAuditOnly: optimized.auditPolicy === "shopee_stop_preserved",
+            coherenceAuditSkipped: optimized.auditPolicy === "shopee_stop_preserved"
           }
         });
         await recordRouteAuditEvent(
@@ -10934,6 +11509,10 @@ var appRouter = router({
     })).mutation(async ({ ctx, input }) => {
       await requireUserRoute(input.id, ctx.user.id);
       const currentStops = await getRouteStops(input.id);
+      const preserveShopeeStopSequence = isShopeeStopPreservedRoute(
+        currentStops,
+        true
+      );
       await assertRouteStopLimit(
         ctx.user.id,
         currentStops.length,
@@ -10947,7 +11526,8 @@ var appRouter = router({
       } : void 0;
       const optimized = await optimizeUserRoute(input.id, ctx.user.id, input.mode, {
         startLocation,
-        localityMode: input.localityMode
+        localityMode: input.localityMode,
+        respectInputSequence: preserveShopeeStopSequence
       });
       await recordOperationalEvent(ctx.user.id, {
         type: input.localityMode === "strict" ? "route_user_requested_better_sequence" : "route_reoptimized",
@@ -10958,6 +11538,7 @@ var appRouter = router({
         metadata: {
           mode: input.mode,
           localityMode: input.localityMode,
+          respectInputSequence: preserveShopeeStopSequence,
           totalDistance: optimized.totalDistance,
           totalTime: optimized.totalTime,
           startedFromCurrentLocation: Boolean(startLocation),
@@ -10966,7 +11547,10 @@ var appRouter = router({
           auditScore: optimized.audit?.score,
           auditIssueCount: optimized.audit?.issueCount,
           auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
-          auditRequireStartLocation: true
+          auditRequireStartLocation: true,
+          auditPolicy: optimized.auditPolicy ?? null,
+          structuralAuditOnly: optimized.auditPolicy === "shopee_stop_preserved",
+          coherenceAuditSkipped: optimized.auditPolicy === "shopee_stop_preserved"
         }
       });
       await recordRouteAuditEvent(
@@ -10987,6 +11571,10 @@ var appRouter = router({
     })).mutation(async ({ ctx, input }) => {
       await requireUserRoute(input.id, ctx.user.id);
       const currentStops = await getRouteStops(input.id);
+      const preserveShopeeStopSequence = isShopeeStopPreservedRoute(
+        currentStops,
+        true
+      );
       await assertRouteStopLimit(
         ctx.user.id,
         currentStops.length,
@@ -11008,7 +11596,8 @@ var appRouter = router({
       const optimized = await optimizeUserRoute(input.id, ctx.user.id, input.mode, {
         excludeStopIds: input.excludeStopIds,
         startLocation,
-        localityMode: input.localityMode
+        localityMode: input.localityMode,
+        respectInputSequence: preserveShopeeStopSequence
       });
       await recordOperationalEvent(ctx.user.id, {
         type: "route_remaining_reoptimized",
@@ -11019,6 +11608,7 @@ var appRouter = router({
         metadata: {
           excludedStops: input.excludeStopIds.length,
           localityMode: input.localityMode,
+          respectInputSequence: preserveShopeeStopSequence,
           totalDistance: optimized.totalDistance,
           totalTime: optimized.totalTime,
           startedFromCurrentLocation: Boolean(startLocation),
@@ -11027,7 +11617,10 @@ var appRouter = router({
           auditScore: optimized.audit?.score,
           auditIssueCount: optimized.audit?.issueCount,
           auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
-          auditRequireStartLocation: true
+          auditRequireStartLocation: true,
+          auditPolicy: optimized.auditPolicy ?? null,
+          structuralAuditOnly: optimized.auditPolicy === "shopee_stop_preserved",
+          coherenceAuditSkipped: optimized.auditPolicy === "shopee_stop_preserved"
         }
       });
       await recordRouteAuditEvent(
@@ -11142,6 +11735,68 @@ var appRouter = router({
       }
       await updateRoute(input.routeId, ctx.user.id, { status: "draft" });
       return { success: true };
+    }),
+    detectCommercial: protectedProcedure.input(z2.object({
+      routeId: z2.number(),
+      stopId: z2.number()
+    })).mutation(async ({ ctx, input }) => {
+      await requireUserRoute(input.routeId, ctx.user.id);
+      const routeStops = await getRouteStops(input.routeId);
+      const stop = routeStops.find(
+        (item) => Number(item.id) === Number(input.stopId)
+      );
+      if (!stop) {
+        throw new TRPCError3({
+          code: "NOT_FOUND",
+          message: "Parada nao encontrada."
+        });
+      }
+      const latitude = Number(stop.latitude);
+      const longitude = Number(stop.longitude);
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude === 0 && longitude === 0) {
+        throw new TRPCError3({
+          code: "BAD_REQUEST",
+          message: "Parada sem coordenadas validas para consulta comercial."
+        });
+      }
+      const detection = await detectCommercialAtLocation(latitude, longitude);
+      const updatedStop = await updateStop(input.routeId, input.stopId, {
+        commercialDetectionStatus: detection.commercialDetectionStatus,
+        commercialConfidence: detection.commercialConfidence,
+        commercialPlaceName: detection.commercialPlaceName,
+        commercialCategory: detection.commercialCategory,
+        commercialOpeningHours: detection.commercialOpeningHours,
+        commercialSource: detection.commercialSource,
+        commercialLastCheckedAt: detection.commercialLastCheckedAt
+      });
+      const eta = estimateEtaForStop(routeStops, input.stopId);
+      const etaAlert = buildCommercialEtaAlert(detection, eta);
+      await createOperationalEvent({
+        userId: ctx.user.id,
+        routeId: input.routeId,
+        stopId: input.stopId,
+        type: "commercial_detection_checked",
+        severity: etaAlert.severity === "danger" ? "warning" : detection.commercialDetectionStatus === "unknown" ? "info" : "info",
+        source: "stops.detectCommercial",
+        title: "Consulta de estabelecimento no local",
+        message: detection.commercialDetectionStatus === "unknown" ? "Nenhuma evidencia comercial encontrada no local." : "Evidencia comercial consultada por coordenadas.",
+        metadata: {
+          commercialDetectionStatus: detection.commercialDetectionStatus,
+          commercialConfidence: detection.commercialConfidence,
+          commercialPlaceName: detection.commercialPlaceName,
+          commercialCategory: detection.commercialCategory,
+          commercialOpeningHours: detection.commercialOpeningHours,
+          commercialSource: detection.commercialSource,
+          etaAlert
+        }
+      }).catch((error) => {
+        console.warn("[CommercialDetection] Failed to record event:", error);
+      });
+      return {
+        stop: updatedStop,
+        detection,
+        etaAlert
+      };
     })
   }),
   analytics: router({

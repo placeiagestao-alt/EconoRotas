@@ -85,6 +85,153 @@ describe("parseRouteRows", () => {
     expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([false, true, false, false]);
   });
 
+  it("keeps a zero STOP beside an existing same-address Shopee group", () => {
+    const sameAddress = "Rua Lefe Buchalla, 142, Parque Alto Bela Vista, Presidente Prudente, SP";
+    const route = parseRouteRows(
+      [
+        ...Array.from({ length: 6 }, (_, index) => ({
+          "Destination Address": sameAddress,
+          STOP: 20 + index,
+          Latitude: -22.094881,
+          Longitude: -51.407986,
+        })),
+        {
+          "Destination Address": "Rua Distante, 10, Presidente Prudente, SP",
+          STOP: 30,
+          Latitude: -22.12,
+          Longitude: -51.45,
+        },
+        {
+          "Destination Address": sameAddress,
+          STOP: 0,
+          Latitude: -22.094961,
+          Longitude: -51.408037,
+        },
+      ],
+      "rota-shopee-zero-mesmo-endereco.xlsx",
+      "shopee"
+    );
+
+    expect(route.stops.map((stop) => stop.address)).toEqual([
+      sameAddress,
+      sameAddress,
+      sameAddress,
+      sameAddress,
+      sameAddress,
+      sameAddress,
+      sameAddress,
+      "Rua Distante, 10, Presidente Prudente, SP",
+    ]);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      0,
+      30,
+    ]);
+    expect(route.stops[6].isUnsequencedStop).toBe(true);
+  });
+
+  it("treats dash STOP as unsequenced Shopee stop", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Route ID": "AT202606125YWJY",
+          "Destination Address": "Rua A, 10, Presidente Prudente, SP",
+          STOP: 1,
+          "SPX TN": "BR260000000001A",
+          Latitude: -22.1,
+          Longitude: -51.4,
+        },
+        {
+          "Route ID": "AT202606125YWJY",
+          "Destination Address": "Rua B, 20, Presidente Prudente, SP",
+          STOP: "-",
+          "SPX TN": "BR260000000002A",
+          Latitude: -22.1001,
+          Longitude: -51.4001,
+        },
+        {
+          "Route ID": "AT202606125YWJY",
+          "Destination Address": "Rua C, 30, Presidente Prudente, SP",
+          STOP: 2,
+          "SPX TN": "BR260000000003A",
+          Latitude: -22.2,
+          Longitude: -51.5,
+        },
+      ],
+      "rota-shopee-traco.xlsx",
+      "shopee"
+    );
+
+    expect(route.hasStopSequence).toBe(true);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([1, 0, 2]);
+    expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([false, true, false]);
+  });
+
+  it("auto-detects Shopee STOP when source was left generic but the file has AT route and BR tracking", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Route ID": "AT202606125YWJY",
+          "Destination Address": "Rua B, 20, Presidente Prudente, SP",
+          STOP: 2,
+          "SPX TN": "BR260000000002A",
+          Latitude: -22.2,
+          Longitude: -51.5,
+        },
+        {
+          "Route ID": "AT202606125YWJY",
+          "Destination Address": "Rua A, 10, Presidente Prudente, SP",
+          STOP: 1,
+          "SPX TN": "BR260000000001A",
+          Latitude: -22.1,
+          Longitude: -51.4,
+        },
+      ],
+      "rota-auto-shopee.xlsx",
+      "generic"
+    );
+
+    expect(route.sourceProvider).toBe("shopee");
+    expect(route.hasStopSequence).toBe(true);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([1, 2]);
+    expect(route.stops.map((stop) => stop.sourceProvider)).toEqual(["shopee", "shopee"]);
+  });
+
+  it("auto-detects Shopee STOP when source was left manual but the file has AT route and BR tracking", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Route ID": "AT202606125YWJY",
+          "Destination Address": "Rua B, 20, Presidente Prudente, SP",
+          STOP: 2,
+          "SPX TN": "BR260000000002A",
+          Latitude: -22.2,
+          Longitude: -51.5,
+        },
+        {
+          "Route ID": "AT202606125YWJY",
+          "Destination Address": "Rua A, 10, Presidente Prudente, SP",
+          STOP: "-",
+          "SPX TN": "BR260000000001A",
+          Latitude: -22.1,
+          Longitude: -51.4,
+        },
+      ],
+      "rota-auto-shopee-manual.xlsx",
+      "manual"
+    );
+
+    expect(route.sourceProvider).toBe("shopee");
+    expect(route.hasStopSequence).toBe(true);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([0, 2]);
+    expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([true, false]);
+  });
+
   it("ignores sequence aliases when STOP column does not exist", () => {
     const route = parseRouteRows(
       [

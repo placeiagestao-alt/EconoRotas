@@ -23,6 +23,7 @@ import {
   adminDashboardMetrics,
   geocodeCache,
   addressCorrections,
+  locationCommercialCache,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 import {
@@ -68,6 +69,7 @@ const memory = {
   performanceBenchmarks: [] as any[],
   geocodeCache: [] as any[],
   addressCorrections: [] as any[],
+  locationCommercialCache: [] as any[],
   ids: {
     users: 1,
     routes: 1,
@@ -82,6 +84,7 @@ const memory = {
     performanceBenchmarks: 1,
     geocodeCache: 1,
     addressCorrections: 1,
+    locationCommercialCache: 1,
   },
 };
 
@@ -144,6 +147,7 @@ function hydrateMemory(data: any) {
   memory.performanceBenchmarks = Array.isArray(data.performanceBenchmarks) ? data.performanceBenchmarks : [];
   memory.geocodeCache = Array.isArray(data.geocodeCache) ? data.geocodeCache : [];
   memory.addressCorrections = Array.isArray(data.addressCorrections) ? data.addressCorrections : [];
+  memory.locationCommercialCache = Array.isArray(data.locationCommercialCache) ? data.locationCommercialCache : [];
   memory.ids = {
     users: Number(data.ids?.users) || 1,
     routes: Number(data.ids?.routes) || 1,
@@ -158,6 +162,7 @@ function hydrateMemory(data: any) {
     performanceBenchmarks: Number(data.ids?.performanceBenchmarks) || 1,
     geocodeCache: Number(data.ids?.geocodeCache) || 1,
     addressCorrections: Number(data.ids?.addressCorrections) || 1,
+    locationCommercialCache: Number(data.ids?.locationCommercialCache) || 1,
   };
 }
 
@@ -372,6 +377,118 @@ export async function setGeocodeCache(data: {
     });
 }
 
+// ==================== COMMERCIAL LOCATION CACHE ====================
+
+export type CommercialCacheHit = {
+  lat: number;
+  lng: number;
+  radius: number;
+  response: unknown;
+  createdAt: Date | string;
+};
+
+function parseJsonMaybe(value: unknown) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeCacheCoordinate(value: number) {
+  return Number(value).toFixed(6);
+}
+
+export async function getLocationCommercialCache(data: {
+  latitude: number;
+  longitude: number;
+  radius: number;
+  ttlDays?: number;
+}): Promise<CommercialCacheHit | null> {
+  const lat = normalizeCacheCoordinate(data.latitude);
+  const lng = normalizeCacheCoordinate(data.longitude);
+  const radius = Math.round(data.radius);
+  const cutoff = new Date(Date.now() - (data.ttlDays ?? 30) * 24 * 60 * 60 * 1000);
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cached = [...memory.locationCommercialCache]
+        .filter(
+          (item) =>
+            String(item.lat) === lat &&
+            String(item.lng) === lng &&
+            Number(item.radius) === radius &&
+            new Date(item.createdAt) >= cutoff
+        )
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+      if (!cached) return null;
+      return {
+        lat: Number(cached.lat),
+        lng: Number(cached.lng),
+        radius,
+        response: parseJsonMaybe(cached.response),
+        createdAt: cached.createdAt,
+      };
+    }
+    return null;
+  }
+
+  const rows = await db
+    .select()
+    .from(locationCommercialCache)
+    .where(
+      and(
+        eq(locationCommercialCache.lat, lat),
+        eq(locationCommercialCache.lng, lng),
+        eq(locationCommercialCache.radius, radius),
+        gte(locationCommercialCache.createdAt, cutoff)
+      )
+    )
+    .orderBy(desc(locationCommercialCache.createdAt))
+    .limit(1);
+  const cached = rows[0];
+  if (!cached) return null;
+
+  return {
+    lat: Number(cached.lat),
+    lng: Number(cached.lng),
+    radius,
+    response: parseJsonMaybe(cached.response),
+    createdAt: cached.createdAt,
+  };
+}
+
+export async function setLocationCommercialCache(data: {
+  latitude: number;
+  longitude: number;
+  radius: number;
+  response: unknown;
+}) {
+  const payload = {
+    lat: normalizeCacheCoordinate(data.latitude),
+    lng: normalizeCacheCoordinate(data.longitude),
+    radius: Math.round(data.radius),
+    response: data.response,
+  };
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      memory.locationCommercialCache.push({
+        id: memory.ids.locationCommercialCache++,
+        ...payload,
+        createdAt: new Date(),
+      });
+      await persistFallbackDb();
+    }
+    return;
+  }
+
+  await db.insert(locationCommercialCache).values(payload as any);
+}
+
 async function loadRemoteDb() {
   if (remoteDbLoaded) return;
   if (!hasPersistentFallbackDbConfigured()) return;
@@ -551,6 +668,17 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["stops", "originalStop"],
   ["stops", "isUnsequencedStop"],
   ["stops", "metadata"],
+  ["stops", "commercialDetectionStatus"],
+  ["stops", "commercialConfidence"],
+  ["stops", "commercialPlaceName"],
+  ["stops", "commercialCategory"],
+  ["stops", "commercialOpeningHours"],
+  ["stops", "commercialSource"],
+  ["stops", "commercialLastCheckedAt"],
+  ["location_commercial_cache", "lat"],
+  ["location_commercial_cache", "lng"],
+  ["location_commercial_cache", "radius"],
+  ["location_commercial_cache", "response"],
   ["userIntegrations", "authTokenEncrypted"],
   ["operationalEvents", "type"],
   ["operationalEvents", "severity"],
@@ -1364,6 +1492,13 @@ export async function createStops(routeId: number, stopsData: Array<{
   geocodingConfidenceScore?: number;
   geocodingMethod?: GeocodingMethod | string;
   geocodingSuspect?: boolean;
+  commercialDetectionStatus?: "unknown" | "suspected" | "confirmed";
+  commercialConfidence?: number;
+  commercialPlaceName?: string | null;
+  commercialCategory?: string | null;
+  commercialOpeningHours?: string | null;
+  commercialSource?: string | null;
+  commercialLastCheckedAt?: Date | string | null;
 }>) {
   const db = await getDb();
   if (!db) {
@@ -1397,6 +1532,13 @@ export async function createStops(routeId: number, stopsData: Array<{
           originalStop: stop.originalStop ?? null,
           isUnsequencedStop: Boolean(stop.isUnsequencedStop),
           metadata: Object.keys(metadata).length ? metadata : null,
+          commercialDetectionStatus: stop.commercialDetectionStatus ?? "unknown",
+          commercialConfidence: Math.max(0, Math.min(100, Number(stop.commercialConfidence ?? 0))),
+          commercialPlaceName: stop.commercialPlaceName ?? null,
+          commercialCategory: stop.commercialCategory ?? null,
+          commercialOpeningHours: stop.commercialOpeningHours ?? null,
+          commercialSource: stop.commercialSource ?? null,
+          commercialLastCheckedAt: stop.commercialLastCheckedAt ? new Date(stop.commercialLastCheckedAt) : null,
           createdAt: now,
         };
       });
@@ -1435,6 +1577,13 @@ export async function createStops(routeId: number, stopsData: Array<{
       originalStop: s.originalStop ?? null,
       isUnsequencedStop: Boolean(s.isUnsequencedStop),
       metadata: Object.keys(metadata).length ? metadata : null,
+      commercialDetectionStatus: s.commercialDetectionStatus ?? "unknown",
+      commercialConfidence: Math.max(0, Math.min(100, Number(s.commercialConfidence ?? 0))),
+      commercialPlaceName: s.commercialPlaceName ?? null,
+      commercialCategory: s.commercialCategory ?? null,
+      commercialOpeningHours: s.commercialOpeningHours ?? null,
+      commercialSource: s.commercialSource ?? null,
+      commercialLastCheckedAt: s.commercialLastCheckedAt ? new Date(s.commercialLastCheckedAt) : null,
     };
   });
 
@@ -1473,6 +1622,13 @@ export async function updateStop(routeId: number, stopId: number, data: Partial<
   geocodingConfidenceScore: number;
   geocodingMethod: GeocodingMethod | string;
   geocodingSuspect: boolean;
+  commercialDetectionStatus: "unknown" | "suspected" | "confirmed";
+  commercialConfidence: number;
+  commercialPlaceName: string | null;
+  commercialCategory: string | null;
+  commercialOpeningHours: string | null;
+  commercialSource: string | null;
+  commercialLastCheckedAt: Date | string | null;
 }>) {
   const db = await getDb();
   if (!db) {

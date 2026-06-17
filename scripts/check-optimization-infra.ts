@@ -31,7 +31,11 @@ try {
   queue = await withTimeout(getOptimizationQueueHealth(), "queue");
 } catch (error) {
   queue = {
-    configured: Boolean(process.env.BULLMQ_REDIS_URL || process.env.REDIS_URL),
+    configured: Boolean(
+      process.env.BULLMQ_REDIS_URL ||
+        process.env.ECONOROTAS_REDIS_URL ||
+        process.env.REDIS_URL
+    ),
     reachable: false,
     queueName: "econorota-optimization",
     counts: null,

@@ -499,7 +499,7 @@ export function createOptimizationWorker(
 ) {
   const connection = getConnectionOptions();
   if (!connection) {
-    throw new Error("BULLMQ_REDIS_URL ou REDIS_URL nao configurado para o worker.");
+    throw new Error("BULLMQ_REDIS_URL, ECONOROTAS_REDIS_URL ou REDIS_URL nao configurado para o worker.");
   }
 
   const workerStartedAt = new Date();

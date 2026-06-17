@@ -551,6 +551,37 @@ function hasStopColumn(headerMap: Record<string, string>) {
   return Boolean(headerMap[normalizeHeader(HEADER_ALIASES.stop[0])]);
 }
 
+function hasShopeeRouteEvidence(
+  rows: RawSpreadsheetRow[],
+  headerMap: Record<string, string>
+) {
+  return rows.some((row) => {
+    const routeId = cleanText(getCell(row, headerMap, HEADER_ALIASES.routeId));
+    const tracking = cleanText(getCell(row, headerMap, HEADER_ALIASES.tracking));
+
+    return (
+      /^AT\d{8,}/i.test(routeId) ||
+      /^BR[A-Z0-9]{8,}$/i.test(tracking)
+    );
+  });
+}
+
+function resolveImportSourceProvider(
+  requestedProvider: StopSourceProvider,
+  rows: RawSpreadsheetRow[],
+  headerMap: Record<string, string>
+) {
+  const stopColumnExists = hasStopColumn(headerMap);
+  const canAutoDetectShopee =
+    requestedProvider === "generic" || requestedProvider === "manual";
+
+  if (canAutoDetectShopee && stopColumnExists && hasShopeeRouteEvidence(rows, headerMap)) {
+    return "shopee";
+  }
+
+  return requestedProvider;
+}
+
 function getStopSequence(row: RawSpreadsheetRow, headerMap: Record<string, string>) {
   const stop = cleanText(getCell(row, headerMap, HEADER_ALIASES.stop));
   const parsed = Number(stop.replace(",", "."));
@@ -561,6 +592,92 @@ function calculateDistanceScore(a: ParsedRouteRow, b: ParsedRouteRow) {
   const latDiff = a.latitude - b.latitude;
   const lngDiff = a.longitude - b.longitude;
   return latDiff * latDiff + lngDiff * lngDiff;
+}
+
+function calculateDistanceMeters(a: ParsedRouteRow, b: ParsedRouteRow) {
+  if (!a.latitude || !a.longitude || !b.latitude || !b.longitude) {
+    return Infinity;
+  }
+
+  const earthRadiusMeters = 6371000;
+  const toRadians = (value: number) => (value * Math.PI) / 180;
+  const lat1 = toRadians(a.latitude);
+  const lat2 = toRadians(b.latitude);
+  const latDiff = toRadians(b.latitude - a.latitude);
+  const lngDiff = toRadians(b.longitude - a.longitude);
+  const sinLat = Math.sin(latDiff / 2);
+  const sinLng = Math.sin(lngDiff / 2);
+  const h =
+    sinLat * sinLat +
+    Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+
+  return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function normalizeAddressGroupPart(value: string) {
+  return normalizeHeader(value)
+    .replace(/\b(ap|apto|apartamento|bloco|torre|casa|fundos|frente|sala|loja)\b.*$/i, "")
+    .trim();
+}
+
+function getAddressGroupKey(address?: string) {
+  const parts = String(address || "")
+    .split(",")
+    .map((part) => normalizeAddressGroupPart(part))
+    .filter(Boolean);
+
+  if (parts.length >= 2 && /^\d{1,6}[a-z]?$/.test(parts[1])) {
+    return `${parts[0]}|${parts[1]}`;
+  }
+
+  return normalizeAddressGroupPart(String(address || ""));
+}
+
+function getLastIndexOfMatchingAddressGroup(
+  orderedRows: ParsedRouteRow[],
+  floatingRow: ParsedRouteRow
+) {
+  const floatingKey = getAddressGroupKey(floatingRow.address);
+  if (!floatingKey) return -1;
+
+  for (let index = orderedRows.length - 1; index >= 0; index -= 1) {
+    if (getAddressGroupKey(orderedRows[index].address) === floatingKey) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function getLastIndexOfNearbyAddressGroup(
+  orderedRows: ParsedRouteRow[],
+  floatingRow: ParsedRouteRow
+) {
+  const floatingKey = getAddressGroupKey(floatingRow.address);
+  if (!floatingKey || !floatingRow.latitude || !floatingRow.longitude) return -1;
+
+  let closestIndex = -1;
+  let closestDistance = Infinity;
+
+  orderedRows.forEach((row, index) => {
+    if (getAddressGroupKey(row.address) !== floatingKey) return;
+
+    const distanceMeters = calculateDistanceMeters(row, floatingRow);
+    if (distanceMeters <= 35 && distanceMeters < closestDistance) {
+      closestDistance = distanceMeters;
+      closestIndex = index;
+    }
+  });
+
+  if (closestIndex < 0) return -1;
+
+  let groupEndIndex = closestIndex;
+  for (let index = closestIndex + 1; index < orderedRows.length; index += 1) {
+    if (getAddressGroupKey(orderedRows[index].address) !== floatingKey) break;
+    groupEndIndex = index;
+  }
+
+  return groupEndIndex;
 }
 
 function getInsertionCost(
@@ -594,6 +711,16 @@ function findBestInsertionIndex(
   orderedRows: ParsedRouteRow[],
   floatingRow: ParsedRouteRow
 ) {
+  const exactAddressGroupIndex = getLastIndexOfMatchingAddressGroup(orderedRows, floatingRow);
+  if (exactAddressGroupIndex >= 0) {
+    return exactAddressGroupIndex + 1;
+  }
+
+  const nearbyAddressGroupIndex = getLastIndexOfNearbyAddressGroup(orderedRows, floatingRow);
+  if (nearbyAddressGroupIndex >= 0) {
+    return nearbyAddressGroupIndex + 1;
+  }
+
   let bestIndex = orderedRows.length;
   let bestCost = Infinity;
 
@@ -649,8 +776,12 @@ export function parseRouteRows(
     throw new Error("A planilha esta vazia.");
   }
 
-  const normalizedSourceProvider = normalizeStopSourceProvider(sourceProvider);
   const headerMap = createHeaderMap(rows[0]);
+  const normalizedSourceProvider = resolveImportSourceProvider(
+    normalizeStopSourceProvider(sourceProvider),
+    rows,
+    headerMap
+  );
   const stopColumnExists = hasStopColumn(headerMap);
   const useShopeeStop = normalizedSourceProvider === "shopee" && stopColumnExists;
   const parsedRows = rows

@@ -23,6 +23,13 @@ export interface Location {
   originalStop?: number | null;
   isUnsequencedStop?: boolean | null;
   metadata?: StopMetadata | null;
+  commercialDetectionStatus?: "unknown" | "suspected" | "confirmed";
+  commercialConfidence?: number;
+  commercialPlaceName?: string | null;
+  commercialCategory?: string | null;
+  commercialOpeningHours?: string | null;
+  commercialSource?: string | null;
+  commercialLastCheckedAt?: Date | string | null;
 }
 
 export interface OptimizedRoute {
@@ -896,15 +903,7 @@ function optimizePartitionedOpenRoute(
     const partitionIndex = chooseNextGeographicPartition(remaining, currentLocation);
     const [partition] = remaining.splice(partitionIndex, 1);
     const isLastPartition = remaining.length === 0;
-    const partitionLocations = partition.stops.map((stop) => ({
-      latitude: stop.latitude,
-      longitude: stop.longitude,
-      address: stop.address,
-      notes: stop.notes,
-      geocodingConfidenceScore: stop.geocodingConfidenceScore,
-      geocodingMethod: stop.geocodingMethod,
-      geocodingSuspect: stop.geocodingSuspect,
-    }));
+    const partitionLocations = partition.stops.map(({ originalIndex, ...stop }) => stop);
     const optimizedPartition = optimizeOpenRoute(partitionLocations, mode, 0, {
       ...options,
       startLocation: currentLocation,
@@ -919,14 +918,9 @@ function optimizePartitionedOpenRoute(
       const originalStop = partition.stops[localIndex];
       if (!originalStop) return null;
       finalSequence.push(originalStop.originalIndex);
+      const { originalIndex, ...waypoint } = originalStop;
       finalWaypoints.push({
-        latitude: originalStop.latitude,
-        longitude: originalStop.longitude,
-        address: originalStop.address,
-        notes: originalStop.notes,
-        geocodingConfidenceScore: originalStop.geocodingConfidenceScore,
-        geocodingMethod: originalStop.geocodingMethod,
-        geocodingSuspect: originalStop.geocodingSuspect,
+        ...waypoint,
         sequence: finalWaypoints.length,
       });
     }

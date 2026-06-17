@@ -797,12 +797,7 @@ async function optimizePartitionedRouteWithRoadMetrics(
     const partitionIndex = chooseNextPartition(remaining, currentLocation);
     const [partition] = remaining.splice(partitionIndex, 1);
     const isLastPartition = remaining.length === 0;
-    const partitionLocations = partition.stops.map((stop) => ({
-      latitude: stop.latitude,
-      longitude: stop.longitude,
-      address: stop.address,
-      notes: stop.notes,
-    }));
+    const partitionLocations = partition.stops.map(({ originalIndex, ...stop }) => stop);
 
     const optimizedPartition = await optimizeRouteWithRoadMetrics(
       partitionLocations,
@@ -824,11 +819,9 @@ async function optimizePartitionedRouteWithRoadMetrics(
       const originalStop = partition.stops[localIndex];
       if (!originalStop) return null;
       finalSequence.push(originalStop.originalIndex);
+      const { originalIndex, ...waypoint } = originalStop;
       finalWaypoints.push({
-        latitude: originalStop.latitude,
-        longitude: originalStop.longitude,
-        address: originalStop.address,
-        notes: originalStop.notes,
+        ...waypoint,
         sequence: finalWaypoints.length,
       });
     }

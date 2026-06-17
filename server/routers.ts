@@ -52,8 +52,13 @@ import {
 import {
   normalizeStopMetadata,
   normalizeStopSourceProvider,
+  parseLegacyStopNotes,
   STOP_SOURCE_PROVIDERS,
 } from "../shared/stopMetadata";
+import {
+  buildCommercialEtaAlert,
+  detectCommercialAtLocation,
+} from "./commercialDetection";
 import {
   enqueueOptimizationJob,
   getOptimizationQueueHealth,
@@ -75,6 +80,11 @@ const MAX_PREMATURE_EXIT_FIXES = 50;
 const MAX_BATCH_AUDIT_REPAIR_PASSES = 3;
 const OSRM_CIRCUIT_MIN_CALLS = 20;
 const OSRM_CIRCUIT_FAILURE_RATE = 0.8;
+const STRUCTURAL_AUDIT_ISSUE_TYPES = new Set<RouteAuditReport["issues"][number]["type"]>([
+  "missing_coordinates",
+  "invalid_coordinates",
+  "empty_address",
+]);
 type CoherenceFixIssueType =
   | "nearby_stop_skipped"
   | "region_revisited"
@@ -233,6 +243,71 @@ function routeStopsToAuditableStops(routeStops: any[]): AuditableStop[] {
   }));
 }
 
+function isShopeeStopPreservedRoute(
+  routeStops: Array<{
+    sourceProvider?: unknown;
+    originalStop?: unknown;
+    isUnsequencedStop?: unknown;
+    notes?: unknown;
+  }>,
+  respectInputSequence?: boolean
+) {
+  if (!respectInputSequence) return false;
+
+  return routeStops.some((stop) => {
+    const legacy = parseLegacyStopNotes(
+      typeof stop.notes === "string" ? stop.notes : undefined
+    );
+    const sourceProvider = normalizeStopSourceProvider(
+      typeof stop.sourceProvider === "string"
+        ? stop.sourceProvider
+        : legacy.metadata.sourceRouteId ||
+            legacy.metadata.packageNumber === "0" ||
+            legacy.originalStop !== undefined
+          ? "shopee"
+          : undefined
+    );
+    return (
+      sourceProvider === "shopee" &&
+      (stop.originalStop !== null &&
+        stop.originalStop !== undefined ||
+        Boolean(stop.isUnsequencedStop) ||
+        legacy.originalStop !== undefined ||
+        legacy.metadata.packageNumber === "0")
+    );
+  });
+}
+
+function asShopeeStructuralAudit(report: RouteAuditReport): RouteAuditReport {
+  const structuralIssues = report.issues.filter((issue) =>
+    STRUCTURAL_AUDIT_ISSUE_TYPES.has(issue.type)
+  );
+  const criticalCount = structuralIssues.filter(
+    (issue) => issue.severity === "critical"
+  ).length;
+  const warningCount = structuralIssues.length - criticalCount;
+
+  return {
+    ...report,
+    status: criticalCount > 0 ? "critical" : warningCount > 0 ? "attention" : "approved",
+    score: criticalCount > 0 ? Math.min(report.score, 70) : 100,
+    quality: criticalCount > 0 ? "blocked" : warningCount > 0 ? "attention" : "excellent",
+    issueCount: structuralIssues.length,
+    criticalCount,
+    warningCount,
+    issues: structuralIssues,
+  };
+}
+
+function applyShopeeStopAuditPolicy(
+  report: RouteAuditReport,
+  auditPolicy: string | null
+): RouteAuditReport {
+  return auditPolicy === "shopee_stop_preserved"
+    ? asShopeeStructuralAudit(report)
+    : report;
+}
+
 function getBlockingAuditIssues(audit: RouteAuditReport) {
   return audit.issues.filter((issue) => BLOCKING_AUDIT_ISSUE_TYPES.has(issue.type));
 }
@@ -348,7 +423,127 @@ function routeWaypointsToLocations(waypoints: OptimizedRoute["waypoints"]): Loca
     geocodingConfidenceScore: waypoint.geocodingConfidenceScore,
     geocodingMethod: waypoint.geocodingMethod,
     geocodingSuspect: waypoint.geocodingSuspect,
+    commercialDetectionStatus: waypoint.commercialDetectionStatus,
+    commercialConfidence: waypoint.commercialConfidence,
+    commercialPlaceName: waypoint.commercialPlaceName,
+    commercialCategory: waypoint.commercialCategory,
+    commercialOpeningHours: waypoint.commercialOpeningHours,
+    commercialSource: waypoint.commercialSource,
+    commercialLastCheckedAt: waypoint.commercialLastCheckedAt,
   }));
+}
+
+function normalizeAddressForStopGrouping(value: unknown) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\b(ap|apto|apartamento|bloco|torre|casa|fundos|frente|sala|loja)\b.*$/i, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function getStopAddressGroupKey(address: unknown) {
+  const parts = String(address || "")
+    .split(",")
+    .map(normalizeAddressForStopGrouping)
+    .filter(Boolean);
+
+  if (parts.length >= 2 && /^\d{1,6}[a-z]?$/.test(parts[1])) {
+    return `${parts[0]}|${parts[1]}`;
+  }
+
+  return normalizeAddressForStopGrouping(address);
+}
+
+function findShopeeFloatingInsertionIndex(
+  orderedLocations: Location[],
+  floatingLocation: Location
+) {
+  const floatingKey = getStopAddressGroupKey(floatingLocation.address);
+  if (floatingKey) {
+    for (let index = orderedLocations.length - 1; index >= 0; index -= 1) {
+      if (getStopAddressGroupKey(orderedLocations[index].address) === floatingKey) {
+        return index + 1;
+      }
+    }
+  }
+
+  let bestIndex = orderedLocations.length;
+  let bestCost = Infinity;
+
+  for (let index = 0; index <= orderedLocations.length; index += 1) {
+    const previous = orderedLocations[index - 1];
+    const next = orderedLocations[index];
+    const cost =
+      previous && next
+        ? calculateDistance(previous, floatingLocation) +
+          calculateDistance(floatingLocation, next) -
+          calculateDistance(previous, next)
+        : previous
+          ? calculateDistance(previous, floatingLocation)
+          : next
+            ? calculateDistance(floatingLocation, next)
+            : 0;
+
+    if (cost < bestCost) {
+      bestCost = cost;
+      bestIndex = index;
+    }
+  }
+
+  return bestIndex;
+}
+
+function orderShopeeStopPreservedLocations(locations: Location[]) {
+  const hasShopeeStop = locations.some(
+    (location) =>
+      normalizeStopSourceProvider(location.sourceProvider) === "shopee" &&
+      (Number(location.originalStop) > 0 || Boolean(location.isUnsequencedStop))
+  );
+  if (!hasShopeeStop) return locations;
+
+  const sequenced = locations
+    .filter((location) => !location.isUnsequencedStop)
+    .sort((a, b) => {
+      const aStop = Number(a.originalStop);
+      const bStop = Number(b.originalStop);
+      if (Number.isFinite(aStop) && aStop > 0 && Number.isFinite(bStop) && bStop > 0) {
+        return aStop - bStop;
+      }
+      return 0;
+    });
+  const floating = locations.filter((location) => Boolean(location.isUnsequencedStop));
+  const ordered = [...sequenced];
+
+  floating.forEach((location) => {
+    ordered.splice(findShopeeFloatingInsertionIndex(ordered, location), 0, location);
+  });
+
+  return ordered;
+}
+
+function estimateEtaForStop(
+  routeStops: Array<{ id?: unknown; latitude?: unknown; longitude?: unknown }>,
+  stopId: number
+) {
+  const orderedStops = routeStops
+    .map((stop) => ({
+      id: Number(stop.id),
+      latitude: Number(stop.latitude),
+      longitude: Number(stop.longitude),
+    }))
+    .filter((stop) => Number.isFinite(stop.latitude) && Number.isFinite(stop.longitude));
+  const index = orderedStops.findIndex((stop) => stop.id === stopId);
+  if (index < 0) return null;
+
+  let minutes = 0;
+  for (let stopIndex = 0; stopIndex < index; stopIndex += 1) {
+    const distanceKm = calculateDistance(orderedStops[stopIndex], orderedStops[stopIndex + 1]);
+    minutes += estimateTravelTime(distanceKm);
+  }
+
+  return new Date(Date.now() + minutes * 60 * 1000);
 }
 
 function correctionLimitForIssueType(type: RouteAuditReport["issues"][number]["type"]) {
@@ -616,12 +811,7 @@ function reorderRouteByAuditIssue(
     if (insertionIndex < 0) return null;
 
     remainingWaypoints.splice(insertionIndex, 0, ...pendingWaypoints);
-    return remainingWaypoints.map((waypoint) => ({
-      latitude: waypoint.latitude,
-      longitude: waypoint.longitude,
-      address: waypoint.address,
-      notes: waypoint.notes,
-    }));
+    return routeWaypointsToLocations(remainingWaypoints);
   }
 
   const nearestIndex = waypoints.findIndex(
@@ -638,12 +828,7 @@ function reorderRouteByAuditIssue(
   const [nearestWaypoint] = waypoints.splice(nearestIndex, 1);
   waypoints.splice(plannedIndex, 0, nearestWaypoint);
 
-  return waypoints.map((waypoint) => ({
-    latitude: waypoint.latitude,
-    longitude: waypoint.longitude,
-    address: waypoint.address,
-    notes: waypoint.notes,
-  }));
+  return routeWaypointsToLocations(waypoints);
 }
 
 async function assertRouteStopsReadyForOptimization(
@@ -689,15 +874,17 @@ function auditOptimizedRoute(
     startLocation?: Location;
     usedRoadMetrics?: boolean;
     respectInputSequence?: boolean;
+    auditPolicy?: string | null;
   } = {}
 ): RouteAuditReport {
-  return auditRouteSequence(routeToAuditableStops(route), {
+  const report = auditRouteSequence(routeToAuditableStops(route), {
     startLocation: options.startLocation,
     requireStartLocation: true,
     actualTotalDistanceKm: route.totalDistance,
     usedRoadMetrics: options.usedRoadMetrics,
     respectInputSequence: options.respectInputSequence,
   });
+  return applyShopeeStopAuditPolicy(report, options.auditPolicy ?? null);
 }
 
 function readBooleanMetadata(
@@ -836,6 +1023,12 @@ export async function optimizeUserRoute(
   const routeStops = (await db.getRouteStops(routeId)).filter(
     (stop: any) => !excludedStopIds.has(Number(stop.id))
   );
+  const auditPolicy = isShopeeStopPreservedRoute(
+    routeStops,
+    Boolean(options?.respectInputSequence)
+  )
+    ? "shopee_stop_preserved"
+    : null;
   runtimeBreakdown.dbFetchMs = Date.now() - dbFetchStartedAt;
 
   if (routeStops.length === 0) {
@@ -863,6 +1056,7 @@ export async function optimizeUserRoute(
         routeMode: requestedMode || route.mode,
         localityMode: options?.localityMode ?? null,
         respectInputSequence: Boolean(options?.respectInputSequence),
+        auditPolicy,
         excludeStopIds: options?.excludeStopIds ?? [],
         requiresExternalWorker: true,
       },
@@ -961,19 +1155,55 @@ export async function optimizeUserRoute(
 
   await assertRouteStopsReadyForOptimization(routeStops, { userId, routeId });
 
-  const locations: Location[] = routeStops.map((stop: any) => ({
-    latitude: parseFloat(String(stop.latitude ?? 0)),
-    longitude: parseFloat(String(stop.longitude ?? 0)),
-    address: stop.address,
-    notes: stop.notes ?? undefined,
-    sourceProvider: normalizeStopSourceProvider(stop.sourceProvider),
-    originalStop: stop.originalStop ?? null,
-    isUnsequencedStop: Boolean(stop.isUnsequencedStop),
-    metadata: normalizeStopMetadata(stop.metadata),
-    geocodingConfidenceScore: Number(stop.geocodingConfidenceScore ?? 0),
-    geocodingMethod: stop.geocodingMethod ?? undefined,
-    geocodingSuspect: Boolean(stop.geocodingSuspect),
-  }));
+  const locations: Location[] = routeStops.map((stop: any) => {
+    const legacy = parseLegacyStopNotes(stop.notes ?? undefined);
+    const metadata = normalizeStopMetadata({
+      ...legacy.metadata,
+      ...normalizeStopMetadata(stop.metadata),
+    });
+    const sourceProvider = normalizeStopSourceProvider(
+      stop.sourceProvider ||
+        (legacy.metadata.sourceRouteId ||
+        legacy.metadata.packageNumber === "0" ||
+        legacy.originalStop !== undefined
+          ? "shopee"
+          : undefined)
+    );
+    const legacyPackageZero =
+      sourceProvider === "shopee" &&
+      stop.originalStop == null &&
+      legacy.originalStop === undefined &&
+      legacy.metadata.packageNumber === "0";
+
+    return {
+      latitude: parseFloat(String(stop.latitude ?? 0)),
+      longitude: parseFloat(String(stop.longitude ?? 0)),
+      address: stop.address,
+      notes: stop.notes ?? undefined,
+      sourceProvider,
+      originalStop:
+        stop.originalStop ?? legacy.originalStop ?? (legacyPackageZero ? 0 : null),
+      isUnsequencedStop:
+        Boolean(stop.isUnsequencedStop) ||
+        Boolean(legacy.isUnsequencedStop) ||
+        legacyPackageZero,
+      metadata,
+      geocodingConfidenceScore: Number(stop.geocodingConfidenceScore ?? 0),
+      geocodingMethod: stop.geocodingMethod ?? undefined,
+      geocodingSuspect: Boolean(stop.geocodingSuspect),
+      commercialDetectionStatus: stop.commercialDetectionStatus ?? "unknown",
+      commercialConfidence: Number(stop.commercialConfidence ?? 0),
+      commercialPlaceName: stop.commercialPlaceName ?? null,
+      commercialCategory: stop.commercialCategory ?? null,
+      commercialOpeningHours: stop.commercialOpeningHours ?? null,
+      commercialSource: stop.commercialSource ?? null,
+      commercialLastCheckedAt: stop.commercialLastCheckedAt ?? null,
+    };
+  });
+  const optimizationLocations =
+    options?.respectInputSequence
+      ? orderShopeeStopPreservedLocations(locations)
+      : locations;
 
   const validation = validateLocations(locations);
   if (!validation.valid) {
@@ -990,15 +1220,15 @@ export async function optimizeUserRoute(
     });
   }
 
-  const macroClusters = clusterStops(locations, {
+  const macroClusters = clusterStops(optimizationLocations, {
     localityMode: options?.localityMode,
   });
-  const microClusters = partitionStopsForOptimization(locations, {
+  const microClusters = partitionStopsForOptimization(optimizationLocations, {
     localityMode: options?.localityMode,
   });
   runtimeBreakdown.macroClusterCount = macroClusters.length;
   runtimeBreakdown.microClusterCount =
-    locations.length <= 100 ? macroClusters.length : microClusters.length;
+    optimizationLocations.length <= 100 ? macroClusters.length : microClusters.length;
   runtimeBreakdown.largestClusterSize = Math.max(
     0,
     ...macroClusters.map((cluster) => cluster.stops.length)
@@ -1040,7 +1270,7 @@ export async function optimizeUserRoute(
     auditSourceSuffix?: string;
     orderedLocations?: Location[];
   }) {
-    const attemptLocations = attempt.orderedLocations ?? locations;
+    const attemptLocations = attempt.orderedLocations ?? optimizationLocations;
     const roadMetricOptions = {
       startLocation,
       endLocation,
@@ -1117,11 +1347,14 @@ export async function optimizeUserRoute(
       !optimizedWithRoadMetrics &&
       attemptLocations.length > ENV.maxGeographicFallbackStops &&
       Boolean(options?.allowLargeSync);
+    const isShopeeStopPreservedSequentialRoute =
+      attempt.respectInputSequence && auditPolicy === "shopee_stop_preserved";
 
     if (
       !optimizedWithRoadMetrics &&
       attemptLocations.length > ENV.maxGeographicFallbackStops &&
-      !shouldUseLargePartitionedFallback
+      !shouldUseLargePartitionedFallback &&
+      !isShopeeStopPreservedSequentialRoute
     ) {
       await db.createOperationalEvent({
         userId,
@@ -1201,6 +1434,38 @@ export async function optimizeUserRoute(
       });
     }
 
+    if (
+      !optimizedWithRoadMetrics &&
+      attemptLocations.length > ENV.maxGeographicFallbackStops &&
+      isShopeeStopPreservedSequentialRoute
+    ) {
+      await db.createOperationalEvent({
+        userId,
+        routeId,
+        stopId: null,
+        type: "shopee_stop_sequence_saved_without_osrm",
+        severity: "warning",
+        source: "routes.optimize",
+        title: "Sequencia STOP Shopee preservada sem OSRM",
+        message:
+          "A rota Shopee foi salva seguindo a coluna STOP. Paradas sem STOP foram encaixadas por proximidade, sem bloquear o inicio da rota.",
+        runtime: null,
+        url: null,
+        userAgent: null,
+        appVersion: null,
+        metadata: {
+          stopCount: attemptLocations.length,
+          maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
+          osrmBaseUrl: ENV.osrmBaseUrl,
+          auditSource,
+          auditPolicy,
+          respectInputSequence: true,
+        },
+      }).catch((error) => {
+        console.warn("[Routes] Failed to record Shopee STOP sequential fallback:", error);
+      });
+    }
+
     const optimized = optimizedWithRoadMetrics
       ?? (attempt.respectInputSequence
         ? buildSequentialRoute(attemptLocations, roadMetricOptions)
@@ -1216,6 +1481,7 @@ export async function optimizeUserRoute(
       startLocation,
       usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
       respectInputSequence: Boolean(attempt.respectInputSequence),
+      auditPolicy,
     });
     runtimeBreakdown.auditMs += Date.now() - auditStartedAt;
 
@@ -1228,6 +1494,7 @@ export async function optimizeUserRoute(
       usedRoadMetrics: Boolean(optimizedWithRoadMetrics),
       localityMode: attempt.localityMode,
       respectInputSequence: Boolean(attempt.respectInputSequence),
+      auditPolicy,
     };
   }
 
@@ -1430,6 +1697,9 @@ export async function optimizeUserRoute(
         correctionAttempts,
         localityMode: optimizationAttempt.localityMode,
         respectInputSequence: optimizationAttempt.respectInputSequence,
+        auditPolicy: optimizationAttempt.auditPolicy,
+        structuralAuditOnly: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
+        coherenceAuditSkipped: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
         auditSource: optimizationAttempt.auditSource,
         routeMetadata: optimizationAttempt.optimized.metadata ?? null,
       },
@@ -1543,6 +1813,9 @@ export async function optimizeUserRoute(
         finalIssues: attemptAudit.issues.slice(0, 12),
         routeMetadata: optimizationAttempt.optimized.metadata ?? null,
         geocodingConfidence,
+        auditPolicy: optimizationAttempt.auditPolicy,
+        structuralAuditOnly: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
+        coherenceAuditSkipped: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record route metric:", error);
@@ -1642,13 +1915,20 @@ export async function optimizeUserRoute(
     originalStop: wp.originalStop ?? null,
     isUnsequencedStop: Boolean(wp.isUnsequencedStop),
     metadata: normalizeStopMetadata(wp.metadata),
+    commercialDetectionStatus: wp.commercialDetectionStatus ?? "unknown",
+    commercialConfidence: Number(wp.commercialConfidence ?? 0),
+    commercialPlaceName: wp.commercialPlaceName ?? null,
+    commercialCategory: wp.commercialCategory ?? null,
+    commercialOpeningHours: wp.commercialOpeningHours ?? null,
+    commercialSource: wp.commercialSource ?? null,
+    commercialLastCheckedAt: wp.commercialLastCheckedAt ?? null,
   }));
   await db.createStops(routeId, updatedStops);
   runtimeBreakdown.dbSaveMs += Date.now() - dbSaveStartedAt;
 
   await recordRouteMetricForAttempt(null);
 
-  return { ...optimized, audit, auditSource };
+  return { ...optimized, audit, auditSource, auditPolicy: optimizationAttempt.auditPolicy };
 }
 
 const credentialsSchema = z.object({
@@ -2153,6 +2433,11 @@ export const appRouter = router({
           ? latestOptimizationEvent?.metadata
           : undefined;
         const auditSource = readStringMetadata(latestMetadata, "auditSource");
+        const auditPolicy =
+          readStringMetadata(latestMetadata, "auditPolicy") ??
+          (isShopeeStopPreservedRoute(routeStops, readBooleanMetadata(latestMetadata, "respectInputSequence"))
+            ? "shopee_stop_preserved"
+            : null);
         const usedRoadMetrics = readBooleanMetadata(
           latestMetadata,
           "auditUsedRoadMetrics"
@@ -2171,15 +2456,18 @@ export const appRouter = router({
           route.startLongitude
         );
 
-        const report = auditRouteSequence(
-          routeStopsToAuditableStops(routeStops),
-          {
-            startLocation,
-            requireStartLocation,
-            actualTotalDistanceKm: Number(route.totalDistance ?? 0),
-            usedRoadMetrics,
-            respectInputSequence,
-          }
+        const report = applyShopeeStopAuditPolicy(
+          auditRouteSequence(
+            routeStopsToAuditableStops(routeStops),
+            {
+              startLocation,
+              requireStartLocation,
+              actualTotalDistanceKm: Number(route.totalDistance ?? 0),
+              usedRoadMetrics,
+              respectInputSequence,
+            }
+          ),
+          auditPolicy
         );
 
         return {
@@ -2189,6 +2477,9 @@ export const appRouter = router({
             usedRoadMetrics: usedRoadMetrics ?? null,
             respectInputSequence: respectInputSequence ?? null,
             requireStartLocation,
+            auditPolicy,
+            structuralAuditOnly: auditPolicy === "shopee_stop_preserved",
+            coherenceAuditSkipped: auditPolicy === "shopee_stop_preserved",
             lastOptimizationEventId: latestOptimizationEvent?.id ?? null,
             staleOptimizationContext: !hasFreshOptimizationContext && Boolean(latestOptimizationEvent),
           },
@@ -2255,6 +2546,9 @@ export const appRouter = router({
               auditIssueCount: optimized.audit?.issueCount,
               auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
               auditRequireStartLocation: true,
+              auditPolicy: optimized.auditPolicy ?? null,
+              structuralAuditOnly: optimized.auditPolicy === "shopee_stop_preserved",
+              coherenceAuditSkipped: optimized.auditPolicy === "shopee_stop_preserved",
             },
           });
           await recordRouteAuditEvent(
@@ -2333,6 +2627,10 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         await requireUserRoute(input.id, ctx.user.id);
         const currentStops = await db.getRouteStops(input.id);
+        const preserveShopeeStopSequence = isShopeeStopPreservedRoute(
+          currentStops,
+          true
+        );
         await assertRouteStopLimit(
           ctx.user.id,
           currentStops.length,
@@ -2351,6 +2649,7 @@ export const appRouter = router({
         const optimized = await optimizeUserRoute(input.id, ctx.user.id, input.mode, {
           startLocation,
           localityMode: input.localityMode,
+          respectInputSequence: preserveShopeeStopSequence,
         });
         await recordOperationalEvent(ctx.user.id, {
           type: input.localityMode === "strict" ? "route_user_requested_better_sequence" : "route_reoptimized",
@@ -2361,6 +2660,7 @@ export const appRouter = router({
           metadata: {
             mode: input.mode,
             localityMode: input.localityMode,
+            respectInputSequence: preserveShopeeStopSequence,
             totalDistance: optimized.totalDistance,
             totalTime: optimized.totalTime,
             startedFromCurrentLocation: Boolean(startLocation),
@@ -2370,6 +2670,9 @@ export const appRouter = router({
             auditIssueCount: optimized.audit?.issueCount,
             auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
             auditRequireStartLocation: true,
+            auditPolicy: optimized.auditPolicy ?? null,
+            structuralAuditOnly: optimized.auditPolicy === "shopee_stop_preserved",
+            coherenceAuditSkipped: optimized.auditPolicy === "shopee_stop_preserved",
           },
         });
         await recordRouteAuditEvent(
@@ -2391,6 +2694,10 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         await requireUserRoute(input.id, ctx.user.id);
         const currentStops = await db.getRouteStops(input.id);
+        const preserveShopeeStopSequence = isShopeeStopPreservedRoute(
+          currentStops,
+          true
+        );
         await assertRouteStopLimit(
           ctx.user.id,
           currentStops.length,
@@ -2420,6 +2727,7 @@ export const appRouter = router({
           excludeStopIds: input.excludeStopIds,
           startLocation,
           localityMode: input.localityMode,
+          respectInputSequence: preserveShopeeStopSequence,
         });
         await recordOperationalEvent(ctx.user.id, {
           type: "route_remaining_reoptimized",
@@ -2430,6 +2738,7 @@ export const appRouter = router({
           metadata: {
             excludedStops: input.excludeStopIds.length,
             localityMode: input.localityMode,
+            respectInputSequence: preserveShopeeStopSequence,
             totalDistance: optimized.totalDistance,
             totalTime: optimized.totalTime,
             startedFromCurrentLocation: Boolean(startLocation),
@@ -2439,6 +2748,9 @@ export const appRouter = router({
             auditIssueCount: optimized.audit?.issueCount,
             auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
             auditRequireStartLocation: true,
+            auditPolicy: optimized.auditPolicy ?? null,
+            structuralAuditOnly: optimized.auditPolicy === "shopee_stop_preserved",
+            coherenceAuditSkipped: optimized.auditPolicy === "shopee_stop_preserved",
           },
         });
         await recordRouteAuditEvent(
@@ -2572,6 +2884,86 @@ export const appRouter = router({
 
         await db.updateRoute(input.routeId, ctx.user.id, { status: "draft" });
         return { success: true };
+      }),
+    detectCommercial: protectedProcedure.input(z.object({
+      routeId: z.number(),
+      stopId: z.number(),
+    }))
+      .mutation(async ({ ctx, input }) => {
+        await requireUserRoute(input.routeId, ctx.user.id);
+        const routeStops = await db.getRouteStops(input.routeId);
+        const stop = routeStops.find(
+          (item: any) => Number(item.id) === Number(input.stopId)
+        );
+
+        if (!stop) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Parada nao encontrada.",
+          });
+        }
+
+        const latitude = Number(stop.latitude);
+        const longitude = Number(stop.longitude);
+        if (
+          !Number.isFinite(latitude) ||
+          !Number.isFinite(longitude) ||
+          (latitude === 0 && longitude === 0)
+        ) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Parada sem coordenadas validas para consulta comercial.",
+          });
+        }
+
+        const detection = await detectCommercialAtLocation(latitude, longitude);
+        const updatedStop = await db.updateStop(input.routeId, input.stopId, {
+          commercialDetectionStatus: detection.commercialDetectionStatus,
+          commercialConfidence: detection.commercialConfidence,
+          commercialPlaceName: detection.commercialPlaceName,
+          commercialCategory: detection.commercialCategory,
+          commercialOpeningHours: detection.commercialOpeningHours,
+          commercialSource: detection.commercialSource,
+          commercialLastCheckedAt: detection.commercialLastCheckedAt,
+        });
+        const eta = estimateEtaForStop(routeStops, input.stopId);
+        const etaAlert = buildCommercialEtaAlert(detection, eta);
+
+        await db.createOperationalEvent({
+          userId: ctx.user.id,
+          routeId: input.routeId,
+          stopId: input.stopId,
+          type: "commercial_detection_checked",
+          severity:
+            etaAlert.severity === "danger"
+              ? "warning"
+              : detection.commercialDetectionStatus === "unknown"
+                ? "info"
+                : "info",
+          source: "stops.detectCommercial",
+          title: "Consulta de estabelecimento no local",
+          message:
+            detection.commercialDetectionStatus === "unknown"
+              ? "Nenhuma evidencia comercial encontrada no local."
+              : "Evidencia comercial consultada por coordenadas.",
+          metadata: {
+            commercialDetectionStatus: detection.commercialDetectionStatus,
+            commercialConfidence: detection.commercialConfidence,
+            commercialPlaceName: detection.commercialPlaceName,
+            commercialCategory: detection.commercialCategory,
+            commercialOpeningHours: detection.commercialOpeningHours,
+            commercialSource: detection.commercialSource,
+            etaAlert,
+          },
+        }).catch((error) => {
+          console.warn("[CommercialDetection] Failed to record event:", error);
+        });
+
+        return {
+          stop: updatedStop,
+          detection,
+          etaAlert,
+        };
       }),
   }),
 

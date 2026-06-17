@@ -95,15 +95,42 @@ export const stops = mysqlTable("stops", {
   originalStop: int("originalStop"),
   isUnsequencedStop: boolean("isUnsequencedStop").default(false).notNull(),
   metadata: json("metadata"),
+  commercialDetectionStatus: mysqlEnum("commercialDetectionStatus", [
+    "unknown",
+    "suspected",
+    "confirmed",
+  ]).default("unknown").notNull(),
+  commercialConfidence: int("commercialConfidence").default(0).notNull(),
+  commercialPlaceName: varchar("commercialPlaceName", { length: 255 }),
+  commercialCategory: varchar("commercialCategory", { length: 128 }),
+  commercialOpeningHours: varchar("commercialOpeningHours", { length: 255 }),
+  commercialSource: varchar("commercialSource", { length: 64 }),
+  commercialLastCheckedAt: timestamp("commercialLastCheckedAt"),
   notes: text("notes"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, (table) => ({
   routeIdFk: foreignKey({ columns: [table.routeId], foreignColumns: [routes.id] }).onDelete("cascade"),
   createdAtIdx: index("stops_createdAt_idx").on(table.createdAt),
+  commercialStatusIdx: index("stops_commercialDetectionStatus_idx").on(table.commercialDetectionStatus),
 }));
 
 export type Stop = typeof stops.$inferSelect;
 export type InsertStop = typeof stops.$inferInsert;
+
+export const locationCommercialCache = mysqlTable("location_commercial_cache", {
+  id: int("id").autoincrement().primaryKey(),
+  lat: decimal("lat", { precision: 10, scale: 8 }).notNull(),
+  lng: decimal("lng", { precision: 11, scale: 8 }).notNull(),
+  radius: int("radius").notNull(),
+  response: json("response"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => ({
+  lookupIdx: index("location_commercial_cache_lookup_idx").on(table.lat, table.lng, table.radius),
+  createdAtIdx: index("location_commercial_cache_createdAt_idx").on(table.createdAt),
+}));
+
+export type LocationCommercialCache = typeof locationCommercialCache.$inferSelect;
+export type InsertLocationCommercialCache = typeof locationCommercialCache.$inferInsert;
 
 /**
  * Route Schedules - for recurring routes with Heartbeat integration
