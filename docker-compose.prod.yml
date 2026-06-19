@@ -27,6 +27,16 @@ services:
       timeout: 5s
       retries: 5
 
+  optimization-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    env_file:
+      - .env.worker.production
+    environment:
+      NODE_ENV: production
+
   mysql:
     image: mysql:8.4
     container_name: econorotas-mysql
