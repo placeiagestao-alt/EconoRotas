@@ -3,7 +3,10 @@ import dotenv from "dotenv";
 dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || ".env" });
 
 const { getDatabaseHealth } = await import("../server/db");
-const { getOptimizationQueueHealth } = await import("../server/optimizationQueue");
+const {
+  closeOptimizationQueueConnections,
+  getOptimizationQueueHealth,
+} = await import("../server/optimizationQueue");
 
 function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs = 20_000): Promise<T> {
   return Promise.race([
@@ -56,5 +59,7 @@ console.log(JSON.stringify({
   },
   queue,
 }, null, 2));
+
+await closeOptimizationQueueConnections();
 
 process.exit(ok ? 0 : 1);

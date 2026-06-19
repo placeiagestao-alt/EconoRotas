@@ -28,6 +28,7 @@ export type OptimizationQueuePayload = {
 let queue: Queue<OptimizationQueuePayload> | null = null;
 let heartbeatRedis: IORedis | null = null;
 let heartbeatRedisListenersAttached = false;
+let queueListenersAttached = false;
 
 type WorkerHeartbeat = {
   workerId: string;
@@ -51,6 +52,13 @@ function getConnectionOptions() {
   };
 }
 
+function sanitizeQueueError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(/rediss?:\/\/[^@\s]+@/gi, "redis://[redacted]@")
+    .replace(/(password|token|auth)["':=\s]+[^,\s}\]]+/gi, "$1=[redacted]");
+}
+
 function getHeartbeatRedis() {
   const connection = getConnectionOptions();
   if (!connection) return null;
@@ -61,8 +69,14 @@ function getHeartbeatRedis() {
     heartbeatRedisListenersAttached = true;
     heartbeatRedis.on("reconnecting", () => {
       recordRedisReconnectDetected().catch((error) => {
-        console.warn("[OptimizationQueue] Failed to record Redis reconnect:", error);
+        console.warn(
+          "[OptimizationQueue] Failed to record Redis reconnect:",
+          sanitizeQueueError(error)
+        );
       });
+    });
+    heartbeatRedis.on("error", (error) => {
+      console.warn("[OptimizationQueue] Redis heartbeat error:", sanitizeQueueError(error));
     });
   }
   return heartbeatRedis;
@@ -84,6 +98,12 @@ export function getOptimizationQueue() {
         removeOnComplete: 500,
         removeOnFail: 1000,
       },
+    });
+  }
+  if (!queueListenersAttached) {
+    queueListenersAttached = true;
+    queue.on("error", (error) => {
+      console.warn("[OptimizationQueue] Redis queue error:", sanitizeQueueError(error));
     });
   }
   return queue;
@@ -150,9 +170,22 @@ export async function getOptimizationQueueHealth() {
       reachable: false,
       queueName: OPTIMIZATION_QUEUE_NAME,
       counts: null,
-      error: error instanceof Error ? error.message : "Falha ao consultar fila.",
+      error: sanitizeQueueError(error),
     };
   }
+}
+
+export async function closeOptimizationQueueConnections() {
+  const activeQueue = queue;
+  const activeHeartbeatRedis = heartbeatRedis;
+  queue = null;
+  heartbeatRedis = null;
+  queueListenersAttached = false;
+  heartbeatRedisListenersAttached = false;
+  await Promise.allSettled([
+    activeQueue?.close(),
+    activeHeartbeatRedis?.quit().catch(() => activeHeartbeatRedis.disconnect()),
+  ]);
 }
 
 function encodeWorkerHeartbeat(worker: {
@@ -448,7 +481,9 @@ function getQueueWaitMs(job: Job<OptimizationQueuePayload>) {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Falha desconhecida no worker.";
+  return error instanceof Error
+    ? sanitizeQueueError(error)
+    : "Falha desconhecida no worker.";
 }
 
 function errorStack(error: unknown) {
