@@ -491,6 +491,18 @@ var init_schema = __esm({
 });
 
 // server/_core/env.ts
+function readEnvString(value) {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === '""' || trimmed === "''") return "";
+  return trimmed;
+}
+function firstEnvString(...values) {
+  for (const value of values) {
+    const normalized = readEnvString(value);
+    if (normalized) return normalized;
+  }
+  return "";
+}
 function isDockerOrLocalDatabaseUrl(value) {
   if (!value) return false;
   try {
@@ -517,23 +529,23 @@ var init_env = __esm({
     "use strict";
     hasConfiguredCookieSecret = Boolean(process.env.JWT_SECRET);
     ENV = {
-      appId: process.env.VITE_APP_ID ?? "",
-      cookieSecret: process.env.JWT_SECRET ?? "",
+      appId: readEnvString(process.env.VITE_APP_ID),
+      cookieSecret: readEnvString(process.env.JWT_SECRET),
       hasConfiguredCookieSecret,
       usingDemoCookieSecret: false,
-      databaseUrl: process.env.DATABASE_URL ?? "",
-      databaseSsl: process.env.DATABASE_SSL ?? "",
-      databaseSslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? "",
-      oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
-      authLoginProvider: process.env.AUTH_LOGIN_PROVIDER ?? "",
-      googleClientId: process.env.GOOGLE_CLIENT_ID ?? "",
-      googleClientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
+      databaseUrl: readEnvString(process.env.DATABASE_URL),
+      databaseSsl: readEnvString(process.env.DATABASE_SSL),
+      databaseSslRejectUnauthorized: readEnvString(process.env.DATABASE_SSL_REJECT_UNAUTHORIZED),
+      oAuthServerUrl: readEnvString(process.env.OAUTH_SERVER_URL),
+      authLoginProvider: readEnvString(process.env.AUTH_LOGIN_PROVIDER),
+      googleClientId: readEnvString(process.env.GOOGLE_CLIENT_ID),
+      googleClientSecret: readEnvString(process.env.GOOGLE_CLIENT_SECRET),
       adminEmails: [process.env.ADMIN_EMAILS, process.env.OWNER_EMAIL].filter(Boolean).join(","),
-      ownerEmail: process.env.OWNER_EMAIL ?? "",
-      publicAppUrl: process.env.PUBLIC_APP_URL ?? "",
-      allowedOrigins: process.env.ALLOWED_ORIGINS ?? "",
+      ownerEmail: readEnvString(process.env.OWNER_EMAIL),
+      publicAppUrl: readEnvString(process.env.PUBLIC_APP_URL),
+      allowedOrigins: readEnvString(process.env.ALLOWED_ORIGINS),
       isProduction: process.env.NODE_ENV === "production",
-      hasInvalidProductionDatabaseUrl: process.env.NODE_ENV === "production" && isDockerOrLocalDatabaseUrl(process.env.DATABASE_URL ?? ""),
+      hasInvalidProductionDatabaseUrl: process.env.NODE_ENV === "production" && isDockerOrLocalDatabaseUrl(readEnvString(process.env.DATABASE_URL)),
       allowEphemeralDb: process.env.ALLOW_EPHEMERAL_DB === "true",
       requireManagedDatabase: process.env.REQUIRE_MANAGED_DATABASE === "true",
       forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
@@ -571,12 +583,16 @@ var init_env = __esm({
         process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS,
         100
       ),
-      bullmqRedisUrl: process.env.BULLMQ_REDIS_URL ?? process.env.ECONOROTAS_REDIS_URL ?? process.env.REDIS_URL ?? "",
+      bullmqRedisUrl: firstEnvString(
+        process.env.BULLMQ_REDIS_URL,
+        process.env.ECONOROTAS_REDIS_URL,
+        process.env.REDIS_URL
+      ),
       backupLastCompletedAt: process.env.BACKUP_LAST_COMPLETED_AT ?? "",
       backupStatus: process.env.BACKUP_STATUS ?? "",
       restoreTestLastPassedAt: process.env.RESTORE_TEST_LAST_PASSED_AT ?? "",
       restoreTestPassed: process.env.RESTORE_TEST_PASSED === "true",
-      integrationCredentialsSecret: process.env.INTEGRATION_CREDENTIALS_SECRET ?? process.env.JWT_SECRET ?? ""
+      integrationCredentialsSecret: firstEnvString(process.env.INTEGRATION_CREDENTIALS_SECRET, process.env.JWT_SECRET)
     };
   }
 });
