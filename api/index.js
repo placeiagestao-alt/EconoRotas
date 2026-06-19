@@ -8997,6 +8997,7 @@ var lastRedisReconnectEventAt = 0;
 var queue = null;
 var heartbeatRedis = null;
 var heartbeatRedisListenersAttached = false;
+var queueListenersAttached = false;
 function getConnectionOptions() {
   if (!ENV.bullmqRedisUrl) return null;
   const parsed = new URL(ENV.bullmqRedisUrl);
@@ -9010,6 +9011,10 @@ function getConnectionOptions() {
     enableReadyCheck: false
   };
 }
+function sanitizeQueueError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/rediss?:\/\/[^@\s]+@/gi, "redis://[redacted]@").replace(/(password|token|auth)["':=\s]+[^,\s}\]]+/gi, "$1=[redacted]");
+}
 function getHeartbeatRedis() {
   const connection = getConnectionOptions();
   if (!connection) return null;
@@ -9020,8 +9025,14 @@ function getHeartbeatRedis() {
     heartbeatRedisListenersAttached = true;
     heartbeatRedis.on("reconnecting", () => {
       recordRedisReconnectDetected().catch((error) => {
-        console.warn("[OptimizationQueue] Failed to record Redis reconnect:", error);
+        console.warn(
+          "[OptimizationQueue] Failed to record Redis reconnect:",
+          sanitizeQueueError(error)
+        );
       });
+    });
+    heartbeatRedis.on("error", (error) => {
+      console.warn("[OptimizationQueue] Redis heartbeat error:", sanitizeQueueError(error));
     });
   }
   return heartbeatRedis;
@@ -9041,6 +9052,12 @@ function getOptimizationQueue() {
         removeOnComplete: 500,
         removeOnFail: 1e3
       }
+    });
+  }
+  if (!queueListenersAttached) {
+    queueListenersAttached = true;
+    queue.on("error", (error) => {
+      console.warn("[OptimizationQueue] Redis queue error:", sanitizeQueueError(error));
     });
   }
   return queue;
@@ -9100,7 +9117,7 @@ async function getOptimizationQueueHealth() {
       reachable: false,
       queueName: OPTIMIZATION_QUEUE_NAME,
       counts: null,
-      error: error instanceof Error ? error.message : "Falha ao consultar fila."
+      error: sanitizeQueueError(error)
     };
   }
 }
