@@ -44,6 +44,46 @@
       "destination": "/api?__route=asset-missing&path=:path*"
     },
     {
+      "source": "/roteirizador-entregas",
+      "destination": "/seo/roteirizador-entregas.html"
+    },
+    {
+      "source": "/roteirizador-shopee",
+      "destination": "/seo/roteirizador-shopee.html"
+    },
+    {
+      "source": "/roteirizador-mercado-livre",
+      "destination": "/seo/roteirizador-mercado-livre.html"
+    },
+    {
+      "source": "/roteirizador-imile",
+      "destination": "/seo/roteirizador-imile.html"
+    },
+    {
+      "source": "/pwa-iphone",
+      "destination": "/seo/pwa-iphone.html"
+    },
+    {
+      "source": "/baixar-aplicativo",
+      "destination": "/seo/baixar-aplicativo.html"
+    },
+    {
+      "source": "/blog/como-otimizar-rota-de-entregas",
+      "destination": "/seo/como-otimizar-rota-de-entregas.html"
+    },
+    {
+      "source": "/privacidade",
+      "destination": "/seo/privacidade.html"
+    },
+    {
+      "source": "/termos",
+      "destination": "/seo/termos.html"
+    },
+    {
+      "source": "/suporte",
+      "destination": "/seo/suporte.html"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

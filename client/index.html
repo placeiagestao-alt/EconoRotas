@@ -1,6 +1,5 @@
 <!doctype html>
 <html lang="pt-BR">
-
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -15,13 +14,20 @@
     <meta name="color-scheme" content="light dark" />
     <meta
       name="description"
-      content="Roteirização inteligente para otimizar rotas, economizar tempo e acompanhar resultados." />
-    <meta property="og:title" content="EconoRota" />
+      content="EconoRota: aplicativo para otimizar rotas de entregas, importar tabelas, organizar paradas e economizar tempo para entregadores de marketplace." />
+    <meta name="robots" content="index, follow" />
+    <meta
+      name="keywords"
+      content="roteirizador de entregas, otimizar rota, app para entregador, rotas Shopee, rotas Mercado Livre, rotas iMile, aplicativo de entregas" />
+    <link rel="canonical" href="https://econo-rotas.vercel.app/" />
+    <meta property="og:title" content="EconoRota - Roteirizador de entregas" />
     <meta
       property="og:description"
-      content="Otimize rotas, economize tempo e acompanhe resultados." />
-    <meta property="og:image" content="/og-image.png" />
+      content="Otimize rotas de entrega, organize paradas e acompanhe resultados no PWA, Android e web." />
+    <meta property="og:image" content="https://econo-rotas.vercel.app/og-image.png" />
+    <meta property="og:url" content="https://econo-rotas.vercel.app/" />
     <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" href="/favicon.png" type="image/png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
@@ -32,12 +38,33 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <title>EconoRota</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "EconoRota",
+        "applicationCategory": "BusinessApplication",
+        "operatingSystem": "Web, Android, iOS",
+        "description": "Aplicativo para otimizar rotas de entregas, importar tabelas, organizar paradas e acompanhar execucao operacional.",
+        "url": "https://econo-rotas.vercel.app/",
+        "image": "https://econo-rotas.vercel.app/og-image.png",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "BRL"
+        },
+        "publisher": {
+          "@type": "Organization",
+          "name": "EconoRota",
+          "url": "https://econo-rotas.vercel.app/"
+        }
+      }
+    </script>
+    <title>EconoRota - Roteirizador de entregas</title>
   </head>
 
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
-
 </html>

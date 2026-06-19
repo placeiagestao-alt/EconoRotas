@@ -473,6 +473,30 @@ export default function Home() {
                     Baixar aplicativo Android
                   </Link>
                 </Button>
+
+                <nav
+                  aria-label="Links publicos do EconoRota"
+                  className="grid gap-2 rounded-xl border border-border/80 bg-secondary/45 p-3 text-sm sm:grid-cols-2"
+                >
+                  <Link className="font-medium text-emerald-700" href="/roteirizador-entregas">
+                    Roteirizador de entregas
+                  </Link>
+                  <Link className="font-medium text-emerald-700" href="/roteirizador-shopee">
+                    Roteirizador Shopee
+                  </Link>
+                  <Link className="font-medium text-emerald-700" href="/roteirizador-imile">
+                    Roteirizador iMile
+                  </Link>
+                  <Link className="font-medium text-emerald-700" href="/pwa-iphone">
+                    PWA para iPhone
+                  </Link>
+                  <Link className="font-medium text-emerald-700" href="/privacidade">
+                    Privacidade
+                  </Link>
+                  <Link className="font-medium text-emerald-700" href="/suporte">
+                    Suporte
+                  </Link>
+                </nav>
               </form>
             </CardContent>
           </Card>

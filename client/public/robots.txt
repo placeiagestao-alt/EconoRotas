@@ -1,0 +1,15 @@
+User-agent: *
+Allow: /
+
+Disallow: /api/
+Disallow: /routes
+Disallow: /routes/
+Disallow: /analytics
+Disallow: /chat
+Disallow: /history
+Disallow: /profile
+Disallow: /operations
+Disallow: /schedules
+Disallow: /__manus__/
+
+Sitemap: https://econo-rotas.vercel.app/sitemap.xml
