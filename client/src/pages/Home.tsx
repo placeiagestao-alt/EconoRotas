@@ -484,6 +484,9 @@ export default function Home() {
                   <Link className="font-medium text-emerald-700" href="/roteirizador-shopee">
                     Roteirizador Shopee
                   </Link>
+                  <Link className="font-medium text-orange-700" href="/spx-shopee">
+                    SPX/Shopee completo
+                  </Link>
                   <Link className="font-medium text-emerald-700" href="/roteirizador-imile">
                     Roteirizador iMile
                   </Link>

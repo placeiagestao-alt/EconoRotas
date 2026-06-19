@@ -52,6 +52,10 @@
       "destination": "/seo/roteirizador-shopee.html"
     },
     {
+      "source": "/spx-shopee",
+      "destination": "/seo/spx-shopee.html"
+    },
+    {
       "source": "/roteirizador-mercado-livre",
       "destination": "/seo/roteirizador-mercado-livre.html"
     },
