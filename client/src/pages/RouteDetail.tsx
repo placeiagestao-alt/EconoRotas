@@ -102,6 +102,7 @@ const DEFAULT_DELIVERY_STATE: DeliveryState = {
   currentIndex: 0,
   delivered: [],
   failed: [],
+  lastAction: null,
 };
 
 const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
@@ -112,7 +113,11 @@ const STRUCTURAL_AUDIT_ISSUE_TYPES = new Set([
   "missing_coordinates",
   "invalid_coordinates",
 ]);
-const EMPTY_ROUTE_POINT: RoutePoint = { address: "", latitude: 0, longitude: 0 };
+const EMPTY_ROUTE_POINT: RoutePoint = {
+  address: "",
+  latitude: 0,
+  longitude: 0,
+};
 const FAR_FROM_STOP_ALERT_KM = 0.5;
 const SEQUENCE_INCOHERENCE_ALERT_KM = 0.45;
 const AUTO_SELECT_NEARBY_STOP_RADIUS_KM = 0.12;
@@ -233,7 +238,9 @@ function openStopInMap(stop?: Stop) {
     document.body.appendChild(link);
     link.click();
     link.remove();
-    toast.message("Se o mapa não abrir, permita pop-ups ou copie o endereço da parada.");
+    toast.message(
+      "Se o mapa não abrir, permita pop-ups ou copie o endereço da parada."
+    );
   }
 }
 
@@ -252,6 +259,33 @@ function getPackageLabel(stop: Stop) {
   const packageNumber = stop.metadata?.packageNumber || stop.packageNumber;
   if (!packageNumber || packageNumber === "0") return undefined;
   return `Pacote: ${packageNumber}`;
+}
+
+function getStopIdentityDetails(stop: Stop, fallbackIndex: number) {
+  return {
+    routeStopLabel: getStopDisplayLabel(stop, fallbackIndex),
+    shopeeStopLabel: getShopeeStopLabel(stop),
+    packageLabel: getPackageLabel(stop),
+  };
+}
+
+function normalizeDeliveryIndexes(value: unknown, stopsLength?: number) {
+  const indexes = Array.isArray(value) ? value : [];
+  return indexes
+    .map(index => Number(index))
+    .filter(index => {
+      if (!Number.isInteger(index) || index < 0) return false;
+      return typeof stopsLength === "number" ? index < stopsLength : true;
+    });
+}
+
+function getDeliverySnapshot(state: DeliveryState) {
+  return {
+    started: state.started,
+    currentIndex: state.currentIndex,
+    delivered: [...state.delivered],
+    failed: [...state.failed],
+  };
 }
 
 function getStopNumberTextClass(label: string) {
@@ -307,7 +341,10 @@ function getRuntimeKind() {
   const url = window.location.href;
   const userAgent = navigator.userAgent;
 
-  if (url.startsWith("https://localhost") || url.startsWith("http://localhost")) {
+  if (
+    url.startsWith("https://localhost") ||
+    url.startsWith("http://localhost")
+  ) {
     if (/Android/i.test(userAgent)) return "Aplicativo Android";
     return "Aplicativo";
   }
@@ -325,7 +362,8 @@ function roundCoordinate(value: number | undefined) {
 }
 
 function formatDistanceMeters(distanceMeters: number) {
-  if (distanceMeters < 100) return `${Math.max(1, Math.round(distanceMeters))} m`;
+  if (distanceMeters < 100)
+    return `${Math.max(1, Math.round(distanceMeters))} m`;
   return `${(distanceMeters / 1000).toFixed(1).replace(".", ",")} km`;
 }
 
@@ -386,9 +424,11 @@ export default function RouteDetail() {
       ]);
       toast.success("Rota restante reotimizada.");
     },
-    onError: async (error) => {
+    onError: async error => {
       await utils.routes.audit.invalidate({ id: routeId });
-      toast.error(error.message || "Não foi possível reotimizar as paradas restantes.");
+      toast.error(
+        error.message || "Não foi possível reotimizar as paradas restantes."
+      );
     },
   });
   const optimizeRouteMutation = trpc.routes.optimize.useMutation({
@@ -402,7 +442,7 @@ export default function RouteDetail() {
       ]);
       toast.success("Rota otimizada.");
     },
-    onError: async (error) => {
+    onError: async error => {
       await utils.routes.audit.invalidate({ id: routeId });
       toast.error(error.message || "Não foi possível otimizar a rota.");
     },
@@ -410,7 +450,8 @@ export default function RouteDetail() {
   const reportOperationalEventMutation = trpc.events.report.useMutation();
   const [proximityAlertsEnabled, setProximityAlertsEnabled] = useState(false);
   const [proximitySoundEnabled, setProximitySoundEnabled] = useState(true);
-  const [proximityVibrationEnabled, setProximityVibrationEnabled] = useState(true);
+  const [proximityVibrationEnabled, setProximityVibrationEnabled] =
+    useState(true);
   const [proximityAudioReady, setProximityAudioReady] = useState(false);
   const [activeProximityAlert, setActiveProximityAlert] =
     useState<ProximityAlertCandidate | null>(null);
@@ -418,53 +459,50 @@ export default function RouteDetail() {
   const proximityAudioRef = useRef<AudioContext | null>(null);
   const proximityGpsErrorNotifiedRef = useRef(false);
 
-  const stops = useMemo<Stop[]>(
-    () => {
-      const rawStops = stopsQuery.data ?? [];
-      const routeLooksLikeImile =
-        isImileRouteText(routeQuery.data?.name) ||
-        isImileRouteText(routeQuery.data?.description) ||
-        rawStops.some((stop: any) => isImileStopNotes(String(stop.notes || "")));
+  const stops = useMemo<Stop[]>(() => {
+    const rawStops = stopsQuery.data ?? [];
+    const routeLooksLikeImile =
+      isImileRouteText(routeQuery.data?.name) ||
+      isImileRouteText(routeQuery.data?.description) ||
+      rawStops.some((stop: any) => isImileStopNotes(String(stop.notes || "")));
 
-      return rawStops
-        .map((stop: any) => {
-          const legacy = parseStopNotes(stop.notes);
-          const metadata = normalizeStopMetadata({
-            ...legacy.metadata,
-            ...normalizeStopMetadata(stop.metadata),
-          });
-          const sourceProvider = normalizeStopSourceProvider(stop.sourceProvider);
-
-          return {
-            id: stop.id,
-            address: stop.address,
-            latitude: toNumber(stop.latitude),
-            longitude: toNumber(stop.longitude),
-            sequence: stop.sequence,
-            notes: legacy.notes,
-            sourceProvider,
-            originalStop: stop.originalStop ?? null,
-            isUnsequencedStop: Boolean(stop.isUnsequencedStop),
-            metadata,
-            packageNumber: metadata.packageNumber || legacy.packageNumber,
-          };
-        })
-        .sort((a: Stop, b: Stop) => a.sequence - b.sequence)
-        .map((stop: Stop, index: number) => {
-          const isSequentialImile =
-            stop.sourceProvider === "imile" ||
-            routeLooksLikeImile ||
-            isImileStopNotes(stop.notes) ||
-            isLegacyImileTrackingPackage(stop.packageNumber, stop.notes);
-
-          return {
-            ...stop,
-            isSequentialImile,
-          };
+    return rawStops
+      .map((stop: any) => {
+        const legacy = parseStopNotes(stop.notes);
+        const metadata = normalizeStopMetadata({
+          ...legacy.metadata,
+          ...normalizeStopMetadata(stop.metadata),
         });
-    },
-    [routeQuery.data?.description, routeQuery.data?.name, stopsQuery.data]
-  );
+        const sourceProvider = normalizeStopSourceProvider(stop.sourceProvider);
+
+        return {
+          id: stop.id,
+          address: stop.address,
+          latitude: toNumber(stop.latitude),
+          longitude: toNumber(stop.longitude),
+          sequence: stop.sequence,
+          notes: legacy.notes,
+          sourceProvider,
+          originalStop: stop.originalStop ?? null,
+          isUnsequencedStop: Boolean(stop.isUnsequencedStop),
+          metadata,
+          packageNumber: metadata.packageNumber || legacy.packageNumber,
+        };
+      })
+      .sort((a: Stop, b: Stop) => a.sequence - b.sequence)
+      .map((stop: Stop, index: number) => {
+        const isSequentialImile =
+          stop.sourceProvider === "imile" ||
+          routeLooksLikeImile ||
+          isImileStopNotes(stop.notes) ||
+          isLegacyImileTrackingPackage(stop.packageNumber, stop.notes);
+
+        return {
+          ...stop,
+          isSequentialImile,
+        };
+      });
+  }, [routeQuery.data?.description, routeQuery.data?.name, stopsQuery.data]);
   const routeStartPoint = useMemo(
     () =>
       parseRoutePoint(
@@ -491,7 +529,9 @@ export default function RouteDetail() {
   const [endPoint, setEndPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
   const [isSavingEndpoints, setIsSavingEndpoints] = useState(false);
   const [stopSearch, setStopSearch] = useState("");
-  const [selectedStopIndex, setSelectedStopIndex] = useState<number | null>(null);
+  const [selectedStopIndex, setSelectedStopIndex] = useState<number | null>(
+    null
+  );
   const [editingStopIndex, setEditingStopIndex] = useState<number | null>(null);
   const [stopDraft, setStopDraft] = useState<StopDraft>({
     address: "",
@@ -500,11 +540,12 @@ export default function RouteDetail() {
     packageNumber: "",
     notes: "",
   });
-  const [isLocatingForReoptimization, setIsLocatingForReoptimization] = useState(false);
+  const [isLocatingForReoptimization, setIsLocatingForReoptimization] =
+    useState(false);
   const [showRouteMap, setShowRouteMap] = useState(false);
-  const [loadedDeliveryRouteId, setLoadedDeliveryRouteId] = useState<number | null>(
-    null
-  );
+  const [loadedDeliveryRouteId, setLoadedDeliveryRouteId] = useState<
+    number | null
+  >(null);
 
   useEffect(() => {
     const route = routeQuery.data;
@@ -522,7 +563,11 @@ export default function RouteDetail() {
       )
     );
     setEndPoint(
-      getEditableRoutePoint(route.endLocation, route.endLatitude, route.endLongitude)
+      getEditableRoutePoint(
+        route.endLocation,
+        route.endLatitude,
+        route.endLongitude
+      )
     );
   }, [
     routeQuery.data?.id,
@@ -554,13 +599,40 @@ export default function RouteDetail() {
     }
 
     try {
+      const lastAction =
+        savedState.lastAction &&
+        Number.isInteger(savedState.lastAction.stopIndex) &&
+        savedState.lastAction.stopIndex >= 0 &&
+        savedState.lastAction.previousState
+          ? {
+              stopIndex: savedState.lastAction.stopIndex,
+              result: savedState.lastAction.result,
+              previousState: {
+                started: Boolean(savedState.lastAction.previousState.started),
+                currentIndex: Number.isFinite(
+                  savedState.lastAction.previousState.currentIndex
+                )
+                  ? savedState.lastAction.previousState.currentIndex
+                  : 0,
+                delivered: normalizeDeliveryIndexes(
+                  savedState.lastAction.previousState.delivered
+                ),
+                failed: normalizeDeliveryIndexes(
+                  savedState.lastAction.previousState.failed
+                ),
+              },
+              createdAt: savedState.lastAction.createdAt,
+            }
+          : null;
+
       setDeliveryState({
         started: Boolean(savedState.started),
         currentIndex: Number.isFinite(savedState.currentIndex)
           ? savedState.currentIndex
           : 0,
-        delivered: Array.isArray(savedState.delivered) ? savedState.delivered : [],
-        failed: Array.isArray(savedState.failed) ? savedState.failed : [],
+        delivered: normalizeDeliveryIndexes(savedState.delivered),
+        failed: normalizeDeliveryIndexes(savedState.failed),
+        lastAction,
       });
     } catch {
       setDeliveryState(DEFAULT_DELIVERY_STATE);
@@ -597,11 +669,15 @@ export default function RouteDetail() {
   useEffect(() => {
     if (stops.length === 0) return;
 
-    setDeliveryState((current) => ({
+    setDeliveryState(current => ({
       ...current,
       currentIndex: Math.min(current.currentIndex, stops.length - 1),
-      delivered: current.delivered.filter((index) => index < stops.length),
-      failed: current.failed.filter((index) => index < stops.length),
+      delivered: normalizeDeliveryIndexes(current.delivered, stops.length),
+      failed: normalizeDeliveryIndexes(current.failed, stops.length),
+      lastAction:
+        current.lastAction && current.lastAction.stopIndex < stops.length
+          ? current.lastAction
+          : null,
     }));
   }, [stops.length]);
 
@@ -621,6 +697,9 @@ export default function RouteDetail() {
   ]).size;
   const isComplete = stops.length > 0 && handledCount >= stops.length;
   const currentStop = stops[deliveryState.currentIndex];
+  const currentStopIdentity = currentStop
+    ? getStopIdentityDetails(currentStop, deliveryState.currentIndex)
+    : null;
   const activeProximityStop =
     activeProximityAlert?.stopIndex !== undefined
       ? stops[activeProximityAlert.stopIndex]
@@ -628,11 +707,12 @@ export default function RouteDetail() {
   const nextStop = stops.find(
     (_, index) => !deliveredSet.has(index) && !failedSet.has(index)
   );
-  const progressValue = stops.length > 0 ? (handledCount / stops.length) * 100 : 0;
+  const progressValue =
+    stops.length > 0 ? (handledCount / stops.length) * 100 : 0;
   const handledStopIds = useMemo(
     () =>
       Array.from(new Set([...deliveryState.delivered, ...deliveryState.failed]))
-        .map((index) => stops[index]?.id)
+        .map(index => stops[index]?.id)
         .filter((id): id is number => typeof id === "number"),
     [deliveryState.delivered, deliveryState.failed, stops]
   );
@@ -696,7 +776,8 @@ export default function RouteDetail() {
     };
 
     document.addEventListener("visibilitychange", reportPauseOrResume);
-    return () => document.removeEventListener("visibilitychange", reportPauseOrResume);
+    return () =>
+      document.removeEventListener("visibilitychange", reportPauseOrResume);
   }, [
     deliveryState.currentIndex,
     deliveryState.started,
@@ -707,7 +788,8 @@ export default function RouteDetail() {
 
   const ensureProximityAudioReady = async () => {
     try {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      const AudioContextClass =
+        window.AudioContext || window.webkitAudioContext;
       if (!AudioContextClass) {
         setProximityAudioReady(false);
         toast.warning("Som de alerta não suportado neste navegador.");
@@ -727,14 +809,20 @@ export default function RouteDetail() {
       return true;
     } catch {
       setProximityAudioReady(false);
-      toast.warning("Não foi possível ativar o som. O alerta visual continuará funcionando.");
+      toast.warning(
+        "Não foi possível ativar o som. O alerta visual continuará funcionando."
+      );
       setProximityAlertsEnabled(true);
       return false;
     }
   };
 
   const playProximityAlert = () => {
-    if (proximitySoundEnabled && proximityAudioReady && proximityAudioRef.current) {
+    if (
+      proximitySoundEnabled &&
+      proximityAudioReady &&
+      proximityAudioRef.current
+    ) {
       const context = proximityAudioRef.current;
       const oscillator = context.createOscillator();
       const gain = context.createGain();
@@ -744,7 +832,10 @@ export default function RouteDetail() {
       oscillator.frequency.setValueAtTime(660, context.currentTime + 0.18);
       gain.gain.setValueAtTime(0.0001, context.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.18, context.currentTime + 0.03);
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.45);
+      gain.gain.exponentialRampToValueAtTime(
+        0.0001,
+        context.currentTime + 0.45
+      );
 
       oscillator.connect(gain);
       gain.connect(context.destination);
@@ -765,7 +856,7 @@ export default function RouteDetail() {
     }
 
     const watchId = navigator.geolocation.watchPosition(
-      (position) => {
+      position => {
         const nearby = findNearbyPendingStop({
           origin: {
             latitude: position.coords.latitude,
@@ -789,9 +880,12 @@ export default function RouteDetail() {
 
         const stop = stops[nearby.stopIndex];
         const stopLabel = getStopDisplayLabel(stop, nearby.stopIndex);
-        toast.warning(`Entrega próxima: parada ${stopLabel} a ${formatDistanceMeters(nearby.distanceMeters)}.`, {
-          duration: 12000,
-        });
+        toast.warning(
+          `Entrega próxima: parada ${stopLabel} a ${formatDistanceMeters(nearby.distanceMeters)}.`,
+          {
+            duration: 12000,
+          }
+        );
 
         reportRouteExecutionEvent({
           type: "route_nearby_stop_detected",
@@ -816,7 +910,9 @@ export default function RouteDetail() {
       () => {
         if (proximityGpsErrorNotifiedRef.current) return;
         proximityGpsErrorNotifiedRef.current = true;
-        toast.warning("Não foi possível monitorar GPS para alertas de proximidade.");
+        toast.warning(
+          "Não foi possível monitorar GPS para alertas de proximidade."
+        );
       },
       PROXIMITY_WATCH_OPTIONS
     );
@@ -845,7 +941,12 @@ export default function RouteDetail() {
     ) {
       setActiveProximityAlert(null);
     }
-  }, [activeProximityAlert, deliveredSet, deliveryState.currentIndex, failedSet]);
+  }, [
+    activeProximityAlert,
+    deliveredSet,
+    deliveryState.currentIndex,
+    failedSet,
+  ]);
 
   const findNearestPendingStopIndex = (
     origin: Coordinate,
@@ -856,7 +957,8 @@ export default function RouteDetail() {
 
     stops.forEach((stop, index) => {
       if (handledIndexes.has(index)) return;
-      if (!Number.isFinite(stop.latitude) || !Number.isFinite(stop.longitude)) return;
+      if (!Number.isFinite(stop.latitude) || !Number.isFinite(stop.longitude))
+        return;
       if (stop.latitude === 0 && stop.longitude === 0) return;
 
       const distance = calculateDistanceKm(origin, {
@@ -883,7 +985,9 @@ export default function RouteDetail() {
   }, [stopSearch, stops]);
   const blockingAuditIssues = useMemo(
     () =>
-      (auditQuery.data?.issues || []).filter((issue: any) => isBlockingAuditIssue(issue)),
+      (auditQuery.data?.issues || []).filter((issue: any) =>
+        isBlockingAuditIssue(issue)
+      ),
     [auditQuery.data?.issues]
   );
   const structuralAuditIssues = useMemo(
@@ -919,14 +1023,18 @@ export default function RouteDetail() {
 
   const reoptimizeAfterAuditBlock = async () => {
     if (remainingStopsCount < 2) {
-      toast.error("A rota precisa ter pelo menos 2 paradas pendentes para refazer a sequência.");
+      toast.error(
+        "A rota precisa ter pelo menos 2 paradas pendentes para refazer a sequência."
+      );
       return;
     }
 
     setIsLocatingForReoptimization(true);
 
     try {
-      toast.message("Fiscal encontrou incoerência. Recalculando a rota para novo julgamento...");
+      toast.message(
+        "Fiscal encontrou incoerência. Recalculando a rota para novo julgamento..."
+      );
       const currentPosition = await getCurrentPosition();
       const payload = {
         id: routeId,
@@ -999,10 +1107,11 @@ export default function RouteDetail() {
     let currentIndex = firstPendingIndex >= 0 ? firstPendingIndex : 0;
     const locationStrategy: "saved_sequence" = "saved_sequence";
 
-    setDeliveryState((current) => ({
+    setDeliveryState(current => ({
       ...current,
       started: true,
       currentIndex,
+      lastAction: null,
     }));
 
     const selectedStop = stops[currentIndex];
@@ -1028,21 +1137,24 @@ export default function RouteDetail() {
   ) => {
     const targetStop = stops[stopIndex];
     if (!targetStop) return;
+    const previousDeliveryState = getDeliverySnapshot(deliveryState);
 
     const delivered = Array.from(
       new Set([
-        ...deliveryState.delivered.filter((index) => index !== stopIndex),
+        ...deliveryState.delivered.filter(index => index !== stopIndex),
         ...(result === "delivered" ? [stopIndex] : []),
       ])
     ).sort((a, b) => a - b);
     const failed = Array.from(
       new Set([
-        ...deliveryState.failed.filter((index) => index !== stopIndex),
+        ...deliveryState.failed.filter(index => index !== stopIndex),
         ...(result === "failed" ? [stopIndex] : []),
       ])
     ).sort((a, b) => a - b);
     const handled = new Set([...delivered, ...failed]);
-    const firstPendingIndex = stops.findIndex((_, index) => !handled.has(index));
+    const firstPendingIndex = stops.findIndex(
+      (_, index) => !handled.has(index)
+    );
     const finished = firstPendingIndex === -1;
     let nextIndex = firstPendingIndex;
     let currentPosition: Coordinate | null = null;
@@ -1056,7 +1168,10 @@ export default function RouteDetail() {
     if (!finished) {
       try {
         currentPosition = await getCurrentPosition();
-        nearestPendingIndex = findNearestPendingStopIndex(currentPosition, handled);
+        nearestPendingIndex = findNearestPendingStopIndex(
+          currentPosition,
+          handled
+        );
 
         if (
           Number.isFinite(targetStop.latitude) &&
@@ -1069,8 +1184,10 @@ export default function RouteDetail() {
           });
         }
 
-        const sequenceStop = firstPendingIndex >= 0 ? stops[firstPendingIndex] : null;
-        const nearestStop = nearestPendingIndex >= 0 ? stops[nearestPendingIndex] : null;
+        const sequenceStop =
+          firstPendingIndex >= 0 ? stops[firstPendingIndex] : null;
+        const nearestStop =
+          nearestPendingIndex >= 0 ? stops[nearestPendingIndex] : null;
         if (
           sequenceStop &&
           nearestStop &&
@@ -1110,10 +1227,13 @@ export default function RouteDetail() {
         ? Number(distanceFromExpectedStopKm.toFixed(3))
         : undefined;
     const sequenceGapRounded =
-      typeof sequenceGapKm === "number" ? Number(sequenceGapKm.toFixed(3)) : undefined;
+      typeof sequenceGapKm === "number"
+        ? Number(sequenceGapKm.toFixed(3))
+        : undefined;
 
     reportRouteExecutionEvent({
-      type: result === "delivered" ? "route_stop_delivered" : "route_stop_failed",
+      type:
+        result === "delivered" ? "route_stop_delivered" : "route_stop_failed",
       severity: result === "delivered" ? "info" : "warning",
       title:
         result === "delivered"
@@ -1175,7 +1295,8 @@ export default function RouteDetail() {
 
     if (
       typeof sequenceGapKm === "number" &&
-      (sequenceGapKm > SEQUENCE_INCOHERENCE_ALERT_KM || autoSelectedNearbyStop) &&
+      (sequenceGapKm > SEQUENCE_INCOHERENCE_ALERT_KM ||
+        autoSelectedNearbyStop) &&
       nearestPendingIndex >= 0 &&
       nearestPendingIndex !== firstPendingIndex
     ) {
@@ -1206,9 +1327,19 @@ export default function RouteDetail() {
 
     setDeliveryState({
       started: finished ? false : deliveryState.started,
-      currentIndex: finished ? stops.length - 1 : nextIndex >= 0 ? nextIndex : 0,
+      currentIndex: finished
+        ? stops.length - 1
+        : nextIndex >= 0
+          ? nextIndex
+          : 0,
       delivered,
       failed,
+      lastAction: {
+        stopIndex,
+        result,
+        previousState: previousDeliveryState,
+        createdAt: new Date().toISOString(),
+      },
     });
 
     if (finished) {
@@ -1249,6 +1380,67 @@ export default function RouteDetail() {
     await handleStopResultAtIndex(deliveryState.currentIndex, "failed");
   };
 
+  const handleUndoLastAction = async () => {
+    const lastAction = deliveryState.lastAction;
+    if (!lastAction) {
+      toast.message("Nenhuma ação recente para reverter.");
+      return;
+    }
+
+    const targetStop = stops[lastAction.stopIndex];
+    const previousState = {
+      ...lastAction.previousState,
+      currentIndex: Math.min(
+        Math.max(0, lastAction.previousState.currentIndex),
+        Math.max(0, stops.length - 1)
+      ),
+      delivered: normalizeDeliveryIndexes(
+        lastAction.previousState.delivered,
+        stops.length
+      ),
+      failed: normalizeDeliveryIndexes(
+        lastAction.previousState.failed,
+        stops.length
+      ),
+      lastAction: null,
+    };
+
+    setDeliveryState(previousState);
+
+    if (routeQuery.data?.status === "completed") {
+      try {
+        await updateRouteMutation.mutateAsync({
+          id: routeId,
+          status: "optimized",
+        });
+      } catch {
+        toast.warning(
+          "Baixa revertida, mas não foi possível reabrir o status da rota no servidor."
+        );
+      }
+    }
+
+    reportRouteExecutionEvent({
+      type: "route_stop_action_reverted",
+      severity: "warning",
+      title: "Última ação de parada revertida",
+      message: targetStop?.address,
+      stopId: targetStop?.id,
+      metadata: {
+        revertedStopIndex: lastAction.stopIndex,
+        revertedResult: lastAction.result,
+        revertedStopAddress: targetStop?.address,
+        revertedStopPackage: targetStop
+          ? getStopDisplayLabel(targetStop, lastAction.stopIndex)
+          : undefined,
+      },
+    });
+
+    toast.success(
+      `Ação revertida. Parada ${targetStop ? getStopDisplayLabel(targetStop, lastAction.stopIndex) : lastAction.stopIndex + 1} voltou para pendente.`
+    );
+  };
+
   const handleReset = () => {
     if (deliveryState.started && !isComplete) {
       reportRouteExecutionEvent({
@@ -1285,7 +1477,9 @@ export default function RouteDetail() {
     setIsLocatingForReoptimization(true);
 
     try {
-      toast.message("Obtendo sua posição atual para otimizar a rota a partir de onde você está...");
+      toast.message(
+        "Obtendo sua posição atual para otimizar a rota a partir de onde você está..."
+      );
       const currentPosition = await getCurrentPosition();
 
       optimizeRouteMutation.mutate({
@@ -1314,14 +1508,18 @@ export default function RouteDetail() {
     }
 
     if (remainingStopsCount < 2) {
-      toast.error("A rota precisa ter pelo menos 2 paradas pendentes para reotimizar.");
+      toast.error(
+        "A rota precisa ter pelo menos 2 paradas pendentes para reotimizar."
+      );
       return;
     }
 
     setIsLocatingForReoptimization(true);
 
     try {
-      toast.message("Obtendo sua posição atual para reotimizar as próximas entregas...");
+      toast.message(
+        "Obtendo sua posição atual para reotimizar as próximas entregas..."
+      );
       const currentPosition = await getCurrentPosition();
 
       optimizeRemainingMutation.mutate({
@@ -1351,14 +1549,18 @@ export default function RouteDetail() {
     }
 
     if (remainingStopsCount < 2) {
-      toast.error("A rota precisa ter pelo menos 2 paradas pendentes para ajustar a sequência.");
+      toast.error(
+        "A rota precisa ter pelo menos 2 paradas pendentes para ajustar a sequência."
+      );
       return;
     }
 
     setIsLocatingForReoptimization(true);
 
     try {
-      toast.message("Obtendo sua posição para melhorar a sequência com prioridade nas paradas próximas...");
+      toast.message(
+        "Obtendo sua posição para melhorar a sequência com prioridade nas paradas próximas..."
+      );
       const currentPosition = await getCurrentPosition();
 
       optimizeRemainingMutation.mutate({
@@ -1430,11 +1632,16 @@ export default function RouteDetail() {
       throw new Error(`Confira o endereço e as coordenadas de ${label}.`);
     }
 
-    rememberAddressCoordinates(address, suggestion.latitude, suggestion.longitude, {
-      geocodingConfidenceScore: suggestion.geocodingConfidenceScore,
-      geocodingMethod: suggestion.geocodingMethod,
-      geocodingSuspect: suggestion.geocodingSuspect,
-    });
+    rememberAddressCoordinates(
+      address,
+      suggestion.latitude,
+      suggestion.longitude,
+      {
+        geocodingConfidenceScore: suggestion.geocodingConfidenceScore,
+        geocodingMethod: suggestion.geocodingMethod,
+        geocodingSuspect: suggestion.geocodingSuspect,
+      }
+    );
 
     return {
       location: address,
@@ -1459,7 +1666,10 @@ export default function RouteDetail() {
     }
 
     try {
-      const resolved = await resolveRoutePoint(stopDraft, `parada ${index + 1}`);
+      const resolved = await resolveRoutePoint(
+        stopDraft,
+        `parada ${index + 1}`
+      );
 
       await updateStopMutation.mutateAsync({
         routeId,
@@ -1482,7 +1692,9 @@ export default function RouteDetail() {
       });
 
       handleCancelEditStop();
-      toast.success("Parada salva. Reotimize a rota para recalcular a melhor sequência.");
+      toast.success(
+        "Parada salva. Reotimize a rota para recalcular a melhor sequência."
+      );
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -1518,7 +1730,9 @@ export default function RouteDetail() {
         handleCancelEditStop();
       }
       setSelectedStopIndex(null);
-      toast.success("Parada excluída. Reotimize a rota para recalcular a melhor sequência.");
+      toast.success(
+        "Parada excluída. Reotimize a rota para recalcular a melhor sequência."
+      );
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -1586,7 +1800,13 @@ export default function RouteDetail() {
               <h1 className="text-4xl font-bold tracking-tight">
                 {routeQuery.data?.name || "Rota"}
               </h1>
-              <Badge variant={routeQuery.data?.status === "completed" ? "default" : "outline"}>
+              <Badge
+                variant={
+                  routeQuery.data?.status === "completed"
+                    ? "default"
+                    : "outline"
+                }
+              >
                 {getStatusLabel(routeQuery.data?.status)}
               </Badge>
             </div>
@@ -1613,7 +1833,9 @@ export default function RouteDetail() {
               }
             >
               <Zap className="mr-2 h-4 w-4" />
-              {optimizeRouteMutation.isPending ? "Otimizando..." : "Otimizar rota"}
+              {optimizeRouteMutation.isPending
+                ? "Otimizando..."
+                : "Otimizar rota"}
             </Button>
             <Button
               type="button"
@@ -1632,8 +1854,8 @@ export default function RouteDetail() {
               {isLocatingForReoptimization
                 ? "Localizando..."
                 : optimizeRemainingMutation.isPending
-                ? "Reotimizando..."
-                : "Reotimizar restantes"}
+                  ? "Reotimizando..."
+                  : "Reotimizar restantes"}
             </Button>
             <Button
               type="button"
@@ -1649,7 +1871,8 @@ export default function RouteDetail() {
               }
             >
               <Navigation className="mr-2 h-4 w-4" />
-              {isLocatingForReoptimization || optimizeRemainingMutation.isPending
+              {isLocatingForReoptimization ||
+              optimizeRemainingMutation.isPending
                 ? "Ajustando..."
                 : "Não gostei da sequência"}
             </Button>
@@ -1680,8 +1903,8 @@ export default function RouteDetail() {
               auditQuery.data.status === "approved"
                 ? "border-emerald-200 bg-emerald-50 text-emerald-950"
                 : auditQuery.data.status === "critical"
-                ? "border-red-200 bg-red-50 text-red-950"
-                : "border-amber-200 bg-amber-50 text-amber-950"
+                  ? "border-red-200 bg-red-50 text-red-950"
+                  : "border-amber-200 bg-amber-50 text-amber-950"
             }
           >
             <AlertTriangle className="h-4 w-4" />
@@ -1693,8 +1916,8 @@ export default function RouteDetail() {
                     {auditQuery.data.status === "approved"
                       ? "aprovada"
                       : auditQuery.data.status === "critical"
-                      ? "crítica"
-                      : "atenção"}
+                        ? "crítica"
+                        : "atenção"}
                   </span>
                   <Badge variant="outline">Score {auditQuery.data.score}</Badge>
                   <Badge variant="outline">
@@ -1709,15 +1932,22 @@ export default function RouteDetail() {
                   {(auditQuery.data as any).clusterMetrics ? (
                     <>
                       <Badge variant="outline">
-                        {(auditQuery.data as any).clusterMetrics.clusterCount} região(ões)
+                        {(auditQuery.data as any).clusterMetrics.clusterCount}{" "}
+                        região(ões)
                       </Badge>
                       <Badge variant="outline">
                         raio médio{" "}
-                        {(auditQuery.data as any).clusterMetrics.averageRadiusKm.toFixed(2)} km
+                        {(
+                          auditQuery.data as any
+                        ).clusterMetrics.averageRadiusKm.toFixed(2)}{" "}
+                        km
                       </Badge>
                       <Badge variant="outline">
                         maior região{" "}
-                        {(auditQuery.data as any).clusterMetrics.maxRadiusKm.toFixed(2)} km
+                        {(
+                          auditQuery.data as any
+                        ).clusterMetrics.maxRadiusKm.toFixed(2)}{" "}
+                        km
                       </Badge>
                     </>
                   ) : null}
@@ -1732,15 +1962,18 @@ export default function RouteDetail() {
                 {auditQuery.data.issues.length ? (
                   <div className="max-h-56 space-y-2 overflow-y-auto pr-1 text-sm">
                     {auditQuery.data.issues.map((issue: any, index: number) => (
-                      <div key={`${issue.type}-${index}`} className="flex gap-2">
+                      <div
+                        key={`${issue.type}-${index}`}
+                        className="flex gap-2"
+                      >
                         <Badge variant="outline" className="h-6 shrink-0">
                           {issue.severity === "critical"
                             ? "crítico"
                             : issue.severity === "high"
-                            ? "alto"
-                            : issue.severity === "medium"
-                            ? "médio"
-                            : "baixo"}
+                              ? "alto"
+                              : issue.severity === "medium"
+                                ? "médio"
+                                : "baixo"}
                         </Badge>
                         <p>
                           <span className="font-medium">{issue.title}:</span>{" "}
@@ -1751,8 +1984,8 @@ export default function RouteDetail() {
                   </div>
                 ) : (
                   <p className="text-sm">
-                    Nenhuma parada próxima pulada, salto longo ou coordenada repetida
-                    foi detectada.
+                    Nenhuma parada próxima pulada, salto longo ou coordenada
+                    repetida foi detectada.
                   </p>
                 )}
               </div>
@@ -1788,10 +2021,14 @@ export default function RouteDetail() {
                       type="button"
                       variant="outline"
                       onClick={handleSaveEndpoints}
-                      disabled={isSavingEndpoints || updateRouteMutation.isPending}
+                      disabled={
+                        isSavingEndpoints || updateRouteMutation.isPending
+                      }
                     >
                       <Save className="mr-2 h-4 w-4" />
-                      {isSavingEndpoints ? "Salvando..." : "Salvar in\u00edcio/fim"}
+                      {isSavingEndpoints
+                        ? "Salvando..."
+                        : "Salvar in\u00edcio/fim"}
                     </Button>
                   </CardHeader>
                   <CardContent className="grid gap-4 lg:grid-cols-2">
@@ -1803,11 +2040,11 @@ export default function RouteDetail() {
                         value={startPoint.address}
                         latitude={startPoint.latitude}
                         longitude={startPoint.longitude}
-                        onAddressChange={(address) =>
-                          setStartPoint((current) => ({ ...current, address }))
+                        onAddressChange={address =>
+                          setStartPoint(current => ({ ...current, address }))
                         }
                         onCoordinatesChange={(latitude, longitude) =>
-                          setStartPoint((current) => ({
+                          setStartPoint(current => ({
                             ...current,
                             latitude,
                             longitude,
@@ -1824,11 +2061,11 @@ export default function RouteDetail() {
                         value={endPoint.address}
                         latitude={endPoint.latitude}
                         longitude={endPoint.longitude}
-                        onAddressChange={(address) =>
-                          setEndPoint((current) => ({ ...current, address }))
+                        onAddressChange={address =>
+                          setEndPoint(current => ({ ...current, address }))
                         }
                         onCoordinatesChange={(latitude, longitude) =>
-                          setEndPoint((current) => ({
+                          setEndPoint(current => ({
                             ...current,
                             latitude,
                             longitude,
@@ -1847,288 +2084,388 @@ export default function RouteDetail() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-5">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">Progresso</span>
-                      <span className="font-medium">
-                        {handledCount}/{stops.length} paradas tratadas
-                      </span>
-                    </div>
-                    <Progress value={progressValue} />
-                    <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-                      <span>{deliveredCount} entregue(s)</span>
-                      <span>{failedCount} não entregue(s)</span>
-                    </div>
-                  </div>
-
-                  {!isComplete && (
-                    <div className="rounded-2xl border border-border/70 bg-white p-4">
-                      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="flex min-w-0 gap-3">
-                          <BellRing className="mt-1 h-5 w-5 shrink-0 text-primary" />
-                          <div className="min-w-0">
-                            <p className="font-semibold">Alerta de entrega próxima</p>
-                            <p className="text-sm text-muted-foreground">
-                              Avisa se você passar perto de outra parada pendente, sem alterar a sequência da rota.
-                            </p>
-                          </div>
-                        </div>
-                        <Button
-                          type="button"
-                          variant={proximityAlertsEnabled ? "outline" : "default"}
-                          className="shrink-0 gap-2"
-                          onClick={() => {
-                            if (proximityAlertsEnabled) {
-                              setProximityAlertsEnabled(false);
-                              setActiveProximityAlert(null);
-                              toast.message("Alertas de proximidade desativados.");
-                              return;
-                            }
-
-                            void ensureProximityAudioReady();
-                          }}
-                        >
-                          <BellRing className="h-4 w-4" />
-                          {proximityAlertsEnabled ? "Desativar" : "Ativar alertas"}
-                        </Button>
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={proximitySoundEnabled ? "secondary" : "outline"}
-                          className="gap-2"
-                          onClick={() => setProximitySoundEnabled((current) => !current)}
-                        >
-                          <Volume2 className="h-4 w-4" />
-                          Som {proximitySoundEnabled ? "ligado" : "desligado"}
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={proximityVibrationEnabled ? "secondary" : "outline"}
-                          onClick={() => setProximityVibrationEnabled((current) => !current)}
-                        >
-                          Vibração {proximityVibrationEnabled ? "ligada" : "desligada"}
-                        </Button>
-                        <span className="inline-flex items-center text-xs text-muted-foreground">
-                          Raio: {PROXIMITY_ALERT_RADIUS_METERS} m
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">Progresso</span>
+                        <span className="font-medium">
+                          {handledCount}/{stops.length} paradas tratadas
                         </span>
                       </div>
+                      <Progress value={progressValue} />
+                      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                        <span>{deliveredCount} entregue(s)</span>
+                        <span>{failedCount} não entregue(s)</span>
+                      </div>
                     </div>
-                  )}
 
-                  {activeProximityAlert && activeProximityStop && (
-                    <div className="rounded-2xl border border-amber-400/50 bg-amber-50 p-4 text-amber-950">
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                        <div className="min-w-0 space-y-1">
-                          <p className="text-sm font-semibold uppercase">
-                            Entrega próxima detectada
-                          </p>
-                          <p className="text-lg font-bold leading-snug">
-                            Parada {getStopDisplayLabel(activeProximityStop, activeProximityAlert.stopIndex)} a{" "}
-                            {formatDistanceMeters(activeProximityAlert.distanceMeters)}
-                          </p>
-                          <p className="text-sm leading-snug">
-                            {activeProximityStop.address}
-                          </p>
-                        </div>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="shrink-0 bg-white"
-                          onClick={() => setActiveProximityAlert(null)}
-                        >
-                          Ignorar agora
-                        </Button>
-                      </div>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className="bg-white"
-                          onClick={() => {
-                            setSelectedStopIndex(activeProximityAlert.stopIndex);
-                            setStopSearch("");
-                          }}
-                        >
-                          Ver parada
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className="bg-white"
-                          onClick={() => openStopInMap(activeProximityStop)}
-                        >
-                          <Navigation className="mr-2 h-4 w-4" />
-                          Abrir no mapa
-                        </Button>
-                        <Button
-                          type="button"
-                          onClick={() => {
-                            void handleStopResultAtIndex(
-                              activeProximityAlert.stopIndex,
-                              "delivered"
-                            );
-                          }}
-                          disabled={updateRouteMutation.isPending}
-                        >
-                          <CheckCircle2 className="mr-2 h-4 w-4" />
-                          Entregue
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-
-                  {isComplete ? (
-                    <div
-                      className={[
-                        "rounded-2xl border border-border/70 bg-white p-5",
-                        failedCount > 0
-                          ? "border-amber-400/40 bg-amber-400/15"
-                          : "border-accent/40 bg-accent/15",
-                      ].join(" ")}
-                    >
-                      <div
-                        className={[
-                          "flex items-center gap-3",
-                          failedCount > 0 ? "text-amber-200" : "text-accent",
-                        ].join(" ")}
-                      >
-                        {failedCount > 0 ? (
-                          <XCircle className="h-6 w-6" />
-                        ) : (
-                          <PackageCheck className="h-6 w-6" />
-                        )}
-                        <div>
-                          <p className="font-semibold">
-                            {failedCount > 0
-                              ? "Rota finalizada com falhas de entrega."
-                              : "Todas as entregas foram concluidas."}
-                          </p>
-                          <p
-                            className={[
-                              "text-sm",
-                              failedCount > 0 ? "text-amber-100" : "text-accent/90",
-                            ].join(" ")}
-                          >
-                            {failedCount > 0
-                              ? `${deliveredCount} entregue(s) e ${failedCount} não entregue(s).`
-                              : "A rota foi marcada como concluida."}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  ) : deliveryState.started && currentStop ? (
-                    <div className="rounded-2xl border border-border/70 bg-white p-5">
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div className="flex min-w-0 items-center gap-3">
-                          <div
-                            className={[
-                              "flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl border border-primary/20 bg-primary text-center font-bold leading-none text-primary-foreground shadow-sm",
-                              getStopNumberTextClass(
-                                getStopDisplayLabel(currentStop, deliveryState.currentIndex)
-                              ),
-                            ].join(" ")}
-                            aria-label={`Parada ${getStopDisplayLabel(currentStop, deliveryState.currentIndex)}`}
-                          >
-                            <span className="max-w-[3.5rem] truncate">
-                              {getStopDisplayLabel(currentStop, deliveryState.currentIndex)}
-                            </span>
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-xs font-semibold uppercase text-muted-foreground">
-                              Parada atual
-                            </p>
-                            <p className="truncate text-sm font-medium text-foreground">
-                              Parada {getStopDisplayLabel(currentStop, deliveryState.currentIndex)}
-                            </p>
-                          </div>
-                        </div>
-                        <span className="text-sm text-muted-foreground">
-                          Atual
-                        </span>
-                      </div>
-                      <div className="space-y-3">
-                        <div className="flex gap-3">
-                          <MapPin className="mt-1 h-5 w-5 shrink-0 text-primary" />
-                          <div>
-                            <p className="text-lg font-semibold">
-                              {currentStop.address}
-                            </p>
-                            <div className="flex flex-wrap gap-2">
-                              {getShopeeStopLabel(currentStop) && (
-                                <p className="inline-flex max-w-full items-center rounded-lg bg-amber-100 px-2.5 py-1 text-base font-bold text-amber-800">
-                                  <span className="truncate">{getShopeeStopLabel(currentStop)}</span>
-                                </p>
-                              )}
-                              {getPackageLabel(currentStop) && (
-                                <p className="inline-flex max-w-full items-center rounded-lg bg-primary/10 px-2.5 py-1 text-base font-bold text-primary">
-                                  <span className="truncate">{getPackageLabel(currentStop)}</span>
-                                </p>
-                              )}
+                    {!isComplete && (
+                      <div className="rounded-2xl border border-border/70 bg-white p-4">
+                        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex min-w-0 gap-3">
+                            <BellRing className="mt-1 h-5 w-5 shrink-0 text-primary" />
+                            <div className="min-w-0">
+                              <p className="font-semibold">
+                                Alerta de entrega próxima
+                              </p>
+                              <p className="text-sm text-muted-foreground">
+                                Avisa se você passar perto de outra parada
+                                pendente, sem alterar a sequência da rota.
+                              </p>
                             </div>
-                            <p className="text-sm text-muted-foreground">
-                              {currentStop.latitude.toFixed(6)},{" "}
-                              {currentStop.longitude.toFixed(6)}
-                            </p>
                           </div>
-                        </div>
-                        <div className="flex flex-col gap-2 sm:flex-row">
                           <Button
                             type="button"
-                            className="gap-2"
-                            onClick={handleDelivered}
-                            disabled={updateRouteMutation.isPending}
+                            variant={
+                              proximityAlertsEnabled ? "outline" : "default"
+                            }
+                            className="shrink-0 gap-2"
+                            onClick={() => {
+                              if (proximityAlertsEnabled) {
+                                setProximityAlertsEnabled(false);
+                                setActiveProximityAlert(null);
+                                toast.message(
+                                  "Alertas de proximidade desativados."
+                                );
+                                return;
+                              }
+
+                              void ensureProximityAudioReady();
+                            }}
                           >
-                            <CheckCircle2 className="h-4 w-4" />
-                            Entregue
+                            <BellRing className="h-4 w-4" />
+                            {proximityAlertsEnabled
+                              ? "Desativar"
+                              : "Ativar alertas"}
+                          </Button>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={
+                              proximitySoundEnabled ? "secondary" : "outline"
+                            }
+                            className="gap-2"
+                            onClick={() =>
+                              setProximitySoundEnabled(current => !current)
+                            }
+                          >
+                            <Volume2 className="h-4 w-4" />
+                            Som {proximitySoundEnabled ? "ligado" : "desligado"}
                           </Button>
                           <Button
                             type="button"
-                            variant="destructive"
-                            className="gap-2"
-                            onClick={handleNotDelivered}
-                            disabled={updateRouteMutation.isPending}
+                            size="sm"
+                            variant={
+                              proximityVibrationEnabled
+                                ? "secondary"
+                                : "outline"
+                            }
+                            onClick={() =>
+                              setProximityVibrationEnabled(current => !current)
+                            }
                           >
-                            <XCircle className="h-4 w-4" />
-                            Não Entregue
+                            Vibração{" "}
+                            {proximityVibrationEnabled ? "ligada" : "desligada"}
+                          </Button>
+                          <span className="inline-flex items-center text-xs text-muted-foreground">
+                            Raio: {PROXIMITY_ALERT_RADIUS_METERS} m
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {activeProximityAlert && activeProximityStop && (
+                      <div className="rounded-2xl border border-amber-400/50 bg-amber-50 p-4 text-amber-950">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0 space-y-1">
+                            <p className="text-sm font-semibold uppercase">
+                              Entrega próxima detectada
+                            </p>
+                            <p className="text-lg font-bold leading-snug">
+                              Parada{" "}
+                              {getStopDisplayLabel(
+                                activeProximityStop,
+                                activeProximityAlert.stopIndex
+                              )}{" "}
+                              a{" "}
+                              {formatDistanceMeters(
+                                activeProximityAlert.distanceMeters
+                              )}
+                            </p>
+                            <p className="text-sm leading-snug">
+                              {activeProximityStop.address}
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="shrink-0 bg-white"
+                            onClick={() => setActiveProximityAlert(null)}
+                          >
+                            Ignorar agora
+                          </Button>
+                        </div>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="bg-white"
+                            onClick={() => {
+                              setSelectedStopIndex(
+                                activeProximityAlert.stopIndex
+                              );
+                              setStopSearch("");
+                            }}
+                          >
+                            Ver parada
                           </Button>
                           <Button
                             type="button"
                             variant="outline"
-                            className="w-full gap-2"
-                            onClick={() => {
-                              setShowRouteMap(false);
-                              openStopInMap(currentStop);
-                            }}
+                            className="bg-white"
+                            onClick={() => openStopInMap(activeProximityStop)}
                           >
-                            <Navigation className="h-4 w-4" />
+                            <Navigation className="mr-2 h-4 w-4" />
                             Abrir no mapa
+                          </Button>
+                          <Button
+                            type="button"
+                            onClick={() => {
+                              void handleStopResultAtIndex(
+                                activeProximityAlert.stopIndex,
+                                "delivered"
+                              );
+                            }}
+                            disabled={updateRouteMutation.isPending}
+                          >
+                            <CheckCircle2 className="mr-2 h-4 w-4" />
+                            Entregue
                           </Button>
                         </div>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="rounded-2xl border border-border/70 bg-secondary/55 p-5">
-                      <div className="flex items-center gap-3">
-                        <Clock className="h-5 w-5 text-muted-foreground" />
-                        <div>
-                          <p className="font-medium">Rota pronta para iniciar.</p>
-                          <p className="text-sm text-muted-foreground">
-                            Clique em Iniciar rota para abrir a primeira parada.
-                          </p>
+                    )}
+
+                    {isComplete ? (
+                      <div
+                        className={[
+                          "rounded-2xl border border-border/70 bg-white p-5",
+                          failedCount > 0
+                            ? "border-amber-400/40 bg-amber-400/15"
+                            : "border-accent/40 bg-accent/15",
+                        ].join(" ")}
+                      >
+                        <div
+                          className={[
+                            "flex items-center gap-3",
+                            failedCount > 0 ? "text-amber-200" : "text-accent",
+                          ].join(" ")}
+                        >
+                          {failedCount > 0 ? (
+                            <XCircle className="h-6 w-6" />
+                          ) : (
+                            <PackageCheck className="h-6 w-6" />
+                          )}
+                          <div>
+                            <p className="font-semibold">
+                              {failedCount > 0
+                                ? "Rota finalizada com falhas de entrega."
+                                : "Todas as entregas foram concluidas."}
+                            </p>
+                            <p
+                              className={[
+                                "text-sm",
+                                failedCount > 0
+                                  ? "text-amber-100"
+                                  : "text-accent/90",
+                              ].join(" ")}
+                            >
+                              {failedCount > 0
+                                ? `${deliveredCount} entregue(s) e ${failedCount} não entregue(s).`
+                                : "A rota foi marcada como concluida."}
+                            </p>
+                          </div>
+                        </div>
+                        {deliveryState.lastAction && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="mt-4 gap-2 bg-white"
+                            onClick={() => void handleUndoLastAction()}
+                            disabled={updateRouteMutation.isPending}
+                          >
+                            <RotateCcw className="h-4 w-4" />
+                            Reverter última ação
+                          </Button>
+                        )}
+                      </div>
+                    ) : deliveryState.started && currentStop ? (
+                      <div className="rounded-2xl border border-border/70 bg-white p-5">
+                        <div className="mb-4 space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs font-semibold uppercase text-muted-foreground">
+                              Destino atual
+                            </p>
+                            <span className="text-sm text-muted-foreground">
+                              Atual
+                            </span>
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-3">
+                            <div className="rounded-2xl border border-primary/20 bg-primary p-4 text-primary-foreground shadow-sm">
+                              <p className="text-xs font-semibold uppercase opacity-80">
+                                Parada
+                              </p>
+                              <p className="mt-1 text-4xl font-black leading-none">
+                                {currentStopIdentity?.routeStopLabel}
+                              </p>
+                              <p className="mt-1 text-xs opacity-85">
+                                de {stops.length}
+                              </p>
+                            </div>
+                            {currentStopIdentity?.shopeeStopLabel ? (
+                              <div className="rounded-2xl border border-orange-300 bg-orange-500 p-4 text-white shadow-sm">
+                                <p className="text-xs font-semibold uppercase opacity-90">
+                                  STOP Shopee
+                                </p>
+                                <p className="mt-1 text-3xl font-black leading-none">
+                                  {currentStopIdentity.shopeeStopLabel.replace(
+                                    "STOP ",
+                                    ""
+                                  )}
+                                </p>
+                                <p className="mt-1 text-xs opacity-90">
+                                  {currentStopIdentity.shopeeStopLabel ===
+                                  "Sem STOP"
+                                    ? "Encaixado por proximidade"
+                                    : "Sequência da tabela"}
+                                </p>
+                              </div>
+                            ) : (
+                              <div className="rounded-2xl border border-border bg-secondary/70 p-4 text-foreground">
+                                <p className="text-xs font-semibold uppercase text-muted-foreground">
+                                  STOP
+                                </p>
+                                <p className="mt-1 text-2xl font-black leading-none">
+                                  Não usado
+                                </p>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  Rota sem STOP Shopee
+                                </p>
+                              </div>
+                            )}
+                            <div className="rounded-2xl border border-primary/10 bg-primary/10 p-4 text-primary">
+                              <p className="text-xs font-semibold uppercase">
+                                Pacote
+                              </p>
+                              <p className="mt-1 break-words text-2xl font-black leading-tight">
+                                {currentStopIdentity?.packageLabel?.replace(
+                                  "Pacote: ",
+                                  ""
+                                ) || "Sem pacote"}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="space-y-3">
+                          <div className="flex gap-3">
+                            <MapPin className="mt-1 h-5 w-5 shrink-0 text-primary" />
+                            <div>
+                              <p className="text-lg font-semibold">
+                                {currentStop.address}
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                {currentStopIdentity?.shopeeStopLabel && (
+                                  <p className="inline-flex max-w-full items-center rounded-lg bg-amber-100 px-2.5 py-1 text-base font-bold text-amber-800">
+                                    <span className="truncate">
+                                      {currentStopIdentity.shopeeStopLabel}
+                                    </span>
+                                  </p>
+                                )}
+                                {currentStopIdentity?.packageLabel && (
+                                  <p className="inline-flex max-w-full items-center rounded-lg bg-primary/10 px-2.5 py-1 text-base font-bold text-primary">
+                                    <span className="truncate">
+                                      {currentStopIdentity.packageLabel}
+                                    </span>
+                                  </p>
+                                )}
+                              </div>
+                              <p className="text-sm text-muted-foreground">
+                                {currentStop.latitude.toFixed(6)},{" "}
+                                {currentStop.longitude.toFixed(6)}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex flex-col gap-2 sm:flex-row">
+                            <Button
+                              type="button"
+                              className="gap-2"
+                              onClick={handleDelivered}
+                              disabled={updateRouteMutation.isPending}
+                            >
+                              <CheckCircle2 className="h-4 w-4" />
+                              Entregue
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="destructive"
+                              className="gap-2"
+                              onClick={handleNotDelivered}
+                              disabled={updateRouteMutation.isPending}
+                            >
+                              <XCircle className="h-4 w-4" />
+                              Não Entregue
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="gap-2"
+                              onClick={() => void handleUndoLastAction()}
+                              disabled={
+                                updateRouteMutation.isPending ||
+                                !deliveryState.lastAction
+                              }
+                            >
+                              <RotateCcw className="h-4 w-4" />
+                              Reverter
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="w-full gap-2"
+                              onClick={() => {
+                                setShowRouteMap(false);
+                                openStopInMap(currentStop);
+                              }}
+                            >
+                              <Navigation className="h-4 w-4" />
+                              Abrir no mapa
+                            </Button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )}
+                    ) : (
+                      <div className="rounded-2xl border border-border/70 bg-secondary/55 p-5">
+                        <div className="flex items-center gap-3">
+                          <Clock className="h-5 w-5 text-muted-foreground" />
+                          <div>
+                            <p className="font-medium">
+                              Rota pronta para iniciar.
+                            </p>
+                            <p className="text-sm text-muted-foreground">
+                              Clique em Iniciar rota para abrir a primeira
+                              parada.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
-                  {!isComplete && nextStop && !deliveryState.started && (
-                    <p className="text-sm text-muted-foreground">
-                      Primeira parada: {nextStop.address}
-                    </p>
-                  )}
+                    {!isComplete && nextStop && !deliveryState.started && (
+                      <p className="text-sm text-muted-foreground">
+                        Primeira parada: {nextStop.address}
+                      </p>
+                    )}
                   </CardContent>
                 </Card>
               </div>
@@ -2141,13 +2478,14 @@ export default function RouteDetail() {
                   <div className="space-y-2">
                     <Input
                       value={stopSearch}
-                      onChange={(event) => setStopSearch(event.target.value)}
+                      onChange={event => setStopSearch(event.target.value)}
                       placeholder="Filtrar por endereço da parada"
                       aria-label="Filtrar paradas por endereço"
                     />
                     {stopSearch.trim() && (
                       <p className="text-xs text-muted-foreground">
-                        {filteredStops.length} de {stops.length} parada(s) encontrada(s)
+                        {filteredStops.length} de {stops.length} parada(s)
+                        encontrada(s)
                       </p>
                     )}
                   </div>
@@ -2156,15 +2494,20 @@ export default function RouteDetail() {
                       <p className="text-xs font-semibold uppercase text-accent/90">
                         Início
                       </p>
-                      <p className="text-sm text-foreground">{routeStartPoint.address}</p>
+                      <p className="text-sm text-foreground">
+                        {routeStartPoint.address}
+                      </p>
                     </div>
                   )}
                   {filteredStops.map(({ stop, index }) => {
                     const delivered = deliveredSet.has(index);
                     const failed = failedSet.has(index);
-                    const active = deliveryState.started && index === deliveryState.currentIndex;
+                    const active =
+                      deliveryState.started &&
+                      index === deliveryState.currentIndex;
                     const expanded = selectedStopIndex === index;
                     const stopLabel = getStopDisplayLabel(stop, index);
+                    const identity = getStopIdentityDetails(stop, index);
 
                     return (
                       <div key={stop.id ?? index}>
@@ -2172,59 +2515,69 @@ export default function RouteDetail() {
                           type="button"
                           className="w-full text-left"
                           onClick={() =>
-                            setSelectedStopIndex((current) =>
+                            setSelectedStopIndex(current =>
                               current === index ? null : index
                             )
                           }
                         >
-                        <div className="flex gap-3">
-                          <div
-                            className={[
-                              "mt-0.5 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border text-center font-bold leading-none",
-                              !delivered && !failed ? getStopNumberTextClass(stopLabel) : "",
-                              delivered
-                                ? "border-accent bg-accent text-accent-foreground"
-                                : failed
-                                  ? "border-destructive bg-destructive text-destructive-foreground"
-                                : active
-                                  ? "border-primary bg-primary text-primary-foreground ring-2 ring-primary/20"
-                                  : "bg-background",
-                            ].join(" ")}
-                            aria-label={`Parada ${stopLabel}`}
-                          >
-                            {delivered ? (
-                              <CheckCircle2 className="h-5 w-5" />
-                            ) : failed ? (
-                              <XCircle className="h-5 w-5" />
-                            ) : (
-                              <span className="max-w-10 truncate">{stopLabel}</span>
-                            )}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <p className="font-medium leading-snug">{stop.address}</p>
-                            <div className="flex flex-wrap gap-2">
-                              {getShopeeStopLabel(stop) && (
-                                <p className="inline-flex max-w-full rounded-md bg-amber-100 px-2 py-0.5 text-sm font-bold text-amber-800">
-                                  <span className="truncate">{getShopeeStopLabel(stop)}</span>
-                                </p>
-                              )}
-                              {getPackageLabel(stop) && (
-                                <p className="inline-flex max-w-full rounded-md bg-primary/10 px-2 py-0.5 text-sm font-bold text-primary">
-                                  <span className="truncate">{getPackageLabel(stop)}</span>
-                                </p>
+                          <div className="flex gap-3">
+                            <div
+                              className={[
+                                "mt-0.5 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border text-center font-bold leading-none",
+                                !delivered && !failed
+                                  ? getStopNumberTextClass(stopLabel)
+                                  : "",
+                                delivered
+                                  ? "border-accent bg-accent text-accent-foreground"
+                                  : failed
+                                    ? "border-destructive bg-destructive text-destructive-foreground"
+                                    : active
+                                      ? "border-primary bg-primary text-primary-foreground ring-2 ring-primary/20"
+                                      : "bg-background",
+                              ].join(" ")}
+                              aria-label={`Parada ${stopLabel}`}
+                            >
+                              {delivered ? (
+                                <CheckCircle2 className="h-5 w-5" />
+                              ) : failed ? (
+                                <XCircle className="h-5 w-5" />
+                              ) : (
+                                <span className="max-w-10 truncate">
+                                  {stopLabel}
+                                </span>
                               )}
                             </div>
-                            <p className="text-xs text-muted-foreground">
-                              {delivered
-                                ? "Entregue"
-                                : failed
-                                  ? "Não entregue"
-                                : active
-                                    ? "Aberta agora"
-                                    : "Pendente"}
-                            </p>
+                            <div className="min-w-0 flex-1">
+                              <p className="font-medium leading-snug">
+                                {stop.address}
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                {identity.shopeeStopLabel && (
+                                  <p className="inline-flex max-w-full rounded-lg bg-orange-500 px-3 py-1 text-base font-black text-white">
+                                    <span className="truncate">
+                                      {identity.shopeeStopLabel}
+                                    </span>
+                                  </p>
+                                )}
+                                {identity.packageLabel && (
+                                  <p className="inline-flex max-w-full rounded-md bg-primary/10 px-2 py-0.5 text-sm font-bold text-primary">
+                                    <span className="truncate">
+                                      {identity.packageLabel}
+                                    </span>
+                                  </p>
+                                )}
+                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                {delivered
+                                  ? "Entregue"
+                                  : failed
+                                    ? "Não entregue"
+                                    : active
+                                      ? "Aberta agora"
+                                      : "Pendente"}
+                              </p>
+                            </div>
                           </div>
-                        </div>
                         </button>
                         {expanded && (
                           <div className="mt-2 space-y-3">
@@ -2237,8 +2590,8 @@ export default function RouteDetail() {
                                   value={stopDraft.address}
                                   latitude={stopDraft.latitude}
                                   longitude={stopDraft.longitude}
-                                  onAddressChange={(address) =>
-                                    setStopDraft((current) => ({
+                                  onAddressChange={address =>
+                                    setStopDraft(current => ({
                                       ...current,
                                       address,
                                       latitude: 0,
@@ -2246,7 +2599,7 @@ export default function RouteDetail() {
                                     }))
                                   }
                                   onCoordinatesChange={(latitude, longitude) =>
-                                    setStopDraft((current) => ({
+                                    setStopDraft(current => ({
                                       ...current,
                                       latitude,
                                       longitude,
@@ -2264,8 +2617,8 @@ export default function RouteDetail() {
                                     <Input
                                       id={`route-detail-stop-${stop.id ?? index}-package`}
                                       value={stopDraft.packageNumber}
-                                      onChange={(event) =>
-                                        setStopDraft((current) => ({
+                                      onChange={event =>
+                                        setStopDraft(current => ({
                                           ...current,
                                           packageNumber: event.target.value,
                                         }))
@@ -2283,8 +2636,8 @@ export default function RouteDetail() {
                                     <Input
                                       id={`route-detail-stop-${stop.id ?? index}-notes`}
                                       value={stopDraft.notes}
-                                      onChange={(event) =>
-                                        setStopDraft((current) => ({
+                                      onChange={event =>
+                                        setStopDraft(current => ({
                                           ...current,
                                           notes: event.target.value,
                                         }))
@@ -2298,11 +2651,15 @@ export default function RouteDetail() {
                                     type="button"
                                     size="sm"
                                     className="gap-2"
-                                    onClick={() => void handleSaveStop(stop, index)}
+                                    onClick={() =>
+                                      void handleSaveStop(stop, index)
+                                    }
                                     disabled={updateStopMutation.isPending}
                                   >
                                     <Save className="h-4 w-4" />
-                                    {updateStopMutation.isPending ? "Salvando..." : "Salvar parada"}
+                                    {updateStopMutation.isPending
+                                      ? "Salvando..."
+                                      : "Salvar parada"}
                                   </Button>
                                   <Button
                                     type="button"
@@ -2324,7 +2681,10 @@ export default function RouteDetail() {
                                 variant="outline"
                                 className="gap-2"
                                 onClick={() => handleStartEditStop(stop, index)}
-                                disabled={updateStopMutation.isPending || deleteStopMutation.isPending}
+                                disabled={
+                                  updateStopMutation.isPending ||
+                                  deleteStopMutation.isPending
+                                }
                               >
                                 <Pencil className="h-4 w-4" />
                                 Editar parada
@@ -2334,7 +2694,9 @@ export default function RouteDetail() {
                                 size="sm"
                                 variant="outline"
                                 className="gap-2 text-destructive hover:text-destructive"
-                                onClick={() => void handleDeleteStop(stop, index)}
+                                onClick={() =>
+                                  void handleDeleteStop(stop, index)
+                                }
                                 disabled={
                                   stops.length <= 2 ||
                                   updateStopMutation.isPending ||
@@ -2348,7 +2710,12 @@ export default function RouteDetail() {
                                 type="button"
                                 size="sm"
                                 className="gap-2"
-                                onClick={() => void handleStopResultAtIndex(index, "delivered")}
+                                onClick={() =>
+                                  void handleStopResultAtIndex(
+                                    index,
+                                    "delivered"
+                                  )
+                                }
                                 disabled={updateRouteMutation.isPending}
                               >
                                 <CheckCircle2 className="h-4 w-4" />
@@ -2359,7 +2726,9 @@ export default function RouteDetail() {
                                 size="sm"
                                 variant="destructive"
                                 className="gap-2"
-                                onClick={() => void handleStopResultAtIndex(index, "failed")}
+                                onClick={() =>
+                                  void handleStopResultAtIndex(index, "failed")
+                                }
                                 disabled={updateRouteMutation.isPending}
                               >
                                 <XCircle className="h-4 w-4" />
@@ -2381,7 +2750,9 @@ export default function RouteDetail() {
                             </div>
                           </div>
                         )}
-                        {index < stops.length - 1 && <Separator className="mt-3" />}
+                        {index < stops.length - 1 && (
+                          <Separator className="mt-3" />
+                        )}
                       </div>
                     );
                   })}
@@ -2395,7 +2766,9 @@ export default function RouteDetail() {
                       <p className="text-xs font-semibold uppercase text-destructive">
                         Fim
                       </p>
-                      <p className="text-sm text-foreground">{routeEndPoint.address}</p>
+                      <p className="text-sm text-foreground">
+                        {routeEndPoint.address}
+                      </p>
                     </div>
                   )}
                 </CardContent>
@@ -2414,8 +2787,14 @@ export default function RouteDetail() {
                   stops={stops}
                   routeName={routeQuery.data.name}
                   height="h-96"
-                  startPoint={hasValidCoordinates(startPoint) ? startPoint : routeStartPoint}
-                  endPoint={hasValidCoordinates(endPoint) ? endPoint : routeEndPoint}
+                  startPoint={
+                    hasValidCoordinates(startPoint)
+                      ? startPoint
+                      : routeStartPoint
+                  }
+                  endPoint={
+                    hasValidCoordinates(endPoint) ? endPoint : routeEndPoint
+                  }
                   auditIssues={auditQuery.data?.issues || []}
                 />
               </Suspense>
@@ -2425,7 +2804,8 @@ export default function RouteDetail() {
                   <div>
                     <p className="font-medium text-foreground">Mapa da rota</p>
                     <p className="text-sm text-muted-foreground">
-                      Carregue o mapa somente quando precisar visualizar o trajeto completo.
+                      Carregue o mapa somente quando precisar visualizar o
+                      trajeto completo.
                     </p>
                   </div>
                   <Button
@@ -2446,5 +2826,3 @@ export default function RouteDetail() {
     </DashboardLayout>
   );
 }
-
-

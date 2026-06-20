@@ -1,8 +1,23 @@
+export type DeliveryProgressSnapshot = {
+  started: boolean;
+  currentIndex: number;
+  delivered: number[];
+  failed: number[];
+};
+
+export type DeliveryProgressLastAction = {
+  stopIndex: number;
+  result: "delivered" | "failed";
+  previousState: DeliveryProgressSnapshot;
+  createdAt: string;
+};
+
 export type DeliveryProgressState = {
   started: boolean;
   currentIndex: number;
   delivered: number[];
   failed: number[];
+  lastAction?: DeliveryProgressLastAction | null;
 };
 
 export type LastRouteProgress = {
@@ -21,7 +36,9 @@ function canUseStorage() {
   return typeof window !== "undefined" && Boolean(window.localStorage);
 }
 
-export function readDeliveryProgress(routeId: number): DeliveryProgressState | null {
+export function readDeliveryProgress(
+  routeId: number
+): DeliveryProgressState | null {
   if (!canUseStorage()) return null;
 
   try {
@@ -32,10 +49,16 @@ export function readDeliveryProgress(routeId: number): DeliveryProgressState | n
   }
 }
 
-export function saveDeliveryProgress(routeId: number, state: DeliveryProgressState) {
+export function saveDeliveryProgress(
+  routeId: number,
+  state: DeliveryProgressState
+) {
   if (!canUseStorage()) return;
 
-  window.localStorage.setItem(getDeliveryStorageKey(routeId), JSON.stringify(state));
+  window.localStorage.setItem(
+    getDeliveryStorageKey(routeId),
+    JSON.stringify(state)
+  );
 }
 
 export function saveLastRouteProgress(routeId: number, routeName?: string) {
