@@ -17,6 +17,7 @@ export default defineConfig({
     include: [
       "server/**/*.test.ts",
       "server/**/*.spec.ts",
+      "client/src/lib/**/*.test.ts",
       "client/src/services/**/*.test.ts",
       "client/src/pages/**/*.test.ts",
     ],

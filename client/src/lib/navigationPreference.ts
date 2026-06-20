@@ -1,5 +1,6 @@
 export const NAVIGATION_PROVIDER_KEY = "econorotas:navigation-provider";
-export const NAVIGATION_PROVIDER_CHANGED = "econorotas:navigation-provider-changed";
+export const NAVIGATION_PROVIDER_CHANGED =
+  "econorotas:navigation-provider-changed";
 
 export type NavigationProvider = "google_maps" | "waze";
 
@@ -11,7 +12,9 @@ export const NAVIGATION_PROVIDERS: Array<{
   { value: "waze", label: "Waze" },
 ];
 
-export function isNavigationProvider(value: unknown): value is NavigationProvider {
+export function isNavigationProvider(
+  value: unknown
+): value is NavigationProvider {
   return value === "google_maps" || value === "waze";
 }
 
@@ -33,6 +36,19 @@ export function setNavigationProvider(provider: NavigationProvider) {
   );
 }
 
+const BRAZIL_ZIP_CODE_PATTERN = /\b\d{5}-?\d{3}\b/g;
+
+export function hasHouseNumber(address: string) {
+  const cleanAddress = address
+    .replace(BRAZIL_ZIP_CODE_PATTERN, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return /(?:^|[\s,])\d{1,6}[a-zA-Z]?(?:\s*(?:\/|-)\s*\d{1,6}[a-zA-Z]?)?(?=$|[\s,.-])/.test(
+    cleanAddress
+  );
+}
+
 export function buildNavigationUrl({
   address,
   latitude,
@@ -50,8 +66,14 @@ export function buildNavigationUrl({
     Number.isFinite(longitude) &&
     latitude !== 0 &&
     longitude !== 0;
+  const shouldUseAddress =
+    cleanAddress.length > 0 && hasHouseNumber(cleanAddress);
 
   if (provider === "waze") {
+    if (shouldUseAddress) {
+      return `https://waze.com/ul?q=${encodeURIComponent(cleanAddress)}&navigate=yes`;
+    }
+
     if (hasCoordinates) {
       return `https://waze.com/ul?ll=${latitude},${longitude}&navigate=yes`;
     }
@@ -61,9 +83,11 @@ export function buildNavigationUrl({
     }
   }
 
-  const destination = hasCoordinates
-    ? `${latitude},${longitude}`
-    : encodeURIComponent(cleanAddress);
+  const destination = shouldUseAddress
+    ? encodeURIComponent(cleanAddress)
+    : hasCoordinates
+      ? `${latitude},${longitude}`
+      : encodeURIComponent(cleanAddress);
 
   return `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving`;
 }
