@@ -501,7 +501,7 @@ export default function Operations() {
                         Backlog Enterprise: Multi-Vehicle
                       </p>
                       <p className="text-sm text-muted-foreground">
-                        Fora do Go Live 500. Usado apenas como portao futuro para frota,
+                        Fora do limite comercial atual. Usado apenas como portao futuro para frota,
                         VRP e operacoes acima do produto comercial atual.
                       </p>
                     </div>
@@ -870,9 +870,9 @@ export default function Operations() {
                 >
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                      <p className="text-sm font-medium">Go Live 500</p>
+                      <p className="text-sm font-medium">Go Live operacional</p>
                       <p className="text-sm text-muted-foreground">
-                        Capacidade comercial limitada a 500 paradas, 20 usuarios simultaneos e 5 otimizacoes simultaneas.
+                        Capacidade comercial limitada a {goLive500.maxRouteStops ?? 150} paradas, 20 usuarios simultaneos e 5 otimizacoes simultaneas.
                       </p>
                     </div>
                     <Badge variant={readinessVariant(goLive500.verdict)}>
@@ -893,12 +893,12 @@ export default function Operations() {
                       icon={AlertTriangle}
                     />
                     <StatCard
-                      title="P95 ate 500"
+                      title="P95 no limite"
                       value={formatMs(goLive500.runtime?.p95Ms)}
                       icon={Gauge}
                     />
                     <StatCard
-                      title="Benchmark 500"
+                      title="Benchmark limite"
                       value={
                         goLive500.benchmark500?.status === "ready"
                           ? "OK"
@@ -972,7 +972,7 @@ export default function Operations() {
                     <div>
                       <p className="text-sm font-medium">Performance historica</p>
                       <p className="text-sm text-muted-foreground">
-                        Benchmark automatizado para 250, 500, 1000 e 2000 paradas.
+                        Benchmark automatizado para cenarios progressivos de volume.
                       </p>
                     </div>
                     <Badge

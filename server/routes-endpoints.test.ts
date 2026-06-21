@@ -1029,6 +1029,55 @@ describe("Route endpoints", () => {
     ]);
   });
 
+  it("does not restore Shopee STOP order when reoptimizing a route created in optimized mode", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8220));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Shopee otimizada permanece otimizada",
+      mode: "balanced",
+      respectInputSequence: false,
+      stops: [
+        {
+          address: "Rua Shopee Reotimizada 1, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+          sourceProvider: "shopee",
+          originalStop: 1,
+          isUnsequencedStop: false,
+        },
+        {
+          address: "Rua Shopee Reotimizada 2 longe, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.2889,
+          sequence: 1,
+          sourceProvider: "shopee",
+          originalStop: 2,
+          isUnsequencedStop: false,
+        },
+        {
+          address: "Rua Shopee Reotimizada 3 perto, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3789,
+          sequence: 2,
+          sourceProvider: "shopee",
+          originalStop: 3,
+          isUnsequencedStop: false,
+        },
+      ],
+    });
+
+    const optimizedAgain = await caller.routes.optimize({ id: result.route.id });
+    const stops = await caller.stops.list({ routeId: result.route.id });
+
+    expect(optimizedAgain.auditPolicy).toBeNull();
+    expect(stops.map((stop: any) => stop.address)).toEqual([
+      "Rua Shopee Reotimizada 1, Presidente Prudente - SP",
+      "Rua Shopee Reotimizada 3 perto, Presidente Prudente - SP",
+      "Rua Shopee Reotimizada 2 longe, Presidente Prudente - SP",
+    ]);
+  });
+
   it("keeps coherent input stop order when sequential routing is requested", async () => {
     const caller = appRouter.createCaller(createAuthContext(8215));
 

@@ -3711,24 +3711,24 @@ function buildGoLive500Dashboard(args: {
   if (benchmark500Status === "missing") {
     issues.push({
       severity: "warning",
-      message: "Benchmark oficial de 500 paradas ainda nao foi executado.",
+      message: `Benchmark oficial de ${maxRouteStops} paradas ainda nao foi executado.`,
     });
   } else if (benchmark500Status !== "ready") {
     issues.push({
       severity: "critical",
-      message: "Benchmark oficial de 500 paradas nao atingiu a meta de 30 segundos.",
+      message: `Benchmark oficial de ${maxRouteStops} paradas nao atingiu a meta de 30 segundos.`,
     });
   }
   if (runtimeP95Ms > 60_000) {
     issues.push({
       severity: "warning",
-      message: "P95 operacional ate 500 paradas acima de 60 segundos.",
+      message: `P95 operacional ate ${maxRouteStops} paradas acima de 60 segundos.`,
     });
   }
   if (osrmFailureRate > 25) {
     issues.push({
       severity: "warning",
-      message: `Falha OSRM em ${osrmFailureRate}% das chamadas nas rotas ate 500 paradas.`,
+      message: `Falha OSRM em ${osrmFailureRate}% das chamadas nas rotas ate ${maxRouteStops} paradas.`,
     });
   }
 

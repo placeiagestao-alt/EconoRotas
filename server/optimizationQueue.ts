@@ -242,6 +242,16 @@ async function removeWorkerHeartbeat(member: string) {
   await redis.zrem(WORKER_HEARTBEATS_KEY, member);
 }
 
+async function getRedisMaxmemoryPolicy() {
+  const redis = getHeartbeatRedis();
+  if (!redis) return null;
+  const info = await redis.info("memory");
+  const line = info
+    .split(/\r?\n/)
+    .find((entry) => entry.toLowerCase().startsWith("maxmemory_policy:"));
+  return line?.split(":")[1]?.trim() || null;
+}
+
 async function getRecentWorkerHeartbeatCount() {
   return (await getRecentWorkerHeartbeats()).length;
 }

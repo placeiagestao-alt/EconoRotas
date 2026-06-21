@@ -3086,24 +3086,24 @@ function buildGoLive500Dashboard(args) {
   if (benchmark500Status === "missing") {
     issues.push({
       severity: "warning",
-      message: "Benchmark oficial de 500 paradas ainda nao foi executado."
+      message: `Benchmark oficial de ${maxRouteStops} paradas ainda nao foi executado.`
     });
   } else if (benchmark500Status !== "ready") {
     issues.push({
       severity: "critical",
-      message: "Benchmark oficial de 500 paradas nao atingiu a meta de 30 segundos."
+      message: `Benchmark oficial de ${maxRouteStops} paradas nao atingiu a meta de 30 segundos.`
     });
   }
   if (runtimeP95Ms > 6e4) {
     issues.push({
       severity: "warning",
-      message: "P95 operacional ate 500 paradas acima de 60 segundos."
+      message: `P95 operacional ate ${maxRouteStops} paradas acima de 60 segundos.`
     });
   }
   if (osrmFailureRate > 25) {
     issues.push({
       severity: "warning",
-      message: `Falha OSRM em ${osrmFailureRate}% das chamadas nas rotas ate 500 paradas.`
+      message: `Falha OSRM em ${osrmFailureRate}% das chamadas nas rotas ate ${maxRouteStops} paradas.`
     });
   }
   const verdict = issues.some((issue) => issue.severity === "critical") ? "NO_GO" : issues.length > 0 ? "ATTENTION" : "READY";
@@ -10088,6 +10088,19 @@ function isLatestOptimizationContextFresh(route, event) {
   }
   return routeUpdatedAt <= eventCreatedAt;
 }
+async function shouldPreserveShopeeStopSequenceForOptimization(route, userId, routeStops) {
+  const latestOptimizationEvent = await getLatestRouteOptimizationEvent(
+    route.id,
+    userId
+  );
+  if (!isLatestOptimizationContextFresh(route, latestOptimizationEvent)) {
+    return false;
+  }
+  return isShopeeStopPreservedRoute(
+    routeStops,
+    readBooleanMetadata(latestOptimizationEvent?.metadata, "respectInputSequence") === true
+  );
+}
 async function requireUserRoute(routeId, userId) {
   const route = await getRouteById(routeId, userId);
   if (!route) {
@@ -10274,9 +10287,23 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     }).catch((error) => {
       console.warn("[Routes] Failed to record queue requirement event:", error);
     });
+    if (isOptimizationQueueConfigured() && !queueError) {
+      return {
+        queued: true,
+        optimizationJobId: job?.id ?? null,
+        providerJobId: queueProviderJobId,
+        routeId,
+        status: "queued",
+        totalDistance: 0,
+        totalTime: 0,
+        audit: null,
+        auditSource: "queued",
+        auditPolicy: null
+      };
+    }
     throw new TRPCError3({
       code: "BAD_REQUEST",
-      message: isOptimizationQueueConfigured() ? "Rota grande enviada para fila de otimizacao." : "Rota grande exige fila de otimizacao. Configure Redis/BullMQ e worker para processar rotas acima do limite sincrono."
+      message: queueError ? `Rota grande exige fila de otimizacao, mas a fila falhou: ${queueError}` : "Rota grande exige fila de otimizacao. Configure Redis/BullMQ e worker para processar rotas acima do limite sincrono."
     });
   }
   await assertRouteStopsReadyForOptimization(routeStops, { userId, routeId });
@@ -11477,7 +11504,7 @@ var appRouter = router({
         await recordRouteAuditEvent(
           ctx.user.id,
           route.id,
-          optimized.audit,
+          optimized.audit ?? void 0,
           optimized.auditSource
         );
         return {
@@ -11540,11 +11567,12 @@ var appRouter = router({
       startLatitude: z2.number().optional(),
       startLongitude: z2.number().optional()
     })).mutation(async ({ ctx, input }) => {
-      await requireUserRoute(input.id, ctx.user.id);
+      const route = await requireUserRoute(input.id, ctx.user.id);
       const currentStops = await getRouteStops(input.id);
-      const preserveShopeeStopSequence = isShopeeStopPreservedRoute(
-        currentStops,
-        true
+      const preserveShopeeStopSequence = await shouldPreserveShopeeStopSequenceForOptimization(
+        route,
+        ctx.user.id,
+        currentStops
       );
       await assertRouteStopLimit(
         ctx.user.id,
@@ -11589,7 +11617,7 @@ var appRouter = router({
       await recordRouteAuditEvent(
         ctx.user.id,
         input.id,
-        optimized.audit,
+        optimized.audit ?? void 0,
         optimized.auditSource
       );
       return optimized;
@@ -11602,11 +11630,12 @@ var appRouter = router({
       startLatitude: z2.number().optional(),
       startLongitude: z2.number().optional()
     })).mutation(async ({ ctx, input }) => {
-      await requireUserRoute(input.id, ctx.user.id);
+      const route = await requireUserRoute(input.id, ctx.user.id);
       const currentStops = await getRouteStops(input.id);
-      const preserveShopeeStopSequence = isShopeeStopPreservedRoute(
-        currentStops,
-        true
+      const preserveShopeeStopSequence = await shouldPreserveShopeeStopSequenceForOptimization(
+        route,
+        ctx.user.id,
+        currentStops
       );
       await assertRouteStopLimit(
         ctx.user.id,
@@ -11659,7 +11688,7 @@ var appRouter = router({
       await recordRouteAuditEvent(
         ctx.user.id,
         input.id,
-        optimized.audit,
+        optimized.audit ?? void 0,
         optimized.auditSource
       );
       return optimized;

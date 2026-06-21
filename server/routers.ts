@@ -921,6 +921,30 @@ function isLatestOptimizationContextFresh(
   return routeUpdatedAt <= eventCreatedAt;
 }
 
+async function shouldPreserveShopeeStopSequenceForOptimization(
+  route: { id: number; status?: string; updatedAt?: Date | string | null },
+  userId: number,
+  routeStops: Array<{
+    sourceProvider?: unknown;
+    originalStop?: unknown;
+    isUnsequencedStop?: unknown;
+    notes?: unknown;
+  }>
+) {
+  const latestOptimizationEvent = await db.getLatestRouteOptimizationEvent(
+    route.id,
+    userId
+  );
+  if (!isLatestOptimizationContextFresh(route, latestOptimizationEvent)) {
+    return false;
+  }
+
+  return isShopeeStopPreservedRoute(
+    routeStops,
+    readBooleanMetadata(latestOptimizationEvent?.metadata, "respectInputSequence") === true
+  );
+}
+
 async function requireUserRoute(routeId: number, userId: number) {
   const route = await db.getRouteById(routeId, userId);
 
@@ -1144,12 +1168,26 @@ export async function optimizeUserRoute(
       console.warn("[Routes] Failed to record queue requirement event:", error);
     });
 
+    if (isOptimizationQueueConfigured() && !queueError) {
+      return {
+        queued: true,
+        optimizationJobId: job?.id ?? null,
+        providerJobId: queueProviderJobId,
+        routeId,
+        status: "queued" as const,
+        totalDistance: 0,
+        totalTime: 0,
+        audit: null,
+        auditSource: "queued",
+        auditPolicy: null,
+      };
+    }
+
     throw new TRPCError({
       code: "BAD_REQUEST",
-      message:
-        isOptimizationQueueConfigured()
-          ? "Rota grande enviada para fila de otimizacao."
-          : "Rota grande exige fila de otimizacao. Configure Redis/BullMQ e worker para processar rotas acima do limite sincrono.",
+      message: queueError
+        ? `Rota grande exige fila de otimizacao, mas a fila falhou: ${queueError}`
+        : "Rota grande exige fila de otimizacao. Configure Redis/BullMQ e worker para processar rotas acima do limite sincrono.",
     });
   }
 
@@ -2554,7 +2592,7 @@ export const appRouter = router({
           await recordRouteAuditEvent(
             ctx.user.id,
             route.id,
-            optimized.audit,
+            optimized.audit ?? undefined,
             optimized.auditSource
           );
 
@@ -2625,11 +2663,12 @@ export const appRouter = router({
       startLongitude: z.number().optional(),
     }))
       .mutation(async ({ ctx, input }) => {
-        await requireUserRoute(input.id, ctx.user.id);
+        const route = await requireUserRoute(input.id, ctx.user.id);
         const currentStops = await db.getRouteStops(input.id);
-        const preserveShopeeStopSequence = isShopeeStopPreservedRoute(
-          currentStops,
-          true
+        const preserveShopeeStopSequence = await shouldPreserveShopeeStopSequenceForOptimization(
+          route,
+          ctx.user.id,
+          currentStops
         );
         await assertRouteStopLimit(
           ctx.user.id,
@@ -2678,7 +2717,7 @@ export const appRouter = router({
         await recordRouteAuditEvent(
           ctx.user.id,
           input.id,
-          optimized.audit,
+          optimized.audit ?? undefined,
           optimized.auditSource
         );
         return optimized;
@@ -2692,11 +2731,12 @@ export const appRouter = router({
       startLongitude: z.number().optional(),
     }))
       .mutation(async ({ ctx, input }) => {
-        await requireUserRoute(input.id, ctx.user.id);
+        const route = await requireUserRoute(input.id, ctx.user.id);
         const currentStops = await db.getRouteStops(input.id);
-        const preserveShopeeStopSequence = isShopeeStopPreservedRoute(
-          currentStops,
-          true
+        const preserveShopeeStopSequence = await shouldPreserveShopeeStopSequenceForOptimization(
+          route,
+          ctx.user.id,
+          currentStops
         );
         await assertRouteStopLimit(
           ctx.user.id,
@@ -2756,7 +2796,7 @@ export const appRouter = router({
         await recordRouteAuditEvent(
           ctx.user.id,
           input.id,
-          optimized.audit,
+          optimized.audit ?? undefined,
           optimized.auditSource
         );
         return optimized;

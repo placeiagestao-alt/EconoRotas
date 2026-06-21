@@ -432,7 +432,7 @@ export default function RouteDetail() {
     },
   });
   const optimizeRouteMutation = trpc.routes.optimize.useMutation({
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       setDeliveryState(DEFAULT_DELIVERY_STATE);
       await Promise.all([
         utils.routes.get.invalidate({ id: routeId }),
@@ -440,6 +440,10 @@ export default function RouteDetail() {
         utils.stops.list.invalidate({ routeId }),
         utils.routes.audit.invalidate({ id: routeId }),
       ]);
+      if ((result as any)?.queued) {
+        toast.success("Rota grande enviada para a fila de otimizacao.");
+        return;
+      }
       toast.success("Rota otimizada.");
     },
     onError: async error => {
@@ -528,6 +532,8 @@ export default function RouteDetail() {
   const [startPoint, setStartPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
   const [endPoint, setEndPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
   const [isSavingEndpoints, setIsSavingEndpoints] = useState(false);
+  const [isCheckingInStart, setIsCheckingInStart] = useState(false);
+  const [isCheckingInEnd, setIsCheckingInEnd] = useState(false);
   const [stopSearch, setStopSearch] = useState("");
   const [selectedStopIndex, setSelectedStopIndex] = useState<number | null>(
     null
@@ -1016,6 +1022,9 @@ export default function RouteDetail() {
         deliveredCount,
         failedCount,
         handledCount,
+        endCheckinLocation: routeEndPoint?.address ?? null,
+        endCheckinLatitude: roundCoordinate(routeEndPoint?.latitude),
+        endCheckinLongitude: roundCoordinate(routeEndPoint?.longitude),
       },
     });
     toast.success("Rota concluida.");
@@ -1127,6 +1136,9 @@ export default function RouteDetail() {
           : undefined,
         handledStopsExcluded: handledStopIds.length,
         locationStrategy,
+        startCheckinLocation: routeStartPoint?.address ?? null,
+        startCheckinLatitude: roundCoordinate(routeStartPoint?.latitude),
+        startCheckinLongitude: roundCoordinate(routeStartPoint?.longitude),
       },
     });
   };
@@ -1785,6 +1797,78 @@ export default function RouteDetail() {
     }
   };
 
+  const handleRouteLocationCheckin = async (kind: "start" | "end") => {
+    if (!routeQuery.data) return;
+
+    const isStart = kind === "start";
+    const label = isStart ? "início" : "fim";
+    const setChecking = isStart ? setIsCheckingInStart : setIsCheckingInEnd;
+    const locationLabel = isStart
+      ? "Meu local - início da rota"
+      : "Meu local - fim da rota";
+
+    setChecking(true);
+
+    try {
+      const position = await getCurrentPosition();
+
+      if (isStart) {
+        await updateRouteMutation.mutateAsync({
+          id: routeId,
+          startLocation: locationLabel,
+          startLatitude: position.latitude,
+          startLongitude: position.longitude,
+        });
+        setStartPoint({
+          address: locationLabel,
+          latitude: position.latitude,
+          longitude: position.longitude,
+        });
+      } else {
+        await updateRouteMutation.mutateAsync({
+          id: routeId,
+          endLocation: locationLabel,
+          endLatitude: position.latitude,
+          endLongitude: position.longitude,
+        });
+        setEndPoint({
+          address: locationLabel,
+          latitude: position.latitude,
+          longitude: position.longitude,
+        });
+      }
+
+      reportRouteExecutionEvent({
+        type: isStart ? "route_start_location_checkin" : "route_end_location_checkin",
+        severity: "info",
+        title: isStart
+          ? "Check-in de início da rota"
+          : "Check-out de fim da rota",
+        message: locationLabel,
+        metadata: {
+          checkinKind: kind,
+          location: locationLabel,
+          latitude: roundCoordinate(position.latitude),
+          longitude: roundCoordinate(position.longitude),
+        },
+      });
+
+      toast.success(
+        isStart
+          ? "Check-in salvo como início da rota."
+          : "Check-out salvo como fim da rota."
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : `Não foi possível obter seu local para marcar o ${label}.`
+      );
+    } finally {
+      setChecking(false);
+    }
+  };
+
   return (
     <DashboardLayout>
       <div className="mx-auto max-w-7xl space-y-6">
@@ -2033,6 +2117,23 @@ export default function RouteDetail() {
                   </CardHeader>
                   <CardContent className="grid gap-4 lg:grid-cols-2">
                     <div className="rounded-2xl border border-border/70 bg-white p-4">
+                      <div className="mb-3 flex justify-end">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-2"
+                          onClick={() => void handleRouteLocationCheckin("start")}
+                          disabled={
+                            isCheckingInStart ||
+                            isSavingEndpoints ||
+                            updateRouteMutation.isPending
+                          }
+                        >
+                          <MapPin className="h-4 w-4" />
+                          {isCheckingInStart ? "Marcando..." : "Meu local"}
+                        </Button>
+                      </div>
                       <AddressInputSimple
                         id="route-detail-start-address"
                         label="Início da rota"
@@ -2054,6 +2155,23 @@ export default function RouteDetail() {
                     </div>
 
                     <div className="rounded-2xl border border-border/70 bg-white p-4">
+                      <div className="mb-3 flex justify-end">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-2"
+                          onClick={() => void handleRouteLocationCheckin("end")}
+                          disabled={
+                            isCheckingInEnd ||
+                            isSavingEndpoints ||
+                            updateRouteMutation.isPending
+                          }
+                        >
+                          <MapPin className="h-4 w-4" />
+                          {isCheckingInEnd ? "Marcando..." : "Meu local"}
+                        </Button>
+                      </div>
                       <AddressInputSimple
                         id="route-detail-end-address"
                         label="Fim da rota"
