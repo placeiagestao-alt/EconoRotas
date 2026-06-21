@@ -316,6 +316,8 @@ export default function CreateRoute() {
   } | null>(null);
   const [startPoint, setStartPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
   const [endPoint, setEndPoint] = useState<RoutePoint>(EMPTY_ROUTE_POINT);
+  const [isCheckingInStart, setIsCheckingInStart] = useState(false);
+  const [isCheckingInEnd, setIsCheckingInEnd] = useState(false);
   const [invalidStopIndexes, setInvalidStopIndexes] = useState<number[]>([]);
   const [stops, setStops] = useState<RouteStop[]>([
     { address: "", latitude: 0, longitude: 0, geocodingConfidenceScore: 0, geocodingMethod: "city_match", geocodingSuspect: true },
@@ -1442,6 +1444,43 @@ export default function CreateRoute() {
     }
   };
 
+  const handleRoutePointCheckIn = async (kind: "start" | "end") => {
+    const isStart = kind === "start";
+    const setChecking = isStart ? setIsCheckingInStart : setIsCheckingInEnd;
+    const label = isStart
+      ? "Meu local - início da rota"
+      : "Meu local - fim da rota";
+
+    setChecking(true);
+
+    try {
+      const position = await getCurrentPosition();
+      const nextPoint = {
+        address: label,
+        latitude: position.latitude,
+        longitude: position.longitude,
+      };
+
+      if (isStart) {
+        setStartPoint(nextPoint);
+      } else {
+        setEndPoint(nextPoint);
+      }
+
+      toast.success(
+        isStart ? "Início marcado com seu GPS." : "Fim marcado com seu GPS."
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Não foi possível obter sua localização atual."
+      );
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const invalidStopIssues = invalidStopIndexes
     .map((index) => {
       const stop = stops[index];
@@ -1730,6 +1769,19 @@ export default function CreateRoute() {
             </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2">
               <div className="rounded-2xl border border-border/70 bg-white p-4">
+                <div className="mb-3 flex justify-end">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-2"
+                    onClick={() => void handleRoutePointCheckIn("start")}
+                    disabled={isSavingRoute || isCheckingInStart}
+                  >
+                    <MapPin className="h-4 w-4" />
+                    {isCheckingInStart ? "Marcando..." : "Meu local"}
+                  </Button>
+                </div>
                 <AddressInputSimple
                   id="route-start-address"
                   label="Início da rota"
@@ -1747,6 +1799,19 @@ export default function CreateRoute() {
               </div>
 
               <div className="rounded-2xl border border-border/70 bg-white p-4">
+                <div className="mb-3 flex justify-end">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-2"
+                    onClick={() => void handleRoutePointCheckIn("end")}
+                    disabled={isSavingRoute || isCheckingInEnd}
+                  >
+                    <MapPin className="h-4 w-4" />
+                    {isCheckingInEnd ? "Marcando..." : "Meu local"}
+                  </Button>
+                </div>
                 <AddressInputSimple
                   id="route-end-address"
                   label="Fim da rota"

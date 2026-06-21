@@ -1,5 +1,6 @@
 import { trpc } from "@/lib/trpc";
 import { UNAUTHED_ERR_MSG } from '@shared/const';
+import { Capacitor } from "@capacitor/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { httpBatchLink, TRPCClientError } from "@trpc/client";
 import { createRoot } from "react-dom/client";
@@ -155,7 +156,37 @@ const trpcClient = trpc.createClient({
 
 setupAnalytics();
 
-if ("serviceWorker" in navigator && import.meta.env.PROD) {
+const isPackagedAndroidApp = Capacitor.getPlatform() === "android";
+
+if (
+  "serviceWorker" in navigator &&
+  import.meta.env.PROD &&
+  isPackagedAndroidApp
+) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.getRegistrations()
+      .then((registrations) =>
+        Promise.all(registrations.map((registration) => registration.unregister()))
+      )
+      .catch((error) => {
+        console.warn("[Android] Failed to unregister stale service workers", error);
+      });
+
+    if ("caches" in window) {
+      caches.keys()
+        .then((cacheNames) => Promise.all(cacheNames.map((cacheName) => caches.delete(cacheName))))
+        .catch((error) => {
+          console.warn("[Android] Failed to clear stale PWA caches", error);
+        });
+    }
+  });
+}
+
+if (
+  "serviceWorker" in navigator &&
+  import.meta.env.PROD &&
+  !isPackagedAndroidApp
+) {
   window.addEventListener("load", () => {
     navigator.serviceWorker
       .register("/sw.js")
