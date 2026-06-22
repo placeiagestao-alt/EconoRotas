@@ -1,6 +1,7 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { BrandLogo } from "@/components/BrandLogo";
 import DashboardLayout from "@/components/DashboardLayout";
+import { PwaInstallButton } from "@/components/PwaInstallButton";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -19,7 +20,6 @@ import { trpc } from "@/lib/trpc";
 import {
   BarChart3,
   Calendar,
-  Download,
   History,
   MapPin,
   MessageSquare,
@@ -470,12 +470,19 @@ export default function Home() {
                 </Button>
 
                 {SHOW_ANDROID_DOWNLOAD_LINK && (
-                  <Button asChild type="button" variant="outline" className="w-full gap-2">
-                    <Link href="/baixar-aplicativo">
-                      <Download className="h-4 w-4" />
-                      Baixar aplicativo Android
-                    </Link>
-                  </Button>
+                  <>
+                    <PwaInstallButton className="w-full gap-2" />
+                    <Button
+                      asChild
+                      type="button"
+                      variant="ghost"
+                      className="w-full text-xs text-muted-foreground"
+                    >
+                      <Link href="/baixar-aplicativo">
+                        APK disponivel apenas para testes Android
+                      </Link>
+                    </Button>
+                  </>
                 )}
 
                 <nav

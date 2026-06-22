@@ -1,4 +1,5 @@
 import { BrandLogo } from "@/components/BrandLogo";
+import { PwaInstallButton } from "@/components/PwaInstallButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buildApiUrl } from "@/lib/apiBase";
@@ -29,7 +30,7 @@ const FALLBACK_APK_PATH = "/downloads/econorotas-v1.0.0.apk?v=20260605-2";
 const FALLBACK_VERSION = "1.0.0";
 
 function formatDate(value?: string) {
-  if (!value) return "Atualizado recentemente";
+  if (!value) return "atualizacao recente";
 
   const dateOnly = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (dateOnly) {
@@ -37,7 +38,7 @@ function formatDate(value?: string) {
   }
 
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Atualizado recentemente";
+  if (Number.isNaN(date.getTime())) return "atualizacao recente";
 
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
@@ -93,9 +94,9 @@ export default function DownloadApk() {
   const copyDownloadLink = async () => {
     try {
       await navigator.clipboard.writeText(absoluteApkUrl);
-      toast.success("Link do aplicativo copiado.");
+      toast.success("Link do APK de teste copiado.");
     } catch {
-      toast.error("Não foi possível copiar o link.");
+      toast.error("Nao foi possivel copiar o link.");
     }
   };
 
@@ -121,28 +122,24 @@ export default function DownloadApk() {
             <div className="flex flex-wrap gap-2">
               <Badge variant="outline" className="gap-1.5">
                 <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
-                Aplicativo oficial
+                Instalacao recomendada
               </Badge>
-              <Badge variant="outline">Versão {version}</Badge>
+              <Badge variant="outline">APK de teste v{version}</Badge>
             </div>
 
             <div className="space-y-4">
               <h1 className="max-w-3xl text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">
-                Baixar aplicativo EconoRota
+                Instale o EconoRota sem baixar APK
               </h1>
               <p className="max-w-2xl text-lg leading-8 text-slate-600">
-                Instale o app Android conectado ao ambiente oficial do Vercel para
-                acessar rotas, entregas e otimização pelo celular.
+                Use o app direto pelo navegador e adicione a tela inicial do
+                celular. E mais rapido, seguro e nao exige liberar instalacao de
+                fonte externa.
               </p>
             </div>
 
             <div className="flex flex-col gap-3 sm:flex-row">
-              <Button asChild size="lg" className="gap-2">
-                <a href={apkUrl} download>
-                  <Download className="h-5 w-5" />
-                  Baixar aplicativo
-                </a>
-              </Button>
+              <PwaInstallButton className="gap-2" />
               <Button
                 type="button"
                 variant="outline"
@@ -151,22 +148,22 @@ export default function DownloadApk() {
                 onClick={copyDownloadLink}
               >
                 <Copy className="h-5 w-5" />
-                Copiar link
+                Copiar link do APK de teste
               </Button>
             </div>
 
             <div className="grid gap-3 text-sm text-slate-600 sm:grid-cols-3">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                Publicado no Vercel
+                PWA oficial por HTTPS
               </div>
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                API HTTPS oficial
+                Nao exige Play Protect desativado
               </div>
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                Atualização {publishedAt}
+                APK secundario atualizado em {publishedAt}
               </div>
             </div>
           </div>
@@ -175,9 +172,11 @@ export default function DownloadApk() {
             <div className="rounded-xl bg-white p-5">
               <div className="mb-5 flex items-start justify-between gap-4">
                 <div>
-                  <p className="text-sm font-medium text-slate-500">Aplicativo Android</p>
+                  <p className="text-sm font-medium text-slate-500">
+                    Instalacao principal
+                  </p>
                   <h2 className="mt-1 text-2xl font-semibold text-slate-950">
-                    EconoRota v{version}
+                    PWA EconoRota
                   </h2>
                 </div>
                 <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700">
@@ -187,19 +186,21 @@ export default function DownloadApk() {
 
               <dl className="space-y-3 text-sm">
                 <div className="flex items-center justify-between gap-4 border-t border-slate-100 pt-3">
-                  <dt className="text-slate-500">Arquivo</dt>
+                  <dt className="text-slate-500">Modo recomendado</dt>
                   <dd className="font-medium text-slate-900">
-                    Aplicativo EconoRota v{version}
+                    Instalar pelo navegador
                   </dd>
                 </div>
                 <div className="flex items-center justify-between gap-4 border-t border-slate-100 pt-3">
                   <dt className="text-slate-500">Servidor</dt>
-                  <dd className="font-medium text-slate-900">econo-rotas.vercel.app</dd>
+                  <dd className="font-medium text-slate-900">
+                    econo-rotas.vercel.app
+                  </dd>
                 </div>
                 <div className="flex items-center justify-between gap-4 border-t border-slate-100 pt-3">
-                  <dt className="text-slate-500">Status</dt>
+                  <dt className="text-slate-500">APK de teste</dt>
                   <dd className="font-medium text-emerald-700">
-                    {isLoading ? "Verificando..." : "Disponível"}
+                    {isLoading ? "Verificando..." : `Disponivel v${version}`}
                   </dd>
                 </div>
               </dl>
@@ -217,9 +218,9 @@ export default function DownloadApk() {
       <section className="border-t border-slate-200">
         <div className="mx-auto grid max-w-6xl gap-4 px-4 py-8 sm:px-6 md:grid-cols-3">
           {[
-            "Abra esta página pelo Android.",
-            "Toque em Baixar aplicativo e confirme o download.",
-            "Ao instalar, permita apps deste navegador se o Android solicitar.",
+            "Abra o EconoRota pelo Chrome no Android ou Safari no iPhone.",
+            "Toque em Instalar EconoRota ou use Adicionar a tela inicial.",
+            "O app passa a abrir com icone proprio, sem baixar APK.",
           ].map((step, index) => (
             <div
               key={step}
@@ -235,12 +236,20 @@ export default function DownloadApk() {
       </section>
 
       <section className="border-t border-amber-200 bg-amber-50">
-        <div className="mx-auto flex max-w-6xl gap-3 px-4 py-4 text-sm text-amber-900 sm:px-6">
-          <AlertCircle className="mt-0.5 h-4 w-4 flex-none" />
-          <p>
-            Use apenas este link oficial. Se o Android avisar sobre instalação
-            manual, confirme somente se o endereço exibido for econo-rotas.vercel.app.
-          </p>
+        <div className="mx-auto grid max-w-6xl gap-4 px-4 py-4 text-sm text-amber-900 sm:px-6 md:grid-cols-[1fr_auto] md:items-center">
+          <div className="flex gap-3">
+            <AlertCircle className="mt-0.5 h-4 w-4 flex-none" />
+            <p>
+              APK disponivel apenas para testes avancados em Android. Para
+              cliente final, recomendamos instalar como PWA pelo navegador.
+            </p>
+          </div>
+          <Button asChild variant="outline" size="sm" className="gap-2 border-amber-300">
+            <a href={apkUrl} download>
+              <Download className="h-4 w-4" />
+              Baixar APK de teste
+            </a>
+          </Button>
         </div>
       </section>
     </main>
