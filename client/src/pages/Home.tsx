@@ -33,6 +33,8 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link } from "wouter";
 
 const REMEMBERED_EMAIL_KEY = "econorotas:remembered-email";
+const SHOW_ANDROID_DOWNLOAD_LINK =
+  import.meta.env.VITE_ANDROID_DISTRIBUTION_CHANNEL !== "store";
 const GOOGLE_LOGIN_CONFIGURED =
   import.meta.env.VITE_ENABLE_DEV_LOGIN !== "true" &&
   ((Boolean(import.meta.env.VITE_OAUTH_PORTAL_URL?.trim()) &&
@@ -467,12 +469,14 @@ export default function Home() {
                   {authMode === "login" ? "Criar uma nova conta" : "Já tenho conta"}
                 </Button>
 
-                <Button asChild type="button" variant="outline" className="w-full gap-2">
-                  <Link href="/baixar-aplicativo">
-                    <Download className="h-4 w-4" />
-                    Baixar aplicativo Android
-                  </Link>
-                </Button>
+                {SHOW_ANDROID_DOWNLOAD_LINK && (
+                  <Button asChild type="button" variant="outline" className="w-full gap-2">
+                    <Link href="/baixar-aplicativo">
+                      <Download className="h-4 w-4" />
+                      Baixar aplicativo Android
+                    </Link>
+                  </Button>
+                )}
 
                 <nav
                   aria-label="Links publicos do EconoRota"

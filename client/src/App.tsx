@@ -11,6 +11,8 @@ import PwaStatusMonitor from "./components/PwaStatusMonitor";
 import { ThemeProvider } from "./contexts/ThemeContext";
 
 const CHUNK_REFRESH_KEY = "econorotas:chunk-refresh";
+const SHOW_DIRECT_ANDROID_DOWNLOAD_ROUTES =
+  import.meta.env.VITE_ANDROID_DISTRIBUTION_CHANNEL !== "store";
 
 function isChunkLoadError(error: unknown) {
   if (!(error instanceof Error)) return false;
@@ -56,7 +58,9 @@ const Chat = lazyPage(() => import("./pages/Chat"));
 const Schedules = lazyPage(() => import("./pages/Schedules"));
 const History = lazyPage(() => import("./pages/History"));
 const Profile = lazyPage(() => import("./pages/Profile"));
-const DownloadApk = lazyPage(() => import("./pages/DownloadApk"));
+const DownloadApk = SHOW_DIRECT_ANDROID_DOWNLOAD_ROUTES
+  ? lazyPage(() => import("./pages/DownloadApk"))
+  : NotFound;
 const Operations = lazyPage(() => import("./pages/Operations"));
 
 function ProtectedRoute({
@@ -92,10 +96,16 @@ function Router() {
     <Suspense fallback={<DashboardLayoutSkeleton />}>
       <Switch>
         <Route path={"/"} component={Home} />
-        <Route path={"/baixar-apk"} component={DownloadApk} />
-        <Route path={"/baixar-aplicativo"} component={DownloadApk} />
-        <Route path={"/apk"} component={DownloadApk} />
-        <Route path={"/aplicativo"} component={DownloadApk} />
+        {SHOW_DIRECT_ANDROID_DOWNLOAD_ROUTES && (
+          <Route path={"/baixar-apk"} component={DownloadApk} />
+        )}
+        {SHOW_DIRECT_ANDROID_DOWNLOAD_ROUTES && (
+          <Route path={"/baixar-aplicativo"} component={DownloadApk} />
+        )}
+        {SHOW_DIRECT_ANDROID_DOWNLOAD_ROUTES && <Route path={"/apk"} component={DownloadApk} />}
+        {SHOW_DIRECT_ANDROID_DOWNLOAD_ROUTES && (
+          <Route path={"/aplicativo"} component={DownloadApk} />
+        )}
         <Route path={"/routes"}>
           <ProtectedRoute component={Routes} />
         </Route>
