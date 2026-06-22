@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { getLoginUrl } from "@/const";
+import { useTheme } from "@/contexts/ThemeContext";
 import { useIsMobile } from "@/hooks/useMobile";
 import {
   getNavigationProvider,
@@ -45,9 +46,11 @@ import {
   LogOut,
   MapPinned,
   MessageSquare,
+  Moon,
   Navigation,
   PanelLeft,
   ShieldCheck,
+  Sun,
   UserCircle,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
@@ -103,7 +106,7 @@ export default function DashboardLayout({
   if (!user) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background px-4">
-        <div className="flex w-full max-w-md flex-col items-center gap-8 rounded-3xl border border-border/80 bg-white p-8 shadow-[0_20px_40px_rgb(15_23_42_/_10%)]">
+        <div className="flex w-full max-w-md flex-col items-center gap-8 rounded-3xl border border-border/80 bg-card p-8 shadow-[0_20px_40px_rgb(15_23_42_/_10%)]">
           <div className="flex flex-col items-center gap-6">
             <h1 className="text-center text-2xl font-semibold tracking-tight">
               Entre para continuar
@@ -151,6 +154,7 @@ function DashboardLayoutContent({
   setSidebarWidth,
 }: DashboardLayoutContentProps) {
   const { user, logout } = useAuth();
+  const { theme, toggleTheme, switchable } = useTheme();
   const [location, setLocation] = useLocation();
   const { state, toggleSidebar } = useSidebar();
   const isCollapsed = state === "collapsed";
@@ -227,7 +231,7 @@ function DashboardLayoutContent({
             <div className="flex items-center gap-3 px-2 transition-all w-full">
               <button
                 onClick={toggleSidebar}
-                className="h-9 w-9 flex items-center justify-center rounded-xl border border-sidebar-border/80 bg-white hover:bg-sidebar-accent transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring shrink-0"
+                className="h-9 w-9 flex items-center justify-center rounded-xl border border-sidebar-border/80 bg-background hover:bg-sidebar-accent transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring shrink-0"
                 aria-label="Alternar navegação"
               >
                 <PanelLeft className="h-4 w-4 text-muted-foreground" />
@@ -270,7 +274,7 @@ function DashboardLayoutContent({
               })}
             </SidebarMenu>
 
-            <div className="mx-2 mt-2 rounded-xl border border-sidebar-border/70 bg-white/80 p-2 group-data-[collapsible=icon]:hidden">
+            <div className="mx-2 mt-2 rounded-xl border border-sidebar-border/70 bg-background/80 p-2 group-data-[collapsible=icon]:hidden">
               <div className="mb-2 flex items-center gap-2 px-1 text-xs font-medium text-muted-foreground">
                 <Navigation className="h-3.5 w-3.5" />
                 <span>Navegador de rota</span>
@@ -283,7 +287,7 @@ function DashboardLayoutContent({
                   }
                 }}
               >
-                <SelectTrigger size="sm" className="h-9 bg-white">
+                <SelectTrigger size="sm" className="h-9 bg-background">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent align="start">
@@ -317,6 +321,19 @@ function DashboardLayoutContent({
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
+                {switchable && toggleTheme && (
+                  <DropdownMenuItem
+                    onClick={toggleTheme}
+                    className="cursor-pointer"
+                  >
+                    {theme === "dark" ? (
+                      <Sun className="mr-2 h-4 w-4" />
+                    ) : (
+                      <Moon className="mr-2 h-4 w-4" />
+                    )}
+                    <span>{theme === "dark" ? "Modo claro" : "Modo escuro"}</span>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   onClick={logout}
                   className="cursor-pointer text-destructive focus:text-destructive"
@@ -340,7 +357,7 @@ function DashboardLayoutContent({
 
       <SidebarInset>
         {isMobile && (
-          <div className="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-border/75 bg-white/95 px-2 shadow-[0_8px_18px_rgb(15_23_42_/_8%)]">
+          <div className="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-border/75 bg-background/95 px-2 shadow-[0_8px_18px_rgb(15_23_42_/_8%)]">
             <div className="flex items-center gap-2">
               <SidebarTrigger className="h-9 w-9 rounded-xl" />
               <BrandLogo variant="mark" className="h-8 w-8 shrink-0" />

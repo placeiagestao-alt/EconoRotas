@@ -7,6 +7,7 @@ import { lazy, Suspense, useEffect, type ComponentType } from "react";
 import { Route, Switch, useLocation } from "wouter";
 import ErrorReportMonitor from "./components/ErrorReportMonitor";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { FloatingWhatsApp } from "./components/FloatingWhatsApp";
 import PwaStatusMonitor from "./components/PwaStatusMonitor";
 import { ThemeProvider } from "./contexts/ThemeContext";
 
@@ -154,13 +155,14 @@ function App() {
     <ErrorBoundary>
       <ThemeProvider
         defaultTheme="light"
-        // switchable
+        switchable
       >
         <TooltipProvider>
           <Toaster />
           <ErrorReportMonitor />
           <PwaStatusMonitor />
           <Router />
+          <FloatingWhatsApp />
         </TooltipProvider>
       </ThemeProvider>
     </ErrorBoundary>
