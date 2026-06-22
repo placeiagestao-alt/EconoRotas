@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseImileScreenText, parseRouteRows } from "./routeImportService";
 
 describe("parseRouteRows", () => {
-  it("uses only STOP as spreadsheet sequence and inserts empty STOP where it adds the least detour", () => {
+  it("reads Shopee STOP metadata without sorting the imported spreadsheet rows", () => {
     const route = parseRouteRows(
       [
         {
@@ -32,18 +32,18 @@ describe("parseRouteRows", () => {
     );
 
     expect(route.hasStopSequence).toBe(true);
-    expect(route.stops.map((stop) => stop.routingStop)).toEqual([1, 0, 2]);
-    expect(route.stops.map((stop) => stop.originalStop)).toEqual([1, 0, 2]);
+    expect(route.stops.map((stop) => stop.routingStop)).toEqual([2, 0, 1]);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([2, 0, 1]);
     expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([false, true, false]);
     expect(route.stops.map((stop) => stop.packageNumber)).toEqual([undefined, undefined, undefined]);
     expect(route.stops.map((stop) => stop.address)).toEqual([
-      "Rua A, 10, Centro, Presidente Prudente",
-      "Rua Sem Stop, 30, Centro, Presidente Prudente",
       "Rua B, 20, Centro, Presidente Prudente",
+      "Rua Sem Stop, 30, Centro, Presidente Prudente",
+      "Rua A, 10, Centro, Presidente Prudente",
     ]);
   });
 
-  it("does not send the route away and back when an empty STOP belongs between two nearby stops", () => {
+  it("keeps STOP zero marked as unsequenced without moving it during import", () => {
     const route = parseRouteRows(
       [
         {
@@ -77,15 +77,15 @@ describe("parseRouteRows", () => {
 
     expect(route.stops.map((stop) => stop.address)).toEqual([
       "Rua A",
-      "Rua B sem STOP perto da Rua A",
       "Joao Goets primeira",
+      "Rua B sem STOP perto da Rua A",
       "Joao Goets segunda",
     ]);
-    expect(route.stops.map((stop) => stop.originalStop)).toEqual([1, 0, 2, 3]);
-    expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([false, true, false, false]);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([1, 2, 0, 3]);
+    expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([false, false, true, false]);
   });
 
-  it("keeps a zero STOP beside an existing same-address Shopee group", () => {
+  it("keeps a zero STOP as metadata even when it has the same address as another Shopee group", () => {
     const sameAddress = "Rua Lefe Buchalla, 142, Parque Alto Bela Vista, Presidente Prudente, SP";
     const route = parseRouteRows(
       [
@@ -119,8 +119,8 @@ describe("parseRouteRows", () => {
       sameAddress,
       sameAddress,
       sameAddress,
-      sameAddress,
       "Rua Distante, 10, Presidente Prudente, SP",
+      sameAddress,
     ]);
     expect(route.stops.map((stop) => stop.originalStop)).toEqual([
       20,
@@ -129,10 +129,10 @@ describe("parseRouteRows", () => {
       23,
       24,
       25,
-      0,
       30,
+      0,
     ]);
-    expect(route.stops[6].isUnsequencedStop).toBe(true);
+    expect(route.stops[7].isUnsequencedStop).toBe(true);
   });
 
   it("treats dash STOP as unsequenced Shopee stop", () => {
@@ -198,7 +198,7 @@ describe("parseRouteRows", () => {
 
     expect(route.sourceProvider).toBe("shopee");
     expect(route.hasStopSequence).toBe(true);
-    expect(route.stops.map((stop) => stop.originalStop)).toEqual([1, 2]);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([2, 1]);
     expect(route.stops.map((stop) => stop.sourceProvider)).toEqual(["shopee", "shopee"]);
   });
 
@@ -228,8 +228,8 @@ describe("parseRouteRows", () => {
 
     expect(route.sourceProvider).toBe("shopee");
     expect(route.hasStopSequence).toBe(true);
-    expect(route.stops.map((stop) => stop.originalStop)).toEqual([0, 2]);
-    expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([true, false]);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([2, 0]);
+    expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([false, true]);
   });
 
   it("ignores sequence aliases when STOP column does not exist", () => {

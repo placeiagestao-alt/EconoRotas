@@ -2207,8 +2207,8 @@ export default function CreateRoute() {
                           Como ordenar esta rota?
                         </p>
                         <p className="mt-1 text-muted-foreground">
-                          A coluna STOP e usada como sequencia original. Valores vazios
-                          ou invalidos entram como 0 e sao encaixados no menor desvio.
+                          A coluna STOP so sera usada como sequencia se voce escolher
+                          esta opcao. Na otimizacao, STOP fica apenas como informacao.
                         </p>
                         <div className="mt-3 grid gap-2 sm:grid-cols-2">
                           <button
@@ -2244,7 +2244,7 @@ export default function CreateRoute() {
                               Otimizar rota
                             </span>
                             <span className="mt-1 block text-xs">
-                              Recalcula a sequencia mais curta para economizar trajeto.
+                              Ignora STOP como ordem e recalcula a sequencia mais curta.
                             </span>
                           </button>
                         </div>

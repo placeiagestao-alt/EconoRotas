@@ -1029,6 +1029,58 @@ describe("Route endpoints", () => {
     ]);
   });
 
+  it("optimizes Shopee by geography when the user does not choose STOP sequence", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8221));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Shopee otimizar sem STOP",
+      mode: "balanced",
+      respectInputSequence: false,
+      startLocation: "Local atual do motorista",
+      startLatitude: -22.1207,
+      startLongitude: -51.3895,
+      stops: [
+        {
+          address: "Rua Shopee Stop 2 distante, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.2889,
+          sequence: 0,
+          sourceProvider: "shopee",
+          originalStop: 2,
+          isUnsequencedStop: false,
+        },
+        {
+          address: "Rua Shopee Stop 1 inicio, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 1,
+          sourceProvider: "shopee",
+          originalStop: 1,
+          isUnsequencedStop: false,
+        },
+        {
+          address: "Rua Shopee Stop 3 perto do inicio, Presidente Prudente - SP",
+          latitude: -22.1207,
+          longitude: -51.3789,
+          sequence: 2,
+          sourceProvider: "shopee",
+          originalStop: 3,
+          isUnsequencedStop: false,
+        },
+      ],
+    });
+
+    const stops = await caller.stops.list({ routeId: result.route.id });
+
+    expect(result.optimization?.auditPolicy).toBeNull();
+    expect(stops.map((stop: any) => Number(stop.originalStop))).not.toEqual([1, 2, 3]);
+    expect(stops.map((stop: any) => stop.address)).toEqual([
+      "Rua Shopee Stop 1 inicio, Presidente Prudente - SP",
+      "Rua Shopee Stop 3 perto do inicio, Presidente Prudente - SP",
+      "Rua Shopee Stop 2 distante, Presidente Prudente - SP",
+    ]);
+  });
+
   it("does not restore Shopee STOP order when reoptimizing a route created in optimized mode", async () => {
     const caller = appRouter.createCaller(createAuthContext(8220));
 
