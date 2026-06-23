@@ -82,6 +82,15 @@ export function getCurrentPosition(): Promise<Coordinate> {
   }
 
   return new Promise((resolve, reject) => {
+    if (typeof window !== "undefined" && !window.isSecureContext) {
+      reject(
+        new Error(
+          "Localizacao bloqueada: abra o app em HTTPS ou pelo aplicativo instalado."
+        )
+      );
+      return;
+    }
+
     navigator.geolocation.getCurrentPosition(
       (position) => {
         resolve({
@@ -93,7 +102,7 @@ export function getCurrentPosition(): Promise<Coordinate> {
       {
         enableHighAccuracy: true,
         maximumAge: 30_000,
-        timeout: 10_000,
+        timeout: 20_000,
       }
     );
   });

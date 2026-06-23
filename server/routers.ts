@@ -80,11 +80,21 @@ const MAX_PREMATURE_EXIT_FIXES = 50;
 const MAX_BATCH_AUDIT_REPAIR_PASSES = 3;
 const OSRM_CIRCUIT_MIN_CALLS = 20;
 const OSRM_CIRCUIT_FAILURE_RATE = 0.8;
+const SHOPEE_STOP_AUDIT_POLICY = "shopee_stop_preserved";
+const ROUTING_STRATEGY_SHOPEE_STOP = "shopee_stop_sequence";
+const ROUTING_STRATEGY_OPTIMIZED = "optimized_route";
 const STRUCTURAL_AUDIT_ISSUE_TYPES = new Set<RouteAuditReport["issues"][number]["type"]>([
   "missing_coordinates",
   "invalid_coordinates",
   "empty_address",
 ]);
+
+function getRoutingStrategy(auditPolicy: string | null) {
+  return auditPolicy === SHOPEE_STOP_AUDIT_POLICY
+    ? ROUTING_STRATEGY_SHOPEE_STOP
+    : ROUTING_STRATEGY_OPTIMIZED;
+}
+
 type CoherenceFixIssueType =
   | "nearby_stop_skipped"
   | "region_revisited"
@@ -303,7 +313,7 @@ function applyShopeeStopAuditPolicy(
   report: RouteAuditReport,
   auditPolicy: string | null
 ): RouteAuditReport {
-  return auditPolicy === "shopee_stop_preserved"
+  return auditPolicy === SHOPEE_STOP_AUDIT_POLICY
     ? asShopeeStructuralAudit(report)
     : report;
 }
@@ -1051,8 +1061,9 @@ export async function optimizeUserRoute(
     routeStops,
     Boolean(options?.respectInputSequence)
   )
-    ? "shopee_stop_preserved"
+    ? SHOPEE_STOP_AUDIT_POLICY
     : null;
+  const preserveShopeeStopSequence = auditPolicy === SHOPEE_STOP_AUDIT_POLICY;
   runtimeBreakdown.dbFetchMs = Date.now() - dbFetchStartedAt;
 
   if (routeStops.length === 0) {
@@ -1079,8 +1090,10 @@ export async function optimizeUserRoute(
         maxSyncStops: ENV.maxSyncStops,
         routeMode: requestedMode || route.mode,
         localityMode: options?.localityMode ?? null,
-        respectInputSequence: Boolean(options?.respectInputSequence),
+        requestedRespectInputSequence: Boolean(options?.respectInputSequence),
+        respectInputSequence: preserveShopeeStopSequence,
         auditPolicy,
+        routingStrategy: getRoutingStrategy(auditPolicy),
         excludeStopIds: options?.excludeStopIds ?? [],
         requiresExternalWorker: true,
       },
@@ -1095,7 +1108,7 @@ export async function optimizeUserRoute(
           userId,
           mode: requestedMode || route.mode,
           localityMode: options?.localityMode,
-          respectInputSequence: Boolean(options?.respectInputSequence),
+          respectInputSequence: preserveShopeeStopSequence,
           excludeStopIds: options?.excludeStopIds ?? [],
         });
         queueProviderJobId = providerJob?.id ? String(providerJob.id) : null;
@@ -1139,6 +1152,10 @@ export async function optimizeUserRoute(
         queueError,
         stopCount: routeStops.length,
         maxSyncStops: ENV.maxSyncStops,
+        requestedRespectInputSequence: Boolean(options?.respectInputSequence),
+        respectInputSequence: preserveShopeeStopSequence,
+        auditPolicy,
+        routingStrategy: getRoutingStrategy(auditPolicy),
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record optimization job event:", error);
@@ -1163,6 +1180,10 @@ export async function optimizeUserRoute(
         queueError,
         stopCount: routeStops.length,
         maxSyncStops: ENV.maxSyncStops,
+        requestedRespectInputSequence: Boolean(options?.respectInputSequence),
+        respectInputSequence: preserveShopeeStopSequence,
+        auditPolicy,
+        routingStrategy: getRoutingStrategy(auditPolicy),
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record queue requirement event:", error);
@@ -1179,7 +1200,8 @@ export async function optimizeUserRoute(
         totalTime: 0,
         audit: null,
         auditSource: "queued",
-        auditPolicy: null,
+        auditPolicy,
+        routingStrategy: getRoutingStrategy(auditPolicy),
       };
     }
 
@@ -1239,7 +1261,7 @@ export async function optimizeUserRoute(
     };
   });
   const optimizationLocations =
-    options?.respectInputSequence
+    preserveShopeeStopSequence
       ? orderShopeeStopPreservedLocations(locations)
       : locations;
 
@@ -1386,7 +1408,7 @@ export async function optimizeUserRoute(
       attemptLocations.length > ENV.maxGeographicFallbackStops &&
       Boolean(options?.allowLargeSync);
     const isShopeeStopPreservedSequentialRoute =
-      attempt.respectInputSequence && auditPolicy === "shopee_stop_preserved";
+      attempt.respectInputSequence && auditPolicy === SHOPEE_STOP_AUDIT_POLICY;
 
     if (
       !optimizedWithRoadMetrics &&
@@ -1497,6 +1519,7 @@ export async function optimizeUserRoute(
           osrmBaseUrl: ENV.osrmBaseUrl,
           auditSource,
           auditPolicy,
+          routingStrategy: getRoutingStrategy(auditPolicy),
           respectInputSequence: true,
         },
       }).catch((error) => {
@@ -1533,12 +1556,13 @@ export async function optimizeUserRoute(
       localityMode: attempt.localityMode,
       respectInputSequence: Boolean(attempt.respectInputSequence),
       auditPolicy,
+      routingStrategy: getRoutingStrategy(auditPolicy),
     };
   }
 
   let optimizationAttempt = await buildOptimizationAttempt({
     localityMode: options?.localityMode,
-    respectInputSequence: Boolean(options?.respectInputSequence),
+    respectInputSequence: preserveShopeeStopSequence,
   });
   let postOptimizationBlockingReason = getPostOptimizationBlockingReason(
     optimizationAttempt.audit
@@ -1736,8 +1760,9 @@ export async function optimizeUserRoute(
         localityMode: optimizationAttempt.localityMode,
         respectInputSequence: optimizationAttempt.respectInputSequence,
         auditPolicy: optimizationAttempt.auditPolicy,
-        structuralAuditOnly: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
-        coherenceAuditSkipped: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
+        routingStrategy: getRoutingStrategy(optimizationAttempt.auditPolicy),
+        structuralAuditOnly: optimizationAttempt.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+        coherenceAuditSkipped: optimizationAttempt.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
         auditSource: optimizationAttempt.auditSource,
         routeMetadata: optimizationAttempt.optimized.metadata ?? null,
       },
@@ -1852,8 +1877,9 @@ export async function optimizeUserRoute(
         routeMetadata: optimizationAttempt.optimized.metadata ?? null,
         geocodingConfidence,
         auditPolicy: optimizationAttempt.auditPolicy,
-        structuralAuditOnly: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
-        coherenceAuditSkipped: optimizationAttempt.auditPolicy === "shopee_stop_preserved",
+        routingStrategy: getRoutingStrategy(optimizationAttempt.auditPolicy),
+        structuralAuditOnly: optimizationAttempt.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+        coherenceAuditSkipped: optimizationAttempt.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record route metric:", error);
@@ -1966,7 +1992,13 @@ export async function optimizeUserRoute(
 
   await recordRouteMetricForAttempt(null);
 
-  return { ...optimized, audit, auditSource, auditPolicy: optimizationAttempt.auditPolicy };
+  return {
+    ...optimized,
+    audit,
+    auditSource,
+    auditPolicy: optimizationAttempt.auditPolicy,
+    routingStrategy: getRoutingStrategy(optimizationAttempt.auditPolicy),
+  };
 }
 
 const credentialsSchema = z.object({
@@ -2474,7 +2506,7 @@ export const appRouter = router({
         const auditPolicy =
           readStringMetadata(latestMetadata, "auditPolicy") ??
           (isShopeeStopPreservedRoute(routeStops, readBooleanMetadata(latestMetadata, "respectInputSequence"))
-            ? "shopee_stop_preserved"
+            ? SHOPEE_STOP_AUDIT_POLICY
             : null);
         const usedRoadMetrics = readBooleanMetadata(
           latestMetadata,
@@ -2516,8 +2548,9 @@ export const appRouter = router({
             respectInputSequence: respectInputSequence ?? null,
             requireStartLocation,
             auditPolicy,
-            structuralAuditOnly: auditPolicy === "shopee_stop_preserved",
-            coherenceAuditSkipped: auditPolicy === "shopee_stop_preserved",
+            routingStrategy: getRoutingStrategy(auditPolicy),
+            structuralAuditOnly: auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+            coherenceAuditSkipped: auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
             lastOptimizationEventId: latestOptimizationEvent?.id ?? null,
             staleOptimizationContext: !hasFreshOptimizationContext && Boolean(latestOptimizationEvent),
           },
@@ -2585,8 +2618,9 @@ export const appRouter = router({
               auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
               auditRequireStartLocation: true,
               auditPolicy: optimized.auditPolicy ?? null,
-              structuralAuditOnly: optimized.auditPolicy === "shopee_stop_preserved",
-              coherenceAuditSkipped: optimized.auditPolicy === "shopee_stop_preserved",
+              routingStrategy: getRoutingStrategy(optimized.auditPolicy ?? null),
+              structuralAuditOnly: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+              coherenceAuditSkipped: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
             },
           });
           await recordRouteAuditEvent(
@@ -2613,6 +2647,9 @@ export const appRouter = router({
               stops: stops.length,
               mode: input.mode,
               respectInputSequence: Boolean(respectInputSequence),
+              routingStrategy: respectInputSequence
+                ? ROUTING_STRATEGY_SHOPEE_STOP
+                : ROUTING_STRATEGY_OPTIMIZED,
             },
           });
           await db.updateRoute(route.id, ctx.user.id, {
@@ -2710,8 +2747,9 @@ export const appRouter = router({
             auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
             auditRequireStartLocation: true,
             auditPolicy: optimized.auditPolicy ?? null,
-            structuralAuditOnly: optimized.auditPolicy === "shopee_stop_preserved",
-            coherenceAuditSkipped: optimized.auditPolicy === "shopee_stop_preserved",
+            routingStrategy: getRoutingStrategy(optimized.auditPolicy ?? null),
+            structuralAuditOnly: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+            coherenceAuditSkipped: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
           },
         });
         await recordRouteAuditEvent(
@@ -2789,8 +2827,9 @@ export const appRouter = router({
             auditUsedRoadMetrics: optimized.auditSource?.startsWith("road-"),
             auditRequireStartLocation: true,
             auditPolicy: optimized.auditPolicy ?? null,
-            structuralAuditOnly: optimized.auditPolicy === "shopee_stop_preserved",
-            coherenceAuditSkipped: optimized.auditPolicy === "shopee_stop_preserved",
+            routingStrategy: getRoutingStrategy(optimized.auditPolicy ?? null),
+            structuralAuditOnly: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+            coherenceAuditSkipped: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
           },
         });
         await recordRouteAuditEvent(

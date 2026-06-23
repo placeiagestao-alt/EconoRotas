@@ -129,17 +129,23 @@ export default function DownloadApk() {
 
             <div className="space-y-4">
               <h1 className="max-w-3xl text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">
-                Instale o EconoRota sem baixar APK
+                Instale o EconoRota no celular
               </h1>
               <p className="max-w-2xl text-lg leading-8 text-slate-600">
-                Use o app direto pelo navegador e adicione a tela inicial do
-                celular. E mais rapido, seguro e nao exige liberar instalacao de
-                fonte externa.
+                Recomendamos instalar pelo navegador como PWA. Se preferir testar
+                o aplicativo Android, o APK oficial tambem esta disponivel nesta
+                pagina.
               </p>
             </div>
 
             <div className="flex flex-col gap-3 sm:flex-row">
               <PwaInstallButton className="gap-2" />
+              <Button asChild size="lg" variant="outline" className="gap-2">
+                <a href={apkUrl} download>
+                  <Download className="h-5 w-5" />
+                  Baixar APK Android
+                </a>
+              </Button>
               <Button
                 type="button"
                 variant="outline"
@@ -163,7 +169,7 @@ export default function DownloadApk() {
               </div>
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                APK secundario atualizado em {publishedAt}
+                APK oficial atualizado em {publishedAt}
               </div>
             </div>
           </div>
@@ -239,9 +245,10 @@ export default function DownloadApk() {
         <div className="mx-auto grid max-w-6xl gap-4 px-4 py-4 text-sm text-amber-900 sm:px-6 md:grid-cols-[1fr_auto] md:items-center">
           <div className="flex gap-3">
             <AlertCircle className="mt-0.5 h-4 w-4 flex-none" />
-            <p>
-              APK disponivel apenas para testes avancados em Android. Para
-              cliente final, recomendamos instalar como PWA pelo navegador.
+              <p>
+              O PWA e o caminho recomendado para a maioria dos usuarios. O APK
+              Android fica disponivel como alternativa oficial para quem preferir
+              instalar o aplicativo manualmente.
             </p>
           </div>
           <Button asChild variant="outline" size="sm" className="gap-2 border-amber-300">

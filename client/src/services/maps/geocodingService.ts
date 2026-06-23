@@ -517,10 +517,20 @@ async function fetchAddressQuery(
       Accept: "application/json",
       ...takeLocalCacheMetricHeaders(),
     };
-    response = await fetch(`${GEOCODING_SEARCH_URL}?${params.toString()}`, {
-      signal: options.signal,
-      headers,
-    });
+    try {
+      response = await fetch(`${GEOCODING_SEARCH_URL}?${params.toString()}`, {
+        signal: options.signal,
+        headers,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw error;
+      }
+
+      throw new Error(
+        "Nao foi possivel consultar o servico de endereco. Confira sua conexao e tente novamente."
+      );
+    }
 
     if (!RETRYABLE_STATUS_CODES.has(response.status) || attempt === 2) break;
 

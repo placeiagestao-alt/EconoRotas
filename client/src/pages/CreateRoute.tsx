@@ -337,7 +337,7 @@ export default function CreateRoute() {
     createAndOptimizeMutation.isPending ||
     isResolvingCoordinates;
   const routeActionLabel = respectImportedStopSequence
-    ? "Criar rota com STOP"
+    ? "Criar rota pela sequência STOP"
     : "Criar e Otimizar Rota";
   const canRunImileScreenCapture =
     (IS_LOCAL_ANDROID_API || isLocalBrowserHost()) && !isPackagedAndroidApp();
@@ -1452,6 +1452,11 @@ export default function CreateRoute() {
       : "Meu local - fim da rota";
 
     setChecking(true);
+    toast.message(
+      isStart
+        ? "Solicitando GPS para marcar o inicio da rota..."
+        : "Solicitando GPS para marcar o fim da rota..."
+    );
 
     try {
       const position = await getCurrentPosition();
@@ -2204,11 +2209,11 @@ export default function CreateRoute() {
                     {importSummary.hasStopSequence && (
                       <div className="rounded-xl border border-border/70 bg-white p-3 text-sm">
                         <p className="font-medium text-foreground">
-                          Como ordenar esta rota?
+                          Escolha a regra desta rota Shopee
                         </p>
                         <p className="mt-1 text-muted-foreground">
-                          A coluna STOP so sera usada como sequencia se voce escolher
-                          esta opcao. Na otimizacao, STOP fica apenas como informacao.
+                          STOP so define a ordem quando voce escolher a sequencia STOP.
+                          Se escolher otimizar, a Shopee entra na mesma roteirizacao das outras transportadoras.
                         </p>
                         <div className="mt-3 grid gap-2 sm:grid-cols-2">
                           <button
@@ -2226,7 +2231,7 @@ export default function CreateRoute() {
                               Usar sequencia STOP
                             </span>
                             <span className="mt-1 block text-xs">
-                              Mantem a ordem original da tabela pela coluna STOP.
+                              Nao otimiza. Segue a coluna STOP e apenas encaixa os STOP 0 ou "-".
                             </span>
                           </button>
                           <button
@@ -2244,7 +2249,7 @@ export default function CreateRoute() {
                               Otimizar rota
                             </span>
                             <span className="mt-1 block text-xs">
-                              Ignora STOP como ordem e recalcula a sequencia mais curta.
+                              Ignora STOP como ordem. Otimiza por setores, proximidade e fiscal da rota.
                             </span>
                           </button>
                         </div>

@@ -639,11 +639,11 @@ describe("Route endpoints", () => {
     expect(route?.status).toBe("optimized");
   });
 
-  it("reoptimizes automatically when the auditor finds a poor preserved sequence", async () => {
+  it("does not run coherence correction when Shopee STOP sequence is preserved", async () => {
     const caller = appRouter.createCaller(createAuthContext(8212));
 
     const result = await caller.routes.createAndOptimize({
-      name: "Rota com sequencia reprovada",
+      name: "Shopee STOP sem correcao de coerencia",
       mode: "balanced",
       respectInputSequence: true,
       stops: [
@@ -652,18 +652,27 @@ describe("Route endpoints", () => {
           latitude: -22.12,
           longitude: -51.4,
           sequence: 0,
+          sourceProvider: "shopee",
+          originalStop: 1,
+          isUnsequencedStop: false,
         },
         {
           address: "Rua Auditoria, 300, Presidente Prudente - SP",
           latitude: -22.1218,
           longitude: -51.4,
           sequence: 1,
+          sourceProvider: "shopee",
+          originalStop: 2,
+          isUnsequencedStop: false,
         },
         {
           address: "Rua Auditoria, 120, Presidente Prudente - SP",
           latitude: -22.1204,
           longitude: -51.4,
           sequence: 2,
+          sourceProvider: "shopee",
+          originalStop: 3,
+          isUnsequencedStop: false,
         },
       ],
     });
@@ -671,17 +680,10 @@ describe("Route endpoints", () => {
     const route = await caller.routes.get({ id: result.route.id });
 
     expect(result.optimization).not.toBeNull();
-    expect(result.optimization?.auditSource).toContain("audit-global-plan");
-    expect(
-      result.optimization?.audit.issues.some(
-        (issue: any) => issue.type === "nearby_stop_skipped"
-      )
-    ).toBe(false);
+    expect(result.optimization?.auditPolicy).toBe("shopee_stop_preserved");
+    expect(result.optimization?.routingStrategy).toBe("shopee_stop_sequence");
+    expect(result.optimization?.auditSource).not.toContain("audit-global-plan");
     expect(route?.status).toBe("optimized");
-
-    const metrics = await db.getRouteMetricsDashboard(30);
-    expect(metrics.optimizerV2.batchCorrectionCount).toBeGreaterThanOrEqual(1);
-    expect(metrics.optimizerV2.totalAuditCycles).toBeGreaterThanOrEqual(2);
   });
 
   it("optimizes with attention when many addresses share approximate coordinates", async () => {
@@ -783,11 +785,11 @@ describe("Route endpoints", () => {
     expect(stops.map((stop: any) => Number(stop.sequence))).toEqual([0, 1, 2]);
   });
 
-  it("corrects incoherent input stop order even when sequential routing is requested", async () => {
+  it("ignores sequential request without Shopee STOP metadata and optimizes normally", async () => {
     const caller = appRouter.createCaller(createAuthContext(8203));
 
     const result = await caller.routes.createAndOptimize({
-      name: "Rota por STOP",
+      name: "Rota nao Shopee com pedido sequencial",
       mode: "balanced",
       respectInputSequence: true,
       stops: [
@@ -813,7 +815,8 @@ describe("Route endpoints", () => {
     });
 
     const stops = await caller.stops.list({ routeId: result.route.id });
-    expect(result.optimization?.auditSource).toContain("audit");
+    expect(result.optimization?.auditPolicy).toBeNull();
+    expect(result.optimization?.routingStrategy).toBe("optimized_route");
     expect(
       result.optimization?.audit.issues.some(
         (issue: any) =>
@@ -870,8 +873,10 @@ describe("Route endpoints", () => {
     const audit = await caller.routes.audit({ id: result.route.id });
 
     expect(result.optimization?.auditPolicy).toBe("shopee_stop_preserved");
+    expect(result.optimization?.routingStrategy).toBe("shopee_stop_sequence");
     expect(result.optimization?.auditSource).not.toContain("audit-global-plan");
     expect(audit.context.auditPolicy).toBe("shopee_stop_preserved");
+    expect(audit.context.routingStrategy).toBe("shopee_stop_sequence");
     expect(audit.context.structuralAuditOnly).toBe(true);
     expect(audit.issues.some((issue: any) =>
       ["nearby_stop_skipped", "region_revisited", "premature_region_exit", "bad_preserved_sequence"].includes(issue.type)
@@ -928,7 +933,9 @@ describe("Route endpoints", () => {
     expect(result.route.status).toBe("optimized");
     expect(result.optimization).not.toBeNull();
     expect(result.optimization?.auditPolicy).toBe("shopee_stop_preserved");
+    expect(result.optimization?.routingStrategy).toBe("shopee_stop_sequence");
     expect(audit.context.auditPolicy).toBe("shopee_stop_preserved");
+    expect(audit.context.routingStrategy).toBe("shopee_stop_sequence");
     expect(audit.context.structuralAuditOnly).toBe(true);
   });
 
@@ -975,7 +982,9 @@ describe("Route endpoints", () => {
     const audit = await caller.routes.audit({ id: result.route.id });
 
     expect(optimizedAgain.auditPolicy).toBe("shopee_stop_preserved");
+    expect(optimizedAgain.routingStrategy).toBe("shopee_stop_sequence");
     expect(audit.context.auditPolicy).toBe("shopee_stop_preserved");
+    expect(audit.context.routingStrategy).toBe("shopee_stop_sequence");
     expect(audit.context.structuralAuditOnly).toBe(true);
   });
 
@@ -1020,7 +1029,9 @@ describe("Route endpoints", () => {
     const audit = await caller.routes.audit({ id: result.route.id });
 
     expect(result.optimization?.auditPolicy).toBeNull();
+    expect(result.optimization?.routingStrategy).toBe("optimized_route");
     expect(audit.context.auditPolicy).toBeNull();
+    expect(audit.context.routingStrategy).toBe("optimized_route");
     expect(audit.context.structuralAuditOnly).toBe(false);
     expect(stops.map((stop: any) => stop.address)).toEqual([
       "Rua Shopee Otimizada 1, Presidente Prudente - SP",
@@ -1073,6 +1084,7 @@ describe("Route endpoints", () => {
     const stops = await caller.stops.list({ routeId: result.route.id });
 
     expect(result.optimization?.auditPolicy).toBeNull();
+    expect(result.optimization?.routingStrategy).toBe("optimized_route");
     expect(stops.map((stop: any) => Number(stop.originalStop))).not.toEqual([1, 2, 3]);
     expect(stops.map((stop: any) => stop.address)).toEqual([
       "Rua Shopee Stop 1 inicio, Presidente Prudente - SP",
@@ -1123,6 +1135,7 @@ describe("Route endpoints", () => {
     const stops = await caller.stops.list({ routeId: result.route.id });
 
     expect(optimizedAgain.auditPolicy).toBeNull();
+    expect(optimizedAgain.routingStrategy).toBe("optimized_route");
     expect(stops.map((stop: any) => stop.address)).toEqual([
       "Rua Shopee Reotimizada 1, Presidente Prudente - SP",
       "Rua Shopee Reotimizada 3 perto, Presidente Prudente - SP",
