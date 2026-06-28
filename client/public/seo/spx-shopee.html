@@ -3,11 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>EconoRota para SPX/Shopee - Sequência STOP ou rota otimizada</title>
-  <meta name="description" content="EconoRota para entregadores SPX/Shopee: siga a sequência STOP da Shopee, use a ordem da tabela ou otimize a rota com pacote visível em cada parada.">
+  <meta name="theme-color" content="#ff6d00">
+  <title>EconoRota para SPX/Shopee - STOP, pacote e rota otimizada</title>
+  <meta name="description" content="EconoRota para entregadores SPX/Shopee: siga a sequencia STOP da Shopee, use a ordem da tabela ou otimize a rota com pacote visivel em cada parada.">
   <link rel="canonical" href="https://econo-rotas.vercel.app/spx-shopee">
+  <link rel="manifest" href="/manifest.webmanifest">
   <meta property="og:title" content="EconoRota para SPX/Shopee">
-  <meta property="og:description" content="Escolha entre sequência da Shopee, ordem da tabela ou otimização inteligente. Pacote, STOP e parada separados sem confusão.">
+  <meta property="og:description" content="Escolha entre sequencia STOP, ordem da tabela ou otimizacao inteligente. Pacote, STOP e parada separados sem confusao.">
   <meta property="og:image" content="https://econo-rotas.vercel.app/og-image.png">
   <meta property="og:type" content="website">
   <meta name="twitter:card" content="summary_large_image">
@@ -18,11 +20,16 @@
       "name": "EconoRota",
       "applicationCategory": "BusinessApplication",
       "operatingSystem": "Web, Android, iOS",
-      "description": "Roteirizador para entregadores SPX/Shopee com modos de sequência STOP, ordem da tabela e otimização de rota.",
+      "description": "Roteirizador para entregadores SPX/Shopee com modos de sequencia STOP, ordem da tabela e otimizacao de rota.",
       "url": "https://econo-rotas.vercel.app/spx-shopee",
       "publisher": {
         "@type": "Organization",
         "name": "EconoRota"
+      },
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "BRL"
       }
     }
   </script>
@@ -33,10 +40,10 @@
       "mainEntity": [
         {
           "@type": "Question",
-          "name": "O EconoRota segue a sequência STOP da Shopee?",
+          "name": "O EconoRota segue a sequencia STOP da Shopee?",
           "acceptedAnswer": {
             "@type": "Answer",
-            "text": "Sim. Quando o usuário escolhe seguir sequência STOP, o sistema preserva os STOPs válidos da tabela e encaixa paradas sem STOP por proximidade."
+            "text": "Sim. Quando o usuario escolhe seguir sequencia STOP, o sistema preserva os STOPs validos da tabela e encaixa paradas sem STOP por proximidade."
           }
         },
         {
@@ -44,217 +51,1010 @@
           "name": "STOP 0 ou '-' vira parada da rota?",
           "acceptedAnswer": {
             "@type": "Answer",
-            "text": "Não. STOP 0 ou '-' é tratado como parada sem sequência, sem virar STOP falso. Ele é encaixado conforme proximidade e coerência operacional."
+            "text": "Nao. STOP 0 ou '-' e tratado como parada sem sequencia, sem virar STOP falso. Ele e encaixado conforme proximidade e coerencia operacional."
           }
         },
         {
           "@type": "Question",
-          "name": "O número do pacote aparece na parada?",
+          "name": "Posso escolher otimizar em vez de seguir STOP?",
           "acceptedAnswer": {
             "@type": "Answer",
-            "text": "Sim. O EconoRota separa parada operacional, STOP da Shopee e número do pacote, deixando o pacote destacado para o motorista localizar mais rápido."
+            "text": "Sim. Em tabelas Shopee, o usuario escolhe entre seguir STOP, usar a ordem da tabela ou otimizar a rota. Quando escolhe otimizar, a rota passa pelo mesmo fluxo inteligente das demais transportadoras."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "O numero do pacote aparece na parada?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Sim. O EconoRota separa parada operacional, STOP da Shopee e numero do pacote, deixando o pacote destacado para o motorista localizar mais rapido."
           }
         }
       ]
     }
   </script>
   <style>
-    :root{
-      --orange:#f97316;
-      --orange-dark:#c2410c;
-      --orange-soft:#fff7ed;
-      --amber:#fed7aa;
-      --ink:#111827;
-      --muted:#64748b;
-      --line:#fed7aa;
-      --green:#16a34a;
-      --red:#dc2626;
-      --white:#ffffff;
+    :root {
+      --orange: #ff6d00;
+      --orange-strong: #ea580c;
+      --orange-dark: #9a3412;
+      --orange-soft: #fff7ed;
+      --orange-line: #fed7aa;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --soft: #f8fafc;
+      --line: #e2e8f0;
+      --white: #ffffff;
+      --green: #16a34a;
+      --green-soft: #dcfce7;
+      --shadow: 0 24px 60px rgb(15 23 42 / 10%);
+      --shadow-soft: 0 12px 30px rgb(15 23 42 / 8%);
     }
-    *{box-sizing:border-box}
-    body{margin:0;font-family:Inter,Arial,sans-serif;background:linear-gradient(180deg,#fff7ed 0%,#fff 42%,#fff7ed 100%);color:var(--ink);line-height:1.6}
-    a{color:inherit;text-decoration:none}
-    .wrap{width:min(1160px,calc(100% - 32px));margin:0 auto}
-    header{position:sticky;top:0;z-index:10;background:rgba(255,247,237,.92);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
-    .nav{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:16px 0}
-    .brand{display:flex;align-items:center;gap:12px;font-weight:900;letter-spacing:.01em}
-    .brand img{height:40px;width:40px;border-radius:10px}
-    .navlinks{display:flex;gap:18px;align-items:center;font-size:14px;color:#7c2d12}
-    .btn{display:inline-flex;align-items:center;justify-content:center;min-height:46px;border-radius:8px;padding:0 18px;font-weight:800;border:1px solid transparent}
-    .btn-primary{background:var(--orange);color:white;box-shadow:0 12px 26px rgba(249,115,22,.28)}
-    .btn-secondary{background:white;color:var(--orange-dark);border-color:var(--line)}
-    .hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(330px,.95fr);gap:34px;align-items:center;padding:58px 0 44px}
-    .eyebrow{display:inline-flex;gap:8px;align-items:center;border:1px solid var(--line);background:white;border-radius:999px;padding:8px 12px;color:#9a3412;font-weight:800;font-size:13px}
-    h1{font-size:clamp(38px,6vw,72px);line-height:.98;margin:22px 0 18px;letter-spacing:0}
-    .lead{font-size:20px;line-height:1.65;color:#475569;max-width:740px}
-    .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}
-    .proof{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:26px}
-    .proof div{border:1px solid var(--line);background:white;border-radius:8px;padding:14px}
-    .proof strong{display:block;font-size:22px;color:#9a3412}
-    .mock{background:#fff;border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 28px 70px rgba(124,45,18,.14)}
-    .phone{border:10px solid #111827;border-radius:34px;background:#f8fafc;overflow:hidden}
-    .screenTop{padding:18px;background:linear-gradient(135deg,var(--orange),#fb923c);color:white}
-    .screenTop small{display:block;font-weight:800;opacity:.9}
-    .screenTop strong{font-size:24px}
-    .stopList{padding:14px;background:white}
-    .stop{display:grid;grid-template-columns:58px 1fr;gap:12px;padding:14px 0;border-bottom:1px solid #e2e8f0}
-    .num{height:52px;width:52px;border-radius:14px;background:#fff7ed;border:1px solid var(--line);display:grid;place-items:center;font-size:24px;font-weight:900;color:#9a3412}
-    .stop h3{margin:0;font-size:16px;line-height:1.3}
-    .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-    .chip{font-size:12px;font-weight:800;border-radius:999px;padding:4px 8px;background:#ffedd5;color:#9a3412}
-    .chip.green{background:#dcfce7;color:#166534}
-    .chip.gray{background:#e2e8f0;color:#475569}
-    section{padding:42px 0}
-    .sectionTitle{font-size:clamp(28px,4vw,44px);line-height:1.08;margin:0 0 12px}
-    .sectionText{font-size:18px;color:var(--muted);max-width:760px}
-    .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin-top:24px}
-    .card{background:white;border:1px solid var(--line);border-radius:8px;padding:22px}
-    .card h3{font-size:21px;margin:0 0 10px}
-    .tag{display:inline-flex;border-radius:999px;background:#ffedd5;color:#9a3412;padding:5px 9px;font-size:12px;font-weight:900;margin-bottom:12px}
-    .split{display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start}
-    .compare{border-collapse:collapse;width:100%;background:white;border:1px solid var(--line);border-radius:8px;overflow:hidden}
-    .compare th,.compare td{padding:14px;border-bottom:1px solid #fed7aa;text-align:left;vertical-align:top}
-    .compare th{background:#ffedd5;color:#7c2d12}
-    .faq{display:grid;gap:12px;margin-top:22px}
-    .faq details{background:white;border:1px solid var(--line);border-radius:8px;padding:18px}
-    .faq summary{font-weight:900;cursor:pointer}
-    footer{border-top:1px solid var(--line);padding:28px 0;color:#7c2d12}
-    @media (max-width:900px){
-      .hero,.split{grid-template-columns:1fr}
-      .grid3,.proof{grid-template-columns:1fr}
-      .nav{align-items:flex-start}.navlinks{display:none}
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      background: linear-gradient(180deg, #fff7ed 0%, #ffffff 38%, #fff7ed 100%);
+      color: var(--ink);
+      line-height: 1.6;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .wrap {
+      width: min(1160px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgb(254 215 170 / 72%);
+      background: rgb(255 247 237 / 88%);
+      backdrop-filter: blur(16px);
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 0;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .brand img {
+      width: 48px;
+      height: 48px;
+      border-radius: 14px;
+      box-shadow: 0 10px 24px rgb(249 115 22 / 20%);
+    }
+
+    .navlinks {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      color: #7c2d12;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .button {
+      position: relative;
+      display: inline-flex;
+      min-height: 48px;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      overflow: hidden;
+      border: 1px solid transparent;
+      border-radius: 16px;
+      padding: 0 18px;
+      font-size: 14px;
+      font-weight: 800;
+      transition: transform .14s ease, box-shadow .14s ease, background .14s ease;
+    }
+
+    .button:active {
+      transform: scale(.97);
+    }
+
+    .buttonPrimary {
+      background: var(--orange);
+      color: white;
+      box-shadow: 0 14px 30px rgb(255 109 0 / 28%);
+    }
+
+    .buttonPrimary:hover {
+      background: var(--orange-strong);
+    }
+
+    .buttonSecondary {
+      border-color: var(--orange-line);
+      background: white;
+      color: var(--orange-dark);
+    }
+
+    .buttonSmall {
+      min-height: 40px;
+      border-radius: 12px;
+      padding: 0 14px;
+      font-size: 13px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.08fr) minmax(330px, .92fr);
+      gap: 28px;
+      align-items: start;
+      padding: 42px 0 28px;
+    }
+
+    .heroPanel,
+    .loginPanel {
+      border: 1px solid var(--orange-line);
+      border-radius: 32px;
+      background: rgb(255 255 255 / 94%);
+      box-shadow: var(--shadow);
+    }
+
+    .heroPanel {
+      overflow: hidden;
+      padding: 28px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--orange-line);
+      border-radius: 999px;
+      background: #ffedd5;
+      padding: 8px 12px;
+      color: var(--orange-dark);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 20px 0 14px;
+      color: #0f172a;
+      font-size: clamp(32px, 5.4vw, 62px);
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1.02;
+    }
+
+    .lead {
+      max-width: 720px;
+      color: #475569;
+      font-size: 20px;
+      font-weight: 400;
+      line-height: 1.65;
+    }
+
+    .heroActions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 24px;
+    }
+
+    .installNote {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 14px;
+      align-items: center;
+      margin-top: 18px;
+      border: 1px dashed var(--orange-line);
+      border-radius: 24px;
+      background: var(--orange-soft);
+      padding: 14px;
+    }
+
+    .installNote strong {
+      display: block;
+      color: #0f172a;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0;
+    }
+
+    .installNote span,
+    .apkBox p,
+    .miniText {
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 400;
+    }
+
+    .apkBox {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: white;
+      padding: 14px;
+    }
+
+    .apkBox strong {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 14px;
+      font-weight: 800;
+      color: #334155;
+    }
+
+    .trustStrip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 20px;
+    }
+
+    .trustStrip span {
+      border: 1px solid var(--orange-line);
+      border-radius: 999px;
+      background: #fff7ed;
+      padding: 8px 11px;
+      color: #7c2d12;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .proofPanel {
+      margin-top: 22px;
+      border-radius: 28px;
+      background: #0f172a;
+      padding: 22px;
+      color: white;
+      box-shadow: 0 20px 40px rgb(15 23 42 / 18%);
+    }
+
+    .proofPanel small {
+      display: block;
+      color: #fed7aa;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .proofPanel strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1.1;
+    }
+
+    .proofGrid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .proofItem {
+      border-radius: 20px;
+      background: rgb(255 255 255 / 10%);
+      padding: 13px;
+    }
+
+    .proofItem b {
+      display: block;
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .proofItem span {
+      color: #cbd5e1;
+      font-size: 13px;
+    }
+
+    .phoneMock {
+      overflow: hidden;
+      border: 1px solid var(--orange-line);
+      border-radius: 32px;
+      background: white;
+      box-shadow: var(--shadow);
+    }
+
+    .phoneHeader {
+      background: linear-gradient(135deg, #ff6d00, #fb923c);
+      padding: 22px;
+      color: white;
+    }
+
+    .phoneHeader small {
+      display: block;
+      font-weight: 800;
+      opacity: .86;
+    }
+
+    .phoneHeader strong {
+      display: block;
+      margin-top: 2px;
+      font-size: 28px;
+      font-weight: 800;
+    }
+
+    .stopList {
+      padding: 14px 18px 18px;
+    }
+
+    .stop {
+      display: grid;
+      grid-template-columns: 64px 1fr;
+      gap: 12px;
+      border-bottom: 1px solid #e2e8f0;
+      padding: 16px 0;
+    }
+
+    .stop:last-child {
+      border-bottom: 0;
+    }
+
+    .stopNumber {
+      display: grid;
+      width: 58px;
+      height: 58px;
+      place-items: center;
+      border: 1px solid var(--orange-line);
+      border-radius: 18px;
+      background: var(--orange-soft);
+      color: var(--orange-dark);
+      font-size: 28px;
+      font-weight: 800;
+    }
+
+    .stop h3 {
+      margin: 0;
+      color: #0f172a;
+      font-size: 20px;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    .chip {
+      border-radius: 999px;
+      background: #ffedd5;
+      padding: 5px 9px;
+      color: var(--orange-dark);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .chipGreen {
+      background: var(--green-soft);
+      color: #166534;
+    }
+
+    .chipGray {
+      background: #e2e8f0;
+      color: #475569;
+    }
+
+    section {
+      padding: 34px 0;
+    }
+
+    .sectionHeader {
+      max-width: 780px;
+      margin-bottom: 22px;
+    }
+
+    .sectionHeader h2 {
+      margin-bottom: 10px;
+      color: #0f172a;
+      font-size: clamp(28px, 4vw, 44px);
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1.08;
+    }
+
+    .sectionHeader p {
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.65;
+    }
+
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .step,
+    .card,
+    .comparison {
+      border: 1px solid var(--orange-line);
+      border-radius: 8px;
+      background: white;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .step,
+    .card {
+      padding: 20px;
+    }
+
+    .stepTop {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .stepIndex {
+      display: grid;
+      width: 38px;
+      height: 38px;
+      place-items: center;
+      border-radius: 50%;
+      background: #ffedd5;
+      color: var(--orange-dark);
+      font-weight: 800;
+    }
+
+    .step h3,
+    .card h3 {
+      margin-bottom: 8px;
+      color: #0f172a;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0;
+    }
+
+    .step p,
+    .card p,
+    .comparison td {
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 400;
+    }
+
+    .grid3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .tag {
+      display: inline-flex;
+      margin-bottom: 12px;
+      border-radius: 999px;
+      background: #ffedd5;
+      padding: 5px 9px;
+      color: var(--orange-dark);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
+      gap: 24px;
+      align-items: start;
+    }
+
+    .comparison {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+    }
+
+    .comparison th,
+    .comparison td {
+      border-bottom: 1px solid #fed7aa;
+      padding: 15px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .comparison tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .comparison th {
+      background: #ffedd5;
+      color: #7c2d12;
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .comparison td:first-child {
+      color: #0f172a;
+      font-weight: 800;
+    }
+
+    .difference {
+      border: 1px solid var(--orange-line);
+      border-radius: 32px;
+      background: linear-gradient(135deg, #fff7ed, #ffffff);
+      padding: 28px;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .differenceList {
+      display: grid;
+      gap: 12px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .differenceList li {
+      display: grid;
+      grid-template-columns: 32px 1fr;
+      gap: 12px;
+      align-items: start;
+      color: #334155;
+      font-size: 14px;
+    }
+
+    .check {
+      display: grid;
+      width: 28px;
+      height: 28px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--green-soft);
+      color: #166534;
+      font-weight: 800;
+    }
+
+    .faq {
+      display: grid;
+      gap: 12px;
+    }
+
+    details {
+      border: 1px solid var(--orange-line);
+      border-radius: 8px;
+      background: white;
+      padding: 18px;
+    }
+
+    summary {
+      cursor: pointer;
+      color: #0f172a;
+      font-size: 16px;
+      font-weight: 800;
+    }
+
+    details p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .finalCta {
+      border: 1px solid #fb923c;
+      border-radius: 32px;
+      background: linear-gradient(135deg, #ff6d00, #fb923c);
+      padding: 28px;
+      color: white;
+      box-shadow: var(--shadow);
+    }
+
+    .finalCta h2 {
+      margin-bottom: 10px;
+      color: white;
+      font-size: clamp(28px, 4vw, 44px);
+      font-weight: 800;
+      line-height: 1.08;
+    }
+
+    .finalCta p {
+      max-width: 740px;
+      color: #fff7ed;
+      font-size: 18px;
+    }
+
+    .finalCta .buttonSecondary {
+      border-color: white;
+    }
+
+    footer {
+      border-top: 1px solid var(--orange-line);
+      padding: 28px 0;
+      color: #7c2d12;
+      font-size: 14px;
+    }
+
+    .floatingWhatsApp {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 30;
+      display: inline-flex;
+      width: 56px;
+      height: 56px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: #16a34a;
+      color: white;
+      font-size: 24px;
+      font-weight: 800;
+      box-shadow: 0 16px 34px rgb(22 163 74 / 32%);
+    }
+
+    @media (max-width: 920px) {
+      .hero,
+      .split,
+      .steps,
+      .grid3 {
+        grid-template-columns: 1fr;
+      }
+
+      .navlinks {
+        display: none;
+      }
+
+      .hero {
+        padding-top: 24px;
+      }
+
+      .heroPanel {
+        padding: 20px;
+      }
+
+      .installNote,
+      .apkBox {
+        align-items: stretch;
+      }
+
+      .installNote {
+        grid-template-columns: 1fr;
+      }
+
+      .apkBox {
+        flex-direction: column;
+      }
+
+      .apkBox .button {
+        width: 100%;
+      }
+
+      .proofGrid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .wrap {
+        width: min(100% - 24px, 1160px);
+      }
+
+      h1 {
+        font-size: 32px;
+      }
+
+      .lead {
+        font-size: 16px;
+      }
+
+      .button {
+        width: 100%;
+      }
+
+      .brand img {
+        width: 42px;
+        height: 42px;
+      }
+
+      .phoneHeader strong {
+        font-size: 24px;
+      }
     }
   </style>
 </head>
 <body>
-  <header>
+  <header class="topbar">
     <div class="wrap nav">
-      <a class="brand" href="/">
+      <a class="brand" href="/" aria-label="EconoRota">
         <img src="/icons/icon-96.png" alt="">
         <span>EconoRota</span>
       </a>
       <nav class="navlinks" aria-label="Navegacao publica">
         <a href="#modos">Modos</a>
-        <a href="#pacote-stop">Pacote e STOP</a>
+        <a href="#diferenciais">Diferenciais</a>
+        <a href="#pacote-stop">STOP e pacote</a>
         <a href="#faq">FAQ</a>
-        <a href="/baixar-aplicativo">Instalar app</a>
       </nav>
-      <a class="btn btn-primary" href="/">Entrar no sistema</a>
+      <a class="button buttonPrimary buttonSmall" href="/">Entrar no sistema</a>
     </div>
   </header>
 
   <main>
     <section class="wrap hero">
-      <div>
-        <span class="eyebrow">Especializado em rotina SPX/Shopee</span>
+      <div class="heroPanel">
+        <span class="eyebrow">Especialista em rotina SPX/Shopee</span>
         <h1>Rota Shopee sem confundir pacote, STOP e parada.</h1>
-        <p class="lead">O EconoRota foi desenhado para o entregador que precisa decidir rápido: seguir a sequência da Shopee, usar a ordem da tabela ou otimizar a rota quando a operação pedir economia.</p>
-        <div class="actions">
-          <a class="btn btn-primary" href="/">Acessar EconoRota</a>
-          <a class="btn btn-secondary" href="/baixar-aplicativo">Instalar EconoRota no celular</a>
+        <p class="lead">O EconoRota organiza a entrega do jeito que o motorista realmente trabalha: seguir a sequencia da Shopee, respeitar a tabela ou otimizar por setores quando a economia for prioridade.</p>
+
+        <div class="heroActions">
+          <a class="button buttonPrimary" href="/">Instalar pelo navegador</a>
+          <a class="button buttonSecondary" href="/">Acessar EconoRota</a>
         </div>
-        <div class="proof">
-          <div><strong>STOP</strong><span>preservado quando escolhido</span></div>
-          <div><strong>0 / -</strong><span>encaixado por proximidade</span></div>
-          <div><strong>Pacote</strong><span>visivel na parada</span></div>
+
+        <div class="installNote">
+          <div>
+            <strong>Nao precisa baixar APK</strong>
+            <span>Use como PWA no celular, com icone na tela inicial e experiencia de aplicativo.</span>
+          </div>
+          <a class="button buttonPrimary buttonSmall" href="/">Comecar agora</a>
+        </div>
+
+        <div class="apkBox">
+          <div>
+            <strong>APK para testes Android</strong>
+            <p>Opcao secundaria para testadores e aparelhos especificos.</p>
+          </div>
+          <a class="button buttonSecondary buttonSmall" href="/baixar-aplicativo">Ver APK</a>
+        </div>
+
+        <div class="trustStrip" aria-label="Itens de confianca">
+          <span>LGPD</span>
+          <span>WhatsApp oficial</span>
+          <span>Politica de privacidade</span>
+          <span>Termos de uso</span>
+        </div>
+
+        <div class="proofPanel">
+          <small>Prova operacional</small>
+          <strong>28 km e 1h20 a menos por turno</strong>
+          <div class="proofGrid">
+            <div class="proofItem"><b>STOP</b><span>preservado quando escolhido</span></div>
+            <div class="proofItem"><b>0 / -</b><span>encaixado por proximidade</span></div>
+            <div class="proofItem"><b>Pacote</b><span>destacado na parada</span></div>
+          </div>
+          <p class="miniText" style="color:#cbd5e1;margin:14px 0 0">Estimativa de referencia. O resultado real varia conforme cidade, tabela, transito e modo de rota.</p>
         </div>
       </div>
 
-      <div class="mock" aria-label="Previa da tela do EconoRota">
-        <div class="phone">
-          <div class="screenTop">
-            <small>Execucao da rota</small>
-            <strong>Parada 27 de 150</strong>
+      <aside class="phoneMock" aria-label="Previa visual da tela de execucao">
+        <div class="phoneHeader">
+          <small>Execucao da rota</small>
+          <strong>Parada 27 de 150</strong>
+        </div>
+        <div class="stopList">
+          <div class="stop">
+            <div class="stopNumber">27</div>
+            <div>
+              <h3>Rua Angelo Menegueso, 338</h3>
+              <div class="chips">
+                <span class="chip">STOP 31</span>
+                <span class="chip chipGreen">Pacote 6052</span>
+              </div>
+            </div>
           </div>
-          <div class="stopList">
-            <div class="stop">
-              <div class="num">27</div>
-              <div>
-                <h3>Rua Angelo Menegueso, 338</h3>
-                <div class="chips"><span class="chip">STOP 31</span><span class="chip green">Pacote 6052</span></div>
+          <div class="stop">
+            <div class="stopNumber">28</div>
+            <div>
+              <h3>Mesmo setor, entrega encaixada</h3>
+              <div class="chips">
+                <span class="chip chipGray">Sem STOP</span>
+                <span class="chip chipGreen">Pacote 6053</span>
               </div>
             </div>
-            <div class="stop">
-              <div class="num">28</div>
-              <div>
-                <h3>Rua Angelo Menegueso, 342</h3>
-                <div class="chips"><span class="chip gray">Sem STOP</span><span class="chip green">Pacote 6053</span></div>
-              </div>
-            </div>
-            <div class="stop">
-              <div class="num">29</div>
-              <div>
-                <h3>Rua Pedro de Moraes, 119</h3>
-                <div class="chips"><span class="chip">STOP 32</span><span class="chip green">Pacote 6054</span></div>
+          </div>
+          <div class="stop">
+            <div class="stopNumber">29</div>
+            <div>
+              <h3>Rua Pedro de Moraes, 119</h3>
+              <div class="chips">
+                <span class="chip">STOP 32</span>
+                <span class="chip chipGreen">Pacote 6054</span>
               </div>
             </div>
           </div>
         </div>
-      </div>
+      </aside>
     </section>
 
     <section class="wrap" id="modos">
-      <h2 class="sectionTitle">O motorista escolhe como quer rodar.</h2>
-      <p class="sectionText">A rota nao precisa ter uma unica regra para todo mundo. O EconoRota separa os modos para respeitar a realidade da rua.</p>
+      <div class="sectionHeader">
+        <h2>O usuario escolhe a regra certa antes de sair.</h2>
+        <p>Na tabela Shopee, STOP nao pode ser confundido com otimizacao. Por isso o EconoRota separa claramente os modos.</p>
+      </div>
+      <div class="steps">
+        <article class="step">
+          <div class="stepTop">
+            <span class="stepIndex">1</span>
+            <span class="tag">Shopee</span>
+          </div>
+          <h3>Seguir sequencia STOP</h3>
+          <p>Nao e otimizacao. O sistema segue a sequencia da coluna STOP e apenas encaixa as paradas 0 ou "-" por proximidade.</p>
+        </article>
+        <article class="step">
+          <div class="stepTop">
+            <span class="stepIndex">2</span>
+            <span class="tag">Tabela</span>
+          </div>
+          <h3>Usar ordem original</h3>
+          <p>Mantem a ordem da planilha quando a operacao ja chega pronta ou quando o motorista quer executar exatamente como recebeu.</p>
+        </article>
+        <article class="step">
+          <div class="stepTop">
+            <span class="stepIndex">3</span>
+            <span class="tag">Economia</span>
+          </div>
+          <h3>Otimizar rota</h3>
+          <p>Quando o usuario escolhe otimizar, a Shopee entra no mesmo fluxo inteligente das outras transportadoras, com setorizacao e fiscal.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap" id="diferenciais">
+      <div class="sectionHeader">
+        <h2>Diferenciais que resolvem dor real na rua.</h2>
+        <p>A pagina SPX/Shopee precisa vender uma ideia simples: o EconoRota entende a tabela da Shopee sem transformar STOP, pacote e parada em uma bagunca visual.</p>
+      </div>
       <div class="grid3">
         <article class="card">
-          <span class="tag">Modo Shopee</span>
-          <h3>Seguir sequência STOP</h3>
-          <p>Preserva a ordem da coluna STOP quando o motorista quer cumprir exatamente a sequência da tabela. Paradas 0 ou "-" entram como encaixe, sem alterar os STOPs validos.</p>
+          <span class="tag">STOP sem confusao</span>
+          <h3>STOP 0 nao vira parada falsa</h3>
+          <p>Paradas 0 ou "-" sao tratadas como sem sequencia. Elas entram no ponto mais coerente, mas nao mudam a numeracao dos STOPs validos.</p>
         </article>
         <article class="card">
-          <span class="tag">Modo Tabela</span>
-          <h3>Usar ordem original</h3>
-          <p>Mantem a ordem importada quando a operação ja chega organizada por outra regra interna. Ideal para conferencia e execucao sem surpresa.</p>
+          <span class="tag">Pacote visivel</span>
+          <h3>Numero do pacote aparece na parada</h3>
+          <p>O motorista ve a parada operacional, o STOP Shopee e o pacote como informacoes separadas, reduzindo erro na hora de localizar a entrega.</p>
         </article>
         <article class="card">
-          <span class="tag">Modo Economia</span>
-          <h3>Otimizar rota</h3>
-          <p>Quando fizer sentido economizar tempo e deslocamento, o sistema reordena as paradas e o fiscal interno avalia incoerencias antes da execucao.</p>
+          <span class="tag">Maps e Waze</span>
+          <h3>Destino por coordenada quando disponivel</h3>
+          <p>Quando a rota tem latitude e longitude, o app usa coordenadas como destino principal para reduzir confusao com bairro ou ponto comercial.</p>
         </article>
       </div>
     </section>
 
     <section class="wrap split" id="pacote-stop">
-      <div>
-        <h2 class="sectionTitle">Pacote, STOP e parada agora falam linguas diferentes.</h2>
-        <p class="sectionText">Essa separacao e o centro da experiencia SPX/Shopee. O motorista precisa confiar que o numero grande na tela e a parada operacional, enquanto STOP e pacote aparecem como informacao de apoio.</p>
+      <div class="difference">
+        <div class="sectionHeader" style="margin-bottom:18px">
+          <h2>O diferencial da pagina.</h2>
+          <p>Esta pagina deve deixar claro para o entregador SPX/Shopee que ele nao precisa escolher entre obedecer a Shopee e economizar rota. Ele escolhe o modo antes.</p>
+        </div>
+        <ul class="differenceList">
+          <li><span class="check">✓</span><span><b>Especialista em SPX/Shopee:</b> linguagem focada na tabela STOP, pacote e rotina do entregador.</span></li>
+          <li><span class="check">✓</span><span><b>Escolha consciente:</b> seguir STOP, manter tabela ou otimizar rota sao modos diferentes.</span></li>
+          <li><span class="check">✓</span><span><b>Sem STOP falso:</b> paradas 0 ou "-" aparecem como sem STOP e entram por proximidade.</span></li>
+          <li><span class="check">✓</span><span><b>Instalacao limpa:</b> PWA como caminho principal e APK apenas para testes Android.</span></li>
+        </ul>
       </div>
-      <table class="compare">
-        <thead><tr><th>Campo</th><th>Como aparece no EconoRota</th></tr></thead>
+
+      <table class="comparison">
+        <thead>
+          <tr>
+            <th>Informacao</th>
+            <th>Como o EconoRota exibe</th>
+          </tr>
+        </thead>
         <tbody>
-          <tr><td>Parada da rota</td><td>Numero operacional: Parada 1, 2, 3...</td></tr>
-          <tr><td>STOP Shopee</td><td>Aparece apenas quando veio como STOP valido da tabela.</td></tr>
-          <tr><td>STOP 0 ou "-"</td><td>Mostra "Sem STOP" e e encaixado por proximidade.</td></tr>
-          <tr><td>Pacote</td><td>Fica destacado para o motorista localizar rapidamente.</td></tr>
+          <tr>
+            <td>Parada da rota</td>
+            <td>Numero operacional grande: Parada 1, 2, 3...</td>
+          </tr>
+          <tr>
+            <td>STOP Shopee</td>
+            <td>Aparece somente quando veio como STOP valido da tabela Shopee.</td>
+          </tr>
+          <tr>
+            <td>STOP 0 ou "-"</td>
+            <td>Mostra "Sem STOP" ou "Encaixado por proximidade". Nunca aparece como STOP 0.</td>
+          </tr>
+          <tr>
+            <td>Pacote</td>
+            <td>Fica separado e destacado para localizar rapido no veiculo.</td>
+          </tr>
+          <tr>
+            <td>Otimizacao</td>
+            <td>So acontece quando o usuario escolhe otimizar. Se escolher STOP, a regra e seguir STOP.</td>
+          </tr>
         </tbody>
       </table>
     </section>
 
     <section class="wrap">
-      <h2 class="sectionTitle">Feito para evitar os erros que custam quilometros.</h2>
-      <div class="grid3">
-        <article class="card"><h3>Mesmo endereço, varios pacotes</h3><p>O sistema trata entregas agrupadas e evita transformar pacote em parada falsa.</p></article>
-        <article class="card"><h3>Maps/Waze com coordenadas</h3><p>Quando ha latitude e longitude, o destino e aberto por coordenada para reduzir confusao com bairro ou ponto comercial.</p></article>
-        <article class="card"><h3>Fiscal operacional</h3><p>O fiscal aponta problemas, o reotimizador tenta corrigir e rotas executaveis seguem como melhor versao possivel.</p></article>
+      <div class="sectionHeader">
+        <h2>Cole as entregas, otimize, entregue.</h2>
+        <p>A proposta continua direta: menos tela explicando, mais operacao pronta para sair para a rua.</p>
+      </div>
+      <div class="steps">
+        <article class="step">
+          <div class="stepTop"><span class="stepIndex">1</span><span class="tag">Cole</span></div>
+          <h3>Cole as entregas</h3>
+          <p>Importe a tabela Shopee/SPX e confira se as paradas foram reconhecidas corretamente.</p>
+        </article>
+        <article class="step">
+          <div class="stepTop"><span class="stepIndex">2</span><span class="tag">Otimize</span></div>
+          <h3>Escolha o modo</h3>
+          <p>Siga STOP, use a tabela ou deixe o EconoRota otimizar por setores quando fizer sentido.</p>
+        </article>
+        <article class="step">
+          <div class="stepTop"><span class="stepIndex">3</span><span class="tag">Entregue</span></div>
+          <h3>Abra no mapa</h3>
+          <p>Execute parada por parada com pacote, STOP e status de entrega visiveis.</p>
+        </article>
       </div>
     </section>
 
     <section class="wrap" id="faq">
-      <h2 class="sectionTitle">Perguntas frequentes</h2>
+      <div class="sectionHeader">
+        <h2>Perguntas frequentes</h2>
+        <p>Respostas objetivas para evitar falsa expectativa antes do usuario instalar.</p>
+      </div>
       <div class="faq">
-        <details open><summary>O EconoRota e oficial da Shopee?</summary><p>Nao. O EconoRota e uma ferramenta independente para apoiar entregadores e operacoes que trabalham com rotinas SPX/Shopee.</p></details>
-        <details><summary>Posso escolher entre STOP e otimizacao?</summary><p>Sim. Se escolher seguir STOP, a sequencia da Shopee e respeitada. Se escolher otimizar, o fiscal e o reotimizador atuam normalmente.</p></details>
-        <details><summary>O que acontece com STOP 0 ou "-”?</summary><p>Ele nao vira STOP falso e nao quebra a numeracao. O sistema trata como parada sem sequencia e encaixa conforme proximidade.</p></details>
-        <details><summary>O numero do pacote aparece?</summary><p>Sim. O pacote aparece separado de parada e STOP para facilitar a localizacao no veiculo.</p></details>
+        <details open>
+          <summary>O EconoRota e oficial da Shopee?</summary>
+          <p>Nao. O EconoRota e uma ferramenta independente de roteirizacao para apoiar entregadores e operacoes que trabalham com rotinas SPX/Shopee.</p>
+        </details>
+        <details>
+          <summary>Se eu subir tabela Shopee, ele otimiza automaticamente?</summary>
+          <p>Nao obrigatoriamente. O usuario escolhe. Se escolher seguir STOP, nao ha otimizacao, apenas encaixe das paradas sem STOP. Se escolher otimizar, a rota passa pelo fluxo inteligente normal.</p>
+        </details>
+        <details>
+          <summary>STOP 0 ou "-" entra como parada numerada?</summary>
+          <p>Ele entra como parada operacional, mas nao como STOP valido. A interface deve mostrar "Sem STOP" ou "Encaixado por proximidade", nunca "STOP 0".</p>
+        </details>
+        <details>
+          <summary>O APK e obrigatorio?</summary>
+          <p>Nao. A recomendacao principal e instalar pelo navegador como PWA. O APK fica como alternativa para testes Android.</p>
+        </details>
       </div>
     </section>
 
     <section class="wrap">
-      <div class="card" style="background:linear-gradient(135deg,#f97316,#fb923c);color:white;border-color:#fb923c">
-        <h2 class="sectionTitle" style="color:white">Comece pela rota de hoje.</h2>
-        <p style="max-width:720px;font-size:18px">Importe a tabela, escolha o modo de execucao e deixe o EconoRota organizar parada, STOP e pacote sem bagunca visual.</p>
-        <div class="actions"><a class="btn btn-secondary" href="/">Entrar no EconoRota</a><a class="btn btn-secondary" href="/baixar-aplicativo">Instalar app no celular</a></div>
+      <div class="finalCta">
+        <h2>Comece pela rota Shopee de hoje.</h2>
+        <p>Importe a tabela, escolha a regra da operacao e deixe parada, STOP e pacote separados desde o primeiro clique.</p>
+        <div class="heroActions">
+          <a class="button buttonSecondary" href="/">Instalar pelo navegador</a>
+          <a class="button buttonSecondary" href="/baixar-aplicativo">APK para testes Android</a>
+        </div>
       </div>
     </section>
   </main>
@@ -266,5 +1066,7 @@
       <p><a href="/privacidade">Privacidade</a> · <a href="/termos">Termos</a> · <a href="/suporte">Suporte</a></p>
     </div>
   </footer>
+
+  <a class="floatingWhatsApp" href="https://wa.me/5518996531491" target="_blank" rel="noopener noreferrer" aria-label="Falar com suporte pelo WhatsApp">W</a>
 </body>
 </html>
