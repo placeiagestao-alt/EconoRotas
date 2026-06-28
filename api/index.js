@@ -6870,6 +6870,7 @@ function chunkStops(cluster, maxPartitionSize, nextClusterId) {
   return chunks;
 }
 function shouldMicrocluster(cluster, totalStopCount, maxPartitionSize) {
+  if (totalStopCount <= 100) return false;
   if (cluster.stops.length <= maxPartitionSize) return false;
   if (maxPartitionSize < 70) return true;
   if (totalStopCount >= 501) return true;
