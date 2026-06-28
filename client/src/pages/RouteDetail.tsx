@@ -66,6 +66,8 @@ const RouteMap = lazy(() => import("@/components/RouteMap"));
 
 type DeliveryState = DeliveryProgressState;
 
+type StopResultTrigger = "current_stop" | "proximity_alert" | "stop_list";
+
 type Stop = {
   id?: number;
   address: string;
@@ -1156,11 +1158,36 @@ export default function RouteDetail() {
 
   const handleStopResultAtIndex = async (
     stopIndex: number,
-    result: "delivered" | "failed"
+    result: "delivered" | "failed",
+    trigger: StopResultTrigger = "current_stop"
   ) => {
     const targetStop = stops[stopIndex];
     if (!targetStop) return;
     const previousDeliveryState = getDeliverySnapshot(deliveryState);
+    const previousHandled = new Set([
+      ...deliveryState.delivered,
+      ...deliveryState.failed,
+    ]);
+    const expectedSequenceIndex = stops.findIndex(
+      (_, index) => !previousHandled.has(index)
+    );
+    const expectedSequenceStop =
+      expectedSequenceIndex >= 0 ? stops[expectedSequenceIndex] : null;
+    const isOutOfSequenceConfirmation =
+      expectedSequenceIndex >= 0 && stopIndex !== expectedSequenceIndex;
+    const skippedPendingIndexes = isOutOfSequenceConfirmation
+      ? stops
+          .map((_, index) => index)
+          .filter(
+            index =>
+              index < stopIndex &&
+              !previousHandled.has(index) &&
+              index !== stopIndex
+          )
+      : [];
+    const expectedSequenceLabel = expectedSequenceStop
+      ? getStopDisplayLabel(expectedSequenceStop, expectedSequenceIndex)
+      : undefined;
 
     const delivered = Array.from(
       new Set([
@@ -1294,6 +1321,17 @@ export default function RouteDetail() {
         locationIntegrity,
         remoteConfirmation: isRemoteConfirmation,
         remoteConfirmationThresholdKm: REMOTE_CONFIRMATION_ALERT_KM,
+        actionTrigger: trigger,
+        sequenceIntegrity: isOutOfSequenceConfirmation
+          ? "out_of_sequence"
+          : "saved_sequence",
+        expectedSequenceIndex,
+        expectedSequenceStopId: expectedSequenceStop?.id,
+        expectedSequenceStopPackage: expectedSequenceLabel,
+        expectedSequenceAddress: expectedSequenceStop?.address,
+        skippedPendingCount: skippedPendingIndexes.length,
+        skippedPendingIndexesPreview: skippedPendingIndexes.slice(0, 12),
+        skippedPendingIndexesTruncated: skippedPendingIndexes.length > 12,
         firstPendingIndex,
         nearestPendingIndex,
         nextIndex,
@@ -1353,6 +1391,35 @@ export default function RouteDetail() {
           locationIntegrity,
           remoteConfirmation: true,
           remoteConfirmationThresholdKm: REMOTE_CONFIRMATION_ALERT_KM,
+          driverLatitude: roundCoordinate(currentPosition?.latitude),
+          driverLongitude: roundCoordinate(currentPosition?.longitude),
+        },
+      });
+    }
+
+    if (isOutOfSequenceConfirmation) {
+      reportRouteExecutionEvent({
+        type: "route_stop_out_of_sequence_confirmed",
+        severity: isRemoteConfirmation ? "error" : "warning",
+        title: "Parada confirmada fora da sequência",
+        message: `Parada ${getStopDisplayLabel(targetStop, stopIndex)} marcada antes da parada pendente ${expectedSequenceLabel ?? expectedSequenceIndex + 1}.`,
+        stopId: targetStop.id,
+        metadata: {
+          result,
+          actionTrigger: trigger,
+          confirmedStopIndex: stopIndex,
+          confirmedStopPackage: getStopDisplayLabel(targetStop, stopIndex),
+          confirmedStopAddress: targetStop.address,
+          expectedSequenceIndex,
+          expectedSequenceStopId: expectedSequenceStop?.id,
+          expectedSequenceStopPackage: expectedSequenceLabel,
+          expectedSequenceAddress: expectedSequenceStop?.address,
+          skippedPendingCount: skippedPendingIndexes.length,
+          skippedPendingIndexesPreview: skippedPendingIndexes.slice(0, 12),
+          skippedPendingIndexesTruncated: skippedPendingIndexes.length > 12,
+          locationIntegrity,
+          remoteConfirmation: isRemoteConfirmation,
+          distanceFromExpectedStopKm: distanceRounded,
           driverLatitude: roundCoordinate(currentPosition?.latitude),
           driverLongitude: roundCoordinate(currentPosition?.longitude),
         },
@@ -1421,7 +1488,13 @@ export default function RouteDetail() {
       }
       if (isRemoteConfirmation) {
         toast.warning(
-          `Entrega registrada com alerta: GPS a ${distanceRounded} km da parada ${getStopDisplayLabel(targetStop, stopIndex)}.`
+          `Entrega registrada com alerta: GPS a ${distanceRounded} km da parada ${getStopDisplayLabel(targetStop, stopIndex)}.${isOutOfSequenceConfirmation ? ` Fora da sequência esperada: ${expectedSequenceLabel}.` : ""}`
+        );
+        return;
+      }
+      if (isOutOfSequenceConfirmation) {
+        toast.warning(
+          `Entrega registrada fora da sequência salva. Esperada agora: ${expectedSequenceLabel}.`
         );
         return;
       }
@@ -1437,6 +1510,13 @@ export default function RouteDetail() {
       );
     }
 
+    if (isOutOfSequenceConfirmation) {
+      toast.warning(
+        `Falha registrada fora da sequência salva. Esperada agora: ${expectedSequenceLabel}.`
+      );
+      return;
+    }
+
     toast.warning(
       `Falha registrada para parada ${getStopDisplayLabel(targetStop, stopIndex)}.`
     );
@@ -1444,12 +1524,20 @@ export default function RouteDetail() {
 
   const handleDelivered = async () => {
     if (!currentStop) return;
-    await handleStopResultAtIndex(deliveryState.currentIndex, "delivered");
+    await handleStopResultAtIndex(
+      deliveryState.currentIndex,
+      "delivered",
+      "current_stop"
+    );
   };
 
   const handleNotDelivered = async () => {
     if (!currentStop) return;
-    await handleStopResultAtIndex(deliveryState.currentIndex, "failed");
+    await handleStopResultAtIndex(
+      deliveryState.currentIndex,
+      "failed",
+      "current_stop"
+    );
   };
 
   const handleUndoLastAction = async () => {
@@ -2450,7 +2538,8 @@ export default function RouteDetail() {
                             onClick={() => {
                               void handleStopResultAtIndex(
                                 activeProximityAlert.stopIndex,
-                                "delivered"
+                                "delivered",
+                                "proximity_alert"
                               );
                             }}
                             disabled={updateRouteMutation.isPending}
@@ -2928,7 +3017,8 @@ export default function RouteDetail() {
                                 onClick={() =>
                                   void handleStopResultAtIndex(
                                     index,
-                                    "delivered"
+                                    "delivered",
+                                    "stop_list"
                                   )
                                 }
                                 disabled={updateRouteMutation.isPending}
@@ -2942,7 +3032,11 @@ export default function RouteDetail() {
                                 variant="destructive"
                                 className="gap-2"
                                 onClick={() =>
-                                  void handleStopResultAtIndex(index, "failed")
+                                  void handleStopResultAtIndex(
+                                    index,
+                                    "failed",
+                                    "stop_list"
+                                  )
                                 }
                                 disabled={updateRouteMutation.isPending}
                               >
