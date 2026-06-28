@@ -53,6 +53,32 @@ type RoadMatrix = {
   durationsMinutes: MatrixValue;
 };
 
+function readPositiveIntegerEnv(name: string, fallback: number) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function isPublicOsrmProvider() {
+  try {
+    return new URL(ENV.osrmBaseUrl).hostname.toLowerCase() === "router.project-osrm.org";
+  } catch {
+    return false;
+  }
+}
+
+function getRoadMatrixMaxNodes() {
+  return readPositiveIntegerEnv(
+    "OSRM_MAX_TABLE_NODES",
+    isPublicOsrmProvider() ? 50 : 100
+  );
+}
+
+function getRoadMatrixPartitionSize(options: RouteOptimizationOptions = {}) {
+  if (options.maxPartitionSize) return options.maxPartitionSize;
+  const maxDeliveryNodes = Math.max(10, getRoadMatrixMaxNodes() - 2);
+  return Math.min(ROAD_MATRIX_PARTITION_SIZE, maxDeliveryNodes);
+}
+
 type LocalitySettings = {
   immediateRadius: number;
   immediateExtraThreshold: number;
@@ -272,6 +298,12 @@ async function fetchRoadMatrix(
       provider,
     });
   };
+
+  const maxTableNodes = getRoadMatrixMaxNodes();
+  if (nodes.length > maxTableNodes) {
+    record(false, "matrix_too_large_for_provider");
+    return null;
+  }
 
   const { matrixHash, clusterHash } = buildMatrixHashes(nodes);
   const shouldUseMatrixCache = process.env.VITEST !== "true";
@@ -775,9 +807,10 @@ async function optimizePartitionedRouteWithRoadMetrics(
   mode: RouteMode,
   options: RouteOptimizationOptions = {}
 ): Promise<OptimizedRoute | null> {
+  const maxPartitionSize = getRoadMatrixPartitionSize(options);
   const partitions = partitionStopsForOptimization(locations, {
     ...options,
-    maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE,
+    maxPartitionSize,
   });
 
   if (partitions.length <= 1) return null;
@@ -838,7 +871,7 @@ async function optimizePartitionedRouteWithRoadMetrics(
     metadata: {
       partitioned: true,
       partitionCount: partitions.length,
-      maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE,
+      maxPartitionSize,
       largestPartitionSize,
     },
   };
@@ -873,7 +906,7 @@ export async function optimizeRouteWithRoadMetrics(
     options.partitionLargeRoutes !== false && locations.length > 100
       ? partitionStopsForOptimization(locations, {
           ...options,
-          maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE,
+          maxPartitionSize: getRoadMatrixPartitionSize(options),
         })
       : [];
   if (

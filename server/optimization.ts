@@ -470,6 +470,7 @@ function shouldMicrocluster(
   maxPartitionSize: number
 ) {
   if (cluster.stops.length <= maxPartitionSize) return false;
+  if (maxPartitionSize < 70) return true;
   if (totalStopCount >= 501) return true;
   if (totalStopCount >= 201) return true;
 
