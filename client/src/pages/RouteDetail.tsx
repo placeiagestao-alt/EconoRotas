@@ -120,6 +120,7 @@ const EMPTY_ROUTE_POINT: RoutePoint = {
   longitude: 0,
 };
 const FAR_FROM_STOP_ALERT_KM = 0.5;
+const REMOTE_CONFIRMATION_ALERT_KM = 2;
 const SEQUENCE_INCOHERENCE_ALERT_KM = 0.45;
 const AUTO_SELECT_NEARBY_STOP_RADIUS_KM = 0.12;
 const AUTO_SELECT_NEARBY_STOP_EXTRA_KM = 0.05;
@@ -1252,11 +1253,30 @@ export default function RouteDetail() {
       typeof sequenceGapKm === "number"
         ? Number(sequenceGapKm.toFixed(3))
         : undefined;
+    const isFarFromExpectedStop =
+      typeof distanceFromExpectedStopKm === "number" &&
+      distanceFromExpectedStopKm > FAR_FROM_STOP_ALERT_KM;
+    const isRemoteConfirmation =
+      result === "delivered" &&
+      typeof distanceFromExpectedStopKm === "number" &&
+      distanceFromExpectedStopKm > REMOTE_CONFIRMATION_ALERT_KM;
+    const locationIntegrity =
+      typeof distanceFromExpectedStopKm !== "number"
+        ? "gps_unavailable"
+        : isRemoteConfirmation
+          ? "remote_confirmation"
+          : isFarFromExpectedStop
+            ? "far_from_stop"
+            : "gps_consistent";
 
     reportRouteExecutionEvent({
       type:
         result === "delivered" ? "route_stop_delivered" : "route_stop_failed",
-      severity: result === "delivered" ? "info" : "warning",
+      severity: isRemoteConfirmation
+        ? "warning"
+        : result === "delivered"
+          ? "info"
+          : "warning",
       title:
         result === "delivered"
           ? "Parada marcada como entregue"
@@ -1271,6 +1291,9 @@ export default function RouteDetail() {
         stopLatitude: roundCoordinate(targetStop.latitude),
         stopLongitude: roundCoordinate(targetStop.longitude),
         distanceFromExpectedStopKm: distanceRounded,
+        locationIntegrity,
+        remoteConfirmation: isRemoteConfirmation,
+        remoteConfirmationThresholdKm: REMOTE_CONFIRMATION_ALERT_KM,
         firstPendingIndex,
         nearestPendingIndex,
         nextIndex,
@@ -1294,13 +1317,10 @@ export default function RouteDetail() {
       },
     });
 
-    if (
-      typeof distanceFromExpectedStopKm === "number" &&
-      distanceFromExpectedStopKm > FAR_FROM_STOP_ALERT_KM
-    ) {
+    if (isFarFromExpectedStop) {
       reportRouteExecutionEvent({
         type: "route_stop_far_from_driver",
-        severity: "warning",
+        severity: isRemoteConfirmation ? "error" : "warning",
         title: "Motorista longe da parada marcada",
         message: `Parada ${getStopDisplayLabel(targetStop, stopIndex)} marcada a ${distanceRounded} km do GPS.`,
         stopId: targetStop.id,
@@ -1309,6 +1329,30 @@ export default function RouteDetail() {
           stopPackage: getStopDisplayLabel(targetStop, stopIndex),
           stopAddress: targetStop.address,
           distanceFromExpectedStopKm: distanceRounded,
+          locationIntegrity,
+          remoteConfirmation: isRemoteConfirmation,
+          remoteConfirmationThresholdKm: REMOTE_CONFIRMATION_ALERT_KM,
+          driverLatitude: roundCoordinate(currentPosition?.latitude),
+          driverLongitude: roundCoordinate(currentPosition?.longitude),
+        },
+      });
+    }
+
+    if (isRemoteConfirmation) {
+      reportRouteExecutionEvent({
+        type: "route_stop_remote_confirmation",
+        severity: "error",
+        title: "Entrega marcada longe do local",
+        message: `Parada ${getStopDisplayLabel(targetStop, stopIndex)} foi marcada entregue a ${distanceRounded} km do GPS.`,
+        stopId: targetStop.id,
+        metadata: {
+          stopIndex,
+          stopPackage: getStopDisplayLabel(targetStop, stopIndex),
+          stopAddress: targetStop.address,
+          distanceFromExpectedStopKm: distanceRounded,
+          locationIntegrity,
+          remoteConfirmation: true,
+          remoteConfirmationThresholdKm: REMOTE_CONFIRMATION_ALERT_KM,
           driverLatitude: roundCoordinate(currentPosition?.latitude),
           driverLongitude: roundCoordinate(currentPosition?.longitude),
         },
@@ -1374,6 +1418,12 @@ export default function RouteDetail() {
         toast.warning(
           `Próxima parada ajustada para ${getStopDisplayLabel(nextStop, nextIndex)} por proximidade.`
         );
+      }
+      if (isRemoteConfirmation) {
+        toast.warning(
+          `Entrega registrada com alerta: GPS a ${distanceRounded} km da parada ${getStopDisplayLabel(targetStop, stopIndex)}.`
+        );
+        return;
       }
       toast.success(
         `Entrega registrada para parada ${getStopDisplayLabel(targetStop, stopIndex)}.`
