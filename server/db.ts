@@ -655,10 +655,15 @@ function readNonNegativeIntegerEnv(name: string, fallback: number) {
 }
 
 function readDatabaseConnectionLimit() {
-  return readPositiveIntegerEnv(
+  const configured = readPositiveIntegerEnv(
     "DB_CONNECTION_LIMIT",
     ENV.isProduction ? 2 : 5
   );
+  const max = readPositiveIntegerEnv(
+    "DB_MAX_CONNECTION_LIMIT",
+    ENV.isProduction ? 2 : configured
+  );
+  return ENV.isProduction ? Math.min(configured, max) : configured;
 }
 
 function getMysqlDriverUrl(databaseUrl: string) {
