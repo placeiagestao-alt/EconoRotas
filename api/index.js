@@ -6871,6 +6871,7 @@ function chunkStops(cluster, maxPartitionSize, nextClusterId) {
 }
 function shouldMicrocluster(cluster, totalStopCount, maxPartitionSize) {
   if (cluster.stops.length <= maxPartitionSize) return false;
+  if (maxPartitionSize < 70) return true;
   if (totalStopCount >= 501) return true;
   if (totalStopCount >= 201) return true;
   if (totalStopCount >= 101) {
@@ -7288,6 +7289,28 @@ init_env();
 init_db();
 import { createHash as createHash4 } from "node:crypto";
 var ROAD_MATRIX_PARTITION_SIZE = 70;
+function readPositiveIntegerEnv2(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+function isPublicOsrmProvider() {
+  try {
+    return new URL(ENV.osrmBaseUrl).hostname.toLowerCase() === "router.project-osrm.org";
+  } catch {
+    return false;
+  }
+}
+function getRoadMatrixMaxNodes() {
+  return readPositiveIntegerEnv2(
+    "OSRM_MAX_TABLE_NODES",
+    isPublicOsrmProvider() ? 50 : 100
+  );
+}
+function getRoadMatrixPartitionSize(options = {}) {
+  if (options.maxPartitionSize) return options.maxPartitionSize;
+  const maxDeliveryNodes = Math.max(10, getRoadMatrixMaxNodes() - 2);
+  return Math.min(ROAD_MATRIX_PARTITION_SIZE, maxDeliveryNodes);
+}
 function getLocalitySettings2(localityMode = "local") {
   if (localityMode === "strict") {
     return {
@@ -7421,6 +7444,11 @@ async function fetchRoadMatrix(locations, options = {}) {
       provider
     });
   };
+  const maxTableNodes = getRoadMatrixMaxNodes();
+  if (nodes.length > maxTableNodes) {
+    record(false, "matrix_too_large_for_provider");
+    return null;
+  }
   const { matrixHash, clusterHash } = buildMatrixHashes(nodes);
   const shouldUseMatrixCache = process.env.VITEST !== "true";
   const cached = shouldUseMatrixCache ? await getOsrmMatrixCache(matrixHash).catch(() => null) : null;
@@ -7772,9 +7800,10 @@ function chooseNextPartition(partitions, currentLocation) {
   return bestIndex;
 }
 async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options = {}) {
+  const maxPartitionSize = getRoadMatrixPartitionSize(options);
   const partitions = partitionStopsForOptimization(locations, {
     ...options,
-    maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE
+    maxPartitionSize
   });
   if (partitions.length <= 1) return null;
   const remaining = [...partitions];
@@ -7827,7 +7856,7 @@ async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options 
     metadata: {
       partitioned: true,
       partitionCount: partitions.length,
-      maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE,
+      maxPartitionSize,
       largestPartitionSize
     }
   };
@@ -7846,7 +7875,7 @@ async function buildSequentialRouteWithRoadMetrics(locations, options = {}) {
 async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startIndex = 0, options = {}) {
   const partitions = options.partitionLargeRoutes !== false && locations.length > 100 ? partitionStopsForOptimization(locations, {
     ...options,
-    maxPartitionSize: options.maxPartitionSize ?? ROAD_MATRIX_PARTITION_SIZE
+    maxPartitionSize: getRoadMatrixPartitionSize(options)
   }) : [];
   if (options.partitionLargeRoutes !== false && locations.length > 100 && partitions.length > 1) {
     return optimizePartitionedRouteWithRoadMetrics(locations, mode, options);
@@ -7970,6 +7999,13 @@ var ROUTE_QUALITY_PENALTIES = {
   long_jump: 8,
   missing_driver_origin: 8
 };
+var ROUTE_QUALITY_PENALTY_CAPS = {
+  duplicate_coordinates: 30,
+  long_jump: 24,
+  first_stop_far: 10,
+  osrm_fallback: 10,
+  route_crossing: 0
+};
 function roundKm(value) {
   return Math.round(value * 100) / 100;
 }
@@ -8031,6 +8067,20 @@ function getRouteQuality(score) {
   if (score >= 80) return "good";
   if (score >= 65) return "attention";
   return "poor";
+}
+function calculateRouteQualityScore(issues) {
+  const penaltiesByType = /* @__PURE__ */ new Map();
+  for (const issue of issues) {
+    const penalty = ROUTE_QUALITY_PENALTIES[issue.type] ?? 10;
+    const current = penaltiesByType.get(issue.type) ?? 0;
+    const cap = ROUTE_QUALITY_PENALTY_CAPS[issue.type] ?? Infinity;
+    penaltiesByType.set(issue.type, Math.min(cap, current + penalty));
+  }
+  const penaltyTotal = Array.from(penaltiesByType.values()).reduce(
+    (total, penalty) => total + penalty,
+    0
+  );
+  return Math.max(0, 100 - penaltyTotal);
 }
 function orientation(a, b, c) {
   const value = (b.longitude - a.longitude) * (c.latitude - a.latitude) - (b.latitude - a.latitude) * (c.longitude - a.longitude);
@@ -8407,13 +8457,7 @@ function auditRouteSequence(stops2, options = {}) {
   }
   const finalCriticalCount = issues.filter((issue) => issue.severity === "critical").length;
   const finalWarningCount = issues.filter((issue) => issue.severity !== "critical").length;
-  const score = Math.max(
-    0,
-    100 - issues.reduce(
-      (total, issue) => total + (ROUTE_QUALITY_PENALTIES[issue.type] ?? 10),
-      0
-    )
-  );
+  const score = calculateRouteQualityScore(issues);
   return {
     status: getReportStatus(finalCriticalCount, finalWarningCount),
     score,

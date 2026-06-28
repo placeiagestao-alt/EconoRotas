@@ -103,6 +103,13 @@ const ROUTE_QUALITY_PENALTIES: Partial<Record<RouteAuditIssue["type"], number>> 
   long_jump: 8,
   missing_driver_origin: 8,
 };
+const ROUTE_QUALITY_PENALTY_CAPS: Partial<Record<RouteAuditIssue["type"], number>> = {
+  duplicate_coordinates: 30,
+  long_jump: 24,
+  first_stop_far: 10,
+  osrm_fallback: 10,
+  route_crossing: 0,
+};
 
 function roundKm(value: number) {
   return Math.round(value * 100) / 100;
@@ -195,6 +202,23 @@ function getRouteQuality(score: number): RouteAuditReport["quality"] {
   if (score >= 80) return "good";
   if (score >= 65) return "attention";
   return "poor";
+}
+
+function calculateRouteQualityScore(issues: RouteAuditIssue[]) {
+  const penaltiesByType = new Map<RouteAuditIssue["type"], number>();
+
+  for (const issue of issues) {
+    const penalty = ROUTE_QUALITY_PENALTIES[issue.type] ?? 10;
+    const current = penaltiesByType.get(issue.type) ?? 0;
+    const cap = ROUTE_QUALITY_PENALTY_CAPS[issue.type] ?? Infinity;
+    penaltiesByType.set(issue.type, Math.min(cap, current + penalty));
+  }
+
+  const penaltyTotal = Array.from(penaltiesByType.values()).reduce(
+    (total, penalty) => total + penalty,
+    0
+  );
+  return Math.max(0, 100 - penaltyTotal);
 }
 
 function orientation(a: Location, b: Location, c: Location) {
@@ -693,14 +717,7 @@ export function auditRouteSequence(
 
   const finalCriticalCount = issues.filter((issue) => issue.severity === "critical").length;
   const finalWarningCount = issues.filter((issue) => issue.severity !== "critical").length;
-  const score = Math.max(
-    0,
-    100 -
-      issues.reduce(
-        (total, issue) => total + (ROUTE_QUALITY_PENALTIES[issue.type] ?? 10),
-        0
-      )
-  );
+  const score = calculateRouteQualityScore(issues);
 
   return {
     status: getReportStatus(finalCriticalCount, finalWarningCount),

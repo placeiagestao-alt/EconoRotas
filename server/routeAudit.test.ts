@@ -78,6 +78,25 @@ describe("Route auditor", () => {
     ).toBe(true);
   });
 
+  it("caps repeated duplicate-coordinate penalties", () => {
+    const stops: AuditableStop[] = Array.from({ length: 12 }, (_, index) => {
+      const group = Math.floor(index / 2);
+      return {
+        latitude: -22.12 + group * 0.0001,
+        longitude: -51.4 + group * 0.0001,
+        address: `Rua duplicada ${group}, numero ${index}`,
+        sequence: index,
+      };
+    });
+
+    const report = auditRouteSequence(stops);
+
+    expect(
+      report.issues.filter((issue) => issue.type === "duplicate_coordinates")
+    ).toHaveLength(6);
+    expect(report.score).toBe(70);
+  });
+
   it("approves a compact route without skipped nearby stops", () => {
     const report = auditRouteSequence([
       {
