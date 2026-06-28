@@ -28,6 +28,20 @@ function severityVariant(severity: string) {
   return "outline";
 }
 
+function severityBadgeClass(severity: string) {
+  switch (severity) {
+    case "fatal":
+      return "border-purple-700 bg-purple-700 text-white hover:bg-purple-700 dark:bg-purple-700 dark:text-white";
+    case "error":
+      return "border-red-600 bg-red-600 text-white hover:bg-red-600 dark:bg-red-600 dark:text-white";
+    case "warning":
+      return "border-amber-500 bg-amber-100 text-amber-950 hover:bg-amber-100 dark:bg-amber-100 dark:text-amber-950";
+    case "info":
+    default:
+      return "border-sky-500 bg-sky-100 text-sky-950 hover:bg-sky-100 dark:bg-sky-100 dark:text-sky-950";
+  }
+}
+
 function readinessVariant(status: string) {
   if (status === "READY") return "outline";
   if (status === "NO-GO" || status === "NO_GO") return "destructive";
@@ -524,7 +538,7 @@ export default function Operations() {
                       ([key, item]: [string, any]) => (
                         <div
                           key={key}
-                          className="rounded-lg border border-border/70 bg-background/80 p-3 text-sm"
+                          className="rounded-lg border border-border/70 bg-white p-3 text-sm text-slate-950 dark:bg-white dark:text-slate-950"
                         >
                           <div className="flex items-center justify-between gap-2">
                             <p className="font-medium">
@@ -858,11 +872,14 @@ export default function Operations() {
                         >
                           <div className="flex items-center justify-between gap-2">
                             <p className="font-medium">{alert.title}</p>
-                            <Badge variant={severityVariant(alert.severity)}>
+                            <Badge
+                              variant={severityVariant(alert.severity)}
+                              className={severityBadgeClass(alert.severity)}
+                            >
                               {alert.severityLabel ?? alert.severity}
                             </Badge>
                           </div>
-                          <p className="mt-1 text-muted-foreground">{alert.message}</p>
+                          <p className="mt-1 text-slate-700">{alert.message}</p>
                         </div>
                       ))}
                     </div>
@@ -1614,7 +1631,10 @@ export default function Operations() {
                     className="rounded-lg border border-border/80 bg-white p-3 text-slate-950 dark:bg-white dark:text-slate-950"
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant={severityVariant(event.severity) as any}>
+                      <Badge
+                        variant={severityVariant(event.severity) as any}
+                        className={severityBadgeClass(event.severity)}
+                      >
                         {event.severity}
                       </Badge>
                       <span className="text-sm font-medium text-slate-950">{event.title}</span>
