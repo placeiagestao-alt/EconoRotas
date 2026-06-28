@@ -202,8 +202,17 @@ function normalizeText(value: string) {
     .trim();
 }
 
-function getStatusLabel(status?: string) {
-  switch (status) {
+function getStatusLabel(status?: string, operationalStatus?: string, operationalLabel?: string) {
+  if (operationalLabel) return operationalLabel;
+  switch (operationalStatus || status) {
+    case "shopee_stop_sequence":
+      return "Sequência STOP Shopee";
+    case "attention_strong":
+      return "Atenção forte";
+    case "optimized_attention":
+      return "Otimizada com atenção";
+    case "queued":
+      return "Na fila de otimização";
     case "optimized":
       return "Otimizada";
     case "completed":
@@ -1886,12 +1895,17 @@ export default function RouteDetail() {
               </h1>
               <Badge
                 variant={
-                  routeQuery.data?.status === "completed"
+                  routeQuery.data?.status === "completed" ||
+                  (routeQuery.data as any)?.operationalStatus === "optimized"
                     ? "default"
                     : "outline"
                 }
               >
-                {getStatusLabel(routeQuery.data?.status)}
+                {getStatusLabel(
+                  routeQuery.data?.status,
+                  (routeQuery.data as any)?.operationalStatus,
+                  (routeQuery.data as any)?.operationalStatusLabel
+                )}
               </Badge>
             </div>
           </div>

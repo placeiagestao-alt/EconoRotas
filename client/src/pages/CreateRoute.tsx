@@ -57,7 +57,7 @@ type ImileCapturePlugin = {
 };
 
 const ImileCapture = registerPlugin<ImileCapturePlugin>("ImileCapture");
-const MAX_ROUTE_STOPS = 150;
+const MAX_ROUTE_STOPS = 160;
 const IMPORT_SOURCE_OPTIONS: Array<{ value: StopSourceProvider; label: string }> = [
   { value: "generic", label: "Genérico" },
   { value: "shopee", label: "Shopee" },

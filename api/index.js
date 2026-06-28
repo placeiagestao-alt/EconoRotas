@@ -523,11 +523,16 @@ function readPositiveInt(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
 }
-var hasConfiguredCookieSecret, ENV;
+function readAtLeastOptimizedRouteStopLimit(value) {
+  const parsed = readPositiveInt(value, OPTIMIZED_ROUTE_STOP_LIMIT);
+  return Math.max(parsed, OPTIMIZED_ROUTE_STOP_LIMIT);
+}
+var hasConfiguredCookieSecret, OPTIMIZED_ROUTE_STOP_LIMIT, ENV;
 var init_env = __esm({
   "server/_core/env.ts"() {
     "use strict";
     hasConfiguredCookieSecret = Boolean(process.env.JWT_SECRET);
+    OPTIMIZED_ROUTE_STOP_LIMIT = 160;
     ENV = {
       appId: readEnvString(process.env.VITE_APP_ID),
       cookieSecret: readEnvString(process.env.JWT_SECRET),
@@ -577,11 +582,17 @@ var init_env = __esm({
       osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3e3),
       osrmRequired: process.env.OSRM_REQUIRED === "true",
       osrmRequiredMinStops: readPositiveInt(process.env.OSRM_REQUIRED_MIN_STOPS, 101),
-      maxSyncStops: readPositiveInt(process.env.MAX_SYNC_STOPS, 250),
-      maxRouteStops: Math.min(readPositiveInt(process.env.MAX_ROUTE_STOPS, 150), 150),
-      maxGeographicFallbackStops: readPositiveInt(
-        process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS,
-        100
+      maxSyncStops: Math.min(
+        readAtLeastOptimizedRouteStopLimit(process.env.MAX_SYNC_STOPS),
+        OPTIMIZED_ROUTE_STOP_LIMIT
+      ),
+      maxRouteStops: Math.min(
+        readAtLeastOptimizedRouteStopLimit(process.env.MAX_ROUTE_STOPS),
+        OPTIMIZED_ROUTE_STOP_LIMIT
+      ),
+      maxGeographicFallbackStops: Math.min(
+        readAtLeastOptimizedRouteStopLimit(process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS),
+        OPTIMIZED_ROUTE_STOP_LIMIT
       ),
       bullmqRedisUrl: firstEnvString(
         process.env.BULLMQ_REDIS_URL,
@@ -9511,6 +9522,55 @@ var STRUCTURAL_AUDIT_ISSUE_TYPES = /* @__PURE__ */ new Set([
 function getRoutingStrategy(auditPolicy) {
   return auditPolicy === SHOPEE_STOP_AUDIT_POLICY ? ROUTING_STRATEGY_SHOPEE_STOP : ROUTING_STRATEGY_OPTIMIZED;
 }
+function getRouteOperationalOutcome(audit, auditPolicy, options = {}) {
+  const routingStrategy = getRoutingStrategy(auditPolicy ?? null);
+  const structuralAuditOnly = auditPolicy === SHOPEE_STOP_AUDIT_POLICY;
+  const coherenceAuditSkipped = structuralAuditOnly;
+  const remainingCoherenceIssues = audit ? countRemainingCoherenceIssues(audit) : 0;
+  const nearbyStopSkippedCount = audit ? countAuditIssues(audit, "nearby_stop_skipped") : 0;
+  const status = structuralAuditOnly ? "shopee_stop_sequence" : audit?.status === "critical" ? "blocked" : remainingCoherenceIssues > 0 || nearbyStopSkippedCount > 0 ? "attention_strong" : audit?.status === "attention" ? "optimized_attention" : "optimized";
+  return {
+    status,
+    label: status === "shopee_stop_sequence" ? "Sequencia STOP Shopee" : status === "attention_strong" ? "Atencao forte" : status === "optimized_attention" ? "Otimizada com atencao" : status === "blocked" ? "Bloqueada pelo fiscal" : "Otimizada",
+    routingStrategy,
+    structuralAuditOnly,
+    coherenceAuditSkipped,
+    remainingCoherenceIssues,
+    nearbyStopSkippedCount,
+    routeCrossingCount: audit ? countAuditIssues(audit, "route_crossing") : 0,
+    auditStatus: audit?.status ?? null,
+    auditScore: audit?.score ?? null,
+    auditIssueCount: audit?.issueCount ?? null,
+    usedRoadMetrics: options.usedRoadMetrics ?? null,
+    commerciallySatisfactory: status === "optimized" || status === "optimized_attention",
+    sequenceCoherenceVerified: !coherenceAuditSkipped && remainingCoherenceIssues === 0
+  };
+}
+function getRouteOperationalOutcomeFromMetadata(route, metadata) {
+  const operationalStatus = readStringMetadata(metadata, "operationalStatus");
+  const operationalLabel = readStringMetadata(metadata, "operationalStatusLabel");
+  const routingStrategy = readStringMetadata(metadata, "routingStrategy");
+  if (operationalStatus || routingStrategy) {
+    return {
+      operationalStatus: operationalStatus ?? (routingStrategy === ROUTING_STRATEGY_SHOPEE_STOP ? "shopee_stop_sequence" : route.status === "optimized" ? "optimized" : route.status ?? "draft"),
+      operationalStatusLabel: operationalLabel ?? (routingStrategy === ROUTING_STRATEGY_SHOPEE_STOP ? "Sequencia STOP Shopee" : void 0),
+      routingStrategy: routingStrategy ?? null,
+      structuralAuditOnly: readBooleanMetadata(metadata, "structuralAuditOnly") ?? false,
+      coherenceAuditSkipped: readBooleanMetadata(metadata, "coherenceAuditSkipped") ?? false,
+      commerciallySatisfactory: readBooleanMetadata(metadata, "commerciallySatisfactory") ?? null,
+      sequenceCoherenceVerified: readBooleanMetadata(metadata, "sequenceCoherenceVerified") ?? null
+    };
+  }
+  return {
+    operationalStatus: route.status ?? "draft",
+    operationalStatusLabel: void 0,
+    routingStrategy: null,
+    structuralAuditOnly: false,
+    coherenceAuditSkipped: false,
+    commerciallySatisfactory: null,
+    sequenceCoherenceVerified: null
+  };
+}
 var imileCredentialInput = z2.object({
   label: z2.string().max(255).optional(),
   baseUrl: z2.string().url().optional().or(z2.literal("")),
@@ -9965,6 +10025,94 @@ function applyAuditPlan(route, audit) {
     }
   };
 }
+function shouldPreferLocalNearbyStop(nearestDistance, plannedDistance) {
+  if (!Number.isFinite(nearestDistance) || !Number.isFinite(plannedDistance)) {
+    return false;
+  }
+  if (nearestDistance >= plannedDistance) return false;
+  const gapKm = plannedDistance - nearestDistance;
+  if (nearestDistance <= 0.25 && gapKm >= 0.05) return true;
+  if (nearestDistance <= 0.8 && gapKm >= 0.2 && plannedDistance >= nearestDistance * 1.75) {
+    return true;
+  }
+  if (nearestDistance <= 1.5 && gapKm >= 0.6) return true;
+  return false;
+}
+function removeWaypointAt(waypoints, waypoint) {
+  const index2 = waypoints.indexOf(waypoint);
+  if (index2 >= 0) {
+    waypoints.splice(index2, 1);
+    return true;
+  }
+  return false;
+}
+function takeSameAddressOrCoordinateStops(remainingWaypoints, anchor) {
+  const anchorAddressKey = getStopAddressGroupKey(anchor.address);
+  const grouped = remainingWaypoints.filter((candidate) => {
+    const candidateAddressKey = getStopAddressGroupKey(candidate.address);
+    if (anchorAddressKey && candidateAddressKey === anchorAddressKey) return true;
+    return calculateDistance(anchor, candidate) <= 0.03;
+  }).sort((a, b) => calculateDistance(anchor, a) - calculateDistance(anchor, b));
+  for (const waypoint of grouped) {
+    removeWaypointAt(remainingWaypoints, waypoint);
+  }
+  return grouped;
+}
+function buildLocalCoherenceSweepLocations(route, options = {}) {
+  const remainingWaypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
+  const orderedWaypoints = [];
+  let currentLocation = options.startLocation ?? remainingWaypoints[0];
+  while (remainingWaypoints.length > 0) {
+    const plannedNext = remainingWaypoints[0];
+    let nearest = plannedNext;
+    let nearestDistance = calculateDistance(currentLocation, plannedNext);
+    for (const candidate of remainingWaypoints) {
+      const distance = calculateDistance(currentLocation, candidate);
+      if (distance < nearestDistance) {
+        nearest = candidate;
+        nearestDistance = distance;
+      }
+    }
+    const plannedDistance = calculateDistance(currentLocation, plannedNext);
+    const selected = options.forceNearest || shouldPreferLocalNearbyStop(nearestDistance, plannedDistance) ? nearest : plannedNext;
+    removeWaypointAt(remainingWaypoints, selected);
+    orderedWaypoints.push(selected);
+    const sameStopGroup = takeSameAddressOrCoordinateStops(
+      remainingWaypoints,
+      selected
+    );
+    orderedWaypoints.push(...sameStopGroup);
+    currentLocation = orderedWaypoints[orderedWaypoints.length - 1] ?? selected;
+  }
+  const originalSignature = route.waypoints.map((waypoint) => `${waypoint.latitude}:${waypoint.longitude}:${waypoint.address ?? ""}`).join("|");
+  const localSignature = orderedWaypoints.map((waypoint) => `${waypoint.latitude}:${waypoint.longitude}:${waypoint.address ?? ""}`).join("|");
+  if (originalSignature === localSignature) return null;
+  return routeWaypointsToLocations(orderedWaypoints);
+}
+function isAuditAttemptBetter(current, candidate) {
+  const currentCrossings = countAuditIssues(current.audit, "route_crossing");
+  const candidateCrossings = countAuditIssues(candidate.audit, "route_crossing");
+  if (candidateCrossings > currentCrossings) {
+    return false;
+  }
+  if (candidate.audit.issueCount > current.audit.issueCount) {
+    return false;
+  }
+  const currentRemaining = countRemainingCoherenceIssues(current.audit);
+  const candidateRemaining = countRemainingCoherenceIssues(candidate.audit);
+  if (candidateRemaining !== currentRemaining) {
+    return candidateRemaining < currentRemaining;
+  }
+  const currentNearby = countAuditIssues(current.audit, "nearby_stop_skipped");
+  const candidateNearby = countAuditIssues(candidate.audit, "nearby_stop_skipped");
+  if (candidateNearby !== currentNearby) {
+    return candidateNearby < currentNearby;
+  }
+  if (candidate.audit.score !== current.audit.score) {
+    return candidate.audit.score > current.audit.score;
+  }
+  return candidate.optimized.totalDistance < current.optimized.totalDistance;
+}
 function removeRouteCrossings(route) {
   const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
   let changed = false;
@@ -10316,7 +10464,12 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         audit: null,
         auditSource: "queued",
         auditPolicy,
-        routingStrategy: getRoutingStrategy(auditPolicy)
+        routingStrategy: getRoutingStrategy(auditPolicy),
+        operationalStatus: "queued",
+        operationalStatusLabel: "Na fila de otimizacao",
+        commerciallySatisfactory: false,
+        sequenceCoherenceVerified: false,
+        remainingCoherenceIssues: null
       };
     }
     throw new TRPCError3({
@@ -10744,6 +10897,162 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     }
     runtimeBreakdown.correctionMs += Date.now() - correctionStartedAt;
   }
+  if (!preserveShopeeStopSequence && countRemainingCoherenceIssues(optimizationAttempt.audit) > 0) {
+    const localSweepStartedAt = Date.now();
+    const maxLocalSweepPasses = 3;
+    for (let sweepAttempt = 0; sweepAttempt < maxLocalSweepPasses; sweepAttempt += 1) {
+      const localSweepLocations = buildLocalCoherenceSweepLocations(
+        optimizationAttempt.optimized,
+        { startLocation }
+      );
+      if (!localSweepLocations) break;
+      const localSweepAttempt = await buildOptimizationAttempt({
+        localityMode: "strict",
+        respectInputSequence: false,
+        auditSourceSuffix: `local-sweep-${sweepAttempt + 1}`,
+        orderedLocations: localSweepLocations
+      });
+      const remainingBefore = countRemainingCoherenceIssues(optimizationAttempt.audit);
+      const remainingAfter = countRemainingCoherenceIssues(localSweepAttempt.audit);
+      await createOperationalEvent({
+        userId,
+        routeId,
+        stopId: null,
+        type: "audit_local_sweep_applied",
+        severity: isAuditAttemptBetter(optimizationAttempt, localSweepAttempt) ? "info" : "warning",
+        source: "routes.audit",
+        title: "Varredura local de coerencia aplicada",
+        message: `Fiscal aplicou varredura local ${sweepAttempt + 1}: ${remainingBefore} incoerencia(s) antes, ${remainingAfter} depois.`,
+        runtime: null,
+        url: null,
+        userAgent: null,
+        appVersion: null,
+        metadata: {
+          sweepAttempt: sweepAttempt + 1,
+          auditSource: localSweepAttempt.auditSource,
+          before: {
+            score: optimizationAttempt.audit.score,
+            issueCount: optimizationAttempt.audit.issueCount,
+            remainingCoherenceIssues: remainingBefore,
+            nearbyStopSkippedCount: countAuditIssues(
+              optimizationAttempt.audit,
+              "nearby_stop_skipped"
+            )
+          },
+          after: {
+            score: localSweepAttempt.audit.score,
+            issueCount: localSweepAttempt.audit.issueCount,
+            remainingCoherenceIssues: remainingAfter,
+            nearbyStopSkippedCount: countAuditIssues(
+              localSweepAttempt.audit,
+              "nearby_stop_skipped"
+            )
+          }
+        }
+      }).catch((error) => {
+        console.warn("[Routes] Failed to record audit local sweep event:", error);
+      });
+      if (!isAuditAttemptBetter(optimizationAttempt, localSweepAttempt)) break;
+      const localSweepIssue = postOptimizationBlockingReason?.issue ?? optimizationAttempt.audit.issues.find(isSequenceCoherenceIssue);
+      if (localSweepIssue) {
+        correctionAttempts.push({
+          blockingIssue: localSweepIssue,
+          auditSource: localSweepAttempt.auditSource,
+          status: localSweepAttempt.audit.status,
+          score: localSweepAttempt.audit.score,
+          issueCount: localSweepAttempt.audit.issueCount
+        });
+      }
+      optimizationAttempt = localSweepAttempt;
+      postOptimizationBlockingReason = getPostOptimizationBlockingReason(
+        optimizationAttempt.audit
+      );
+      if (remainingAfter === 0) break;
+    }
+    if (countRemainingCoherenceIssues(optimizationAttempt.audit) > 0) {
+      const forcedSweepLocations = buildLocalCoherenceSweepLocations(
+        optimizationAttempt.optimized,
+        { startLocation, forceNearest: true }
+      );
+      if (forcedSweepLocations) {
+        const forcedSweepAttempt = await buildOptimizationAttempt({
+          localityMode: "strict",
+          respectInputSequence: false,
+          auditSourceSuffix: "forced-nearest-sweep",
+          orderedLocations: forcedSweepLocations
+        });
+        const remainingBefore = countRemainingCoherenceIssues(optimizationAttempt.audit);
+        const remainingAfter = countRemainingCoherenceIssues(forcedSweepAttempt.audit);
+        const forcedSweepIsBetter = isAuditAttemptBetter(
+          optimizationAttempt,
+          forcedSweepAttempt
+        );
+        await createOperationalEvent({
+          userId,
+          routeId,
+          stopId: null,
+          type: "audit_forced_nearest_sweep",
+          severity: forcedSweepIsBetter ? "info" : "warning",
+          source: "routes.audit",
+          title: "Varredura final por proximidade avaliada",
+          message: forcedSweepIsBetter ? `Fiscal aceitou varredura final: ${remainingBefore} incoerencia(s) antes, ${remainingAfter} depois.` : `Fiscal rejeitou varredura final: ${remainingBefore} incoerencia(s) antes, ${remainingAfter} depois.`,
+          runtime: null,
+          url: null,
+          userAgent: null,
+          appVersion: null,
+          metadata: {
+            auditSource: forcedSweepAttempt.auditSource,
+            accepted: forcedSweepIsBetter,
+            before: {
+              score: optimizationAttempt.audit.score,
+              issueCount: optimizationAttempt.audit.issueCount,
+              remainingCoherenceIssues: remainingBefore,
+              nearbyStopSkippedCount: countAuditIssues(
+                optimizationAttempt.audit,
+                "nearby_stop_skipped"
+              ),
+              routeCrossingCount: countAuditIssues(
+                optimizationAttempt.audit,
+                "route_crossing"
+              )
+            },
+            after: {
+              score: forcedSweepAttempt.audit.score,
+              issueCount: forcedSweepAttempt.audit.issueCount,
+              remainingCoherenceIssues: remainingAfter,
+              nearbyStopSkippedCount: countAuditIssues(
+                forcedSweepAttempt.audit,
+                "nearby_stop_skipped"
+              ),
+              routeCrossingCount: countAuditIssues(
+                forcedSweepAttempt.audit,
+                "route_crossing"
+              )
+            }
+          }
+        }).catch((error) => {
+          console.warn("[Routes] Failed to record forced nearest sweep event:", error);
+        });
+        if (forcedSweepIsBetter) {
+          const forcedSweepIssue = postOptimizationBlockingReason?.issue ?? optimizationAttempt.audit.issues.find(isSequenceCoherenceIssue);
+          if (forcedSweepIssue) {
+            correctionAttempts.push({
+              blockingIssue: forcedSweepIssue,
+              auditSource: forcedSweepAttempt.auditSource,
+              status: forcedSweepAttempt.audit.status,
+              score: forcedSweepAttempt.audit.score,
+              issueCount: forcedSweepAttempt.audit.issueCount
+            });
+          }
+          optimizationAttempt = forcedSweepAttempt;
+          postOptimizationBlockingReason = getPostOptimizationBlockingReason(
+            optimizationAttempt.audit
+          );
+        }
+      }
+    }
+    runtimeBreakdown.correctionMs += Date.now() - localSweepStartedAt;
+  }
   if (correctionAttempts.length > 0 && firstBlockingReason) {
     await createOperationalEvent({
       userId,
@@ -10801,6 +11110,33 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       }
     }).catch((error) => {
       console.warn("[Routes] Failed to record final attention event:", error);
+    });
+  }
+  const finalOperationalOutcome = getRouteOperationalOutcome(
+    optimizationAttempt.audit,
+    optimizationAttempt.auditPolicy,
+    { usedRoadMetrics: optimizationAttempt.usedRoadMetrics }
+  );
+  if (finalOperationalOutcome.status === "attention_strong") {
+    await createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "route_optimization_attention_strong",
+      severity: "warning",
+      source: "routes.audit",
+      title: "Otimizacao finalizada com atencao forte",
+      message: "A rota foi salva, mas ainda possui incoerencia de sequencia. Nao trate como resultado comercialmente satisfatorio.",
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        ...finalOperationalOutcome,
+        finalIssues: optimizationAttempt.audit.issues.slice(0, 12)
+      }
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record strong attention event:", error);
     });
   }
   async function recordRouteMetricForAttempt(blockedReason) {
@@ -10877,7 +11213,12 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         auditPolicy: optimizationAttempt.auditPolicy,
         routingStrategy: getRoutingStrategy(optimizationAttempt.auditPolicy),
         structuralAuditOnly: optimizationAttempt.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
-        coherenceAuditSkipped: optimizationAttempt.auditPolicy === SHOPEE_STOP_AUDIT_POLICY
+        coherenceAuditSkipped: optimizationAttempt.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+        operationalStatus: finalOperationalOutcome.status,
+        operationalStatusLabel: finalOperationalOutcome.label,
+        commerciallySatisfactory: finalOperationalOutcome.commerciallySatisfactory,
+        sequenceCoherenceVerified: finalOperationalOutcome.sequenceCoherenceVerified,
+        remainingCoherenceIssues: finalOperationalOutcome.remainingCoherenceIssues
       }
     }).catch((error) => {
       console.warn("[Routes] Failed to record route metric:", error);
@@ -10985,7 +11326,12 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     audit,
     auditSource,
     auditPolicy: optimizationAttempt.auditPolicy,
-    routingStrategy: getRoutingStrategy(optimizationAttempt.auditPolicy)
+    routingStrategy: getRoutingStrategy(optimizationAttempt.auditPolicy),
+    operationalStatus: finalOperationalOutcome.status,
+    operationalStatusLabel: finalOperationalOutcome.label,
+    commerciallySatisfactory: finalOperationalOutcome.commerciallySatisfactory,
+    sequenceCoherenceVerified: finalOperationalOutcome.sequenceCoherenceVerified,
+    remainingCoherenceIssues: finalOperationalOutcome.remainingCoherenceIssues
   };
 }
 var credentialsSchema = z2.object({
@@ -11402,12 +11748,41 @@ var appRouter = router({
     })
   }),
   routes: router({
-    list: protectedProcedure.query(
-      ({ ctx }) => getUserRoutes(ctx.user.id)
-    ),
-    get: protectedProcedure.input(z2.object({ id: z2.number() })).query(
-      ({ ctx, input }) => getRouteById(input.id, ctx.user.id)
-    ),
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const routes2 = await getUserRoutes(ctx.user.id);
+      return Promise.all(
+        routes2.map(async (route) => {
+          const latestOptimizationEvent = await getLatestRouteOptimizationEvent(
+            route.id,
+            ctx.user.id
+          );
+          const latestMetadata = isLatestOptimizationContextFresh(
+            route,
+            latestOptimizationEvent
+          ) ? latestOptimizationEvent?.metadata : void 0;
+          return {
+            ...route,
+            ...getRouteOperationalOutcomeFromMetadata(route, latestMetadata)
+          };
+        })
+      );
+    }),
+    get: protectedProcedure.input(z2.object({ id: z2.number() })).query(async ({ ctx, input }) => {
+      const route = await getRouteById(input.id, ctx.user.id);
+      if (!route) return null;
+      const latestOptimizationEvent = await getLatestRouteOptimizationEvent(
+        input.id,
+        ctx.user.id
+      );
+      const latestMetadata = isLatestOptimizationContextFresh(
+        route,
+        latestOptimizationEvent
+      ) ? latestOptimizationEvent?.metadata : void 0;
+      return {
+        ...route,
+        ...getRouteOperationalOutcomeFromMetadata(route, latestMetadata)
+      };
+    }),
     audit: protectedProcedure.input(z2.object({ id: z2.number() })).query(async ({ ctx, input }) => {
       const route = await requireUserRoute(input.id, ctx.user.id);
       const routeStops = await getRouteStops(input.id);
@@ -11452,6 +11827,9 @@ var appRouter = router({
         ),
         auditPolicy
       );
+      const operationalOutcome = getRouteOperationalOutcome(report, auditPolicy, {
+        usedRoadMetrics
+      });
       return {
         ...report,
         context: {
@@ -11463,6 +11841,11 @@ var appRouter = router({
           routingStrategy: getRoutingStrategy(auditPolicy),
           structuralAuditOnly: auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
           coherenceAuditSkipped: auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+          operationalStatus: operationalOutcome.status,
+          operationalStatusLabel: operationalOutcome.label,
+          commerciallySatisfactory: operationalOutcome.commerciallySatisfactory,
+          sequenceCoherenceVerified: operationalOutcome.sequenceCoherenceVerified,
+          remainingCoherenceIssues: operationalOutcome.remainingCoherenceIssues,
           lastOptimizationEventId: latestOptimizationEvent?.id ?? null,
           staleOptimizationContext: !hasFreshOptimizationContext && Boolean(latestOptimizationEvent)
         }
@@ -11508,9 +11891,9 @@ var appRouter = router({
         const updatedRoute = await getRouteById(route.id, ctx.user.id);
         await recordOperationalEvent(ctx.user.id, {
           type: "route_optimized",
-          severity: "info",
+          severity: optimized.commerciallySatisfactory ? "info" : "warning",
           source: "routes.createAndOptimize",
-          title: "Rota criada e otimizada",
+          title: optimized.operationalStatusLabel ?? "Rota criada e otimizada",
           routeId: route.id,
           message: route.name,
           metadata: {
@@ -11528,7 +11911,12 @@ var appRouter = router({
             auditPolicy: optimized.auditPolicy ?? null,
             routingStrategy: getRoutingStrategy(optimized.auditPolicy ?? null),
             structuralAuditOnly: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
-            coherenceAuditSkipped: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY
+            coherenceAuditSkipped: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+            operationalStatus: optimized.operationalStatus,
+            operationalStatusLabel: optimized.operationalStatusLabel,
+            commerciallySatisfactory: optimized.commerciallySatisfactory,
+            sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
+            remainingCoherenceIssues: optimized.remainingCoherenceIssues
           }
         });
         await recordRouteAuditEvent(
@@ -11623,7 +12011,7 @@ var appRouter = router({
       });
       await recordOperationalEvent(ctx.user.id, {
         type: input.localityMode === "strict" ? "route_user_requested_better_sequence" : "route_reoptimized",
-        severity: input.localityMode === "strict" ? "warning" : "info",
+        severity: input.localityMode === "strict" || !optimized.commerciallySatisfactory ? "warning" : "info",
         source: "routes.optimize",
         title: input.localityMode === "strict" ? "Usu\xE1rio pediu sequ\xEAncia melhor" : "Rota reotimizada",
         routeId: input.id,
@@ -11643,7 +12031,12 @@ var appRouter = router({
           auditPolicy: optimized.auditPolicy ?? null,
           routingStrategy: getRoutingStrategy(optimized.auditPolicy ?? null),
           structuralAuditOnly: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
-          coherenceAuditSkipped: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY
+          coherenceAuditSkipped: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+          operationalStatus: optimized.operationalStatus,
+          operationalStatusLabel: optimized.operationalStatusLabel,
+          commerciallySatisfactory: optimized.commerciallySatisfactory,
+          sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
+          remainingCoherenceIssues: optimized.remainingCoherenceIssues
         }
       });
       await recordRouteAuditEvent(
@@ -11695,9 +12088,9 @@ var appRouter = router({
       });
       await recordOperationalEvent(ctx.user.id, {
         type: "route_remaining_reoptimized",
-        severity: "info",
+        severity: optimized.commerciallySatisfactory ? "info" : "warning",
         source: "routes.optimizeRemaining",
-        title: "Restantes reotimizadas",
+        title: optimized.operationalStatusLabel ?? "Restantes reotimizadas",
         routeId: input.id,
         metadata: {
           excludedStops: input.excludeStopIds.length,
@@ -11715,7 +12108,12 @@ var appRouter = router({
           auditPolicy: optimized.auditPolicy ?? null,
           routingStrategy: getRoutingStrategy(optimized.auditPolicy ?? null),
           structuralAuditOnly: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
-          coherenceAuditSkipped: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY
+          coherenceAuditSkipped: optimized.auditPolicy === SHOPEE_STOP_AUDIT_POLICY,
+          operationalStatus: optimized.operationalStatus,
+          operationalStatusLabel: optimized.operationalStatusLabel,
+          commerciallySatisfactory: optimized.commerciallySatisfactory,
+          sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
+          remainingCoherenceIssues: optimized.remainingCoherenceIssues
         }
       });
       await recordRouteAuditEvent(

@@ -26,7 +26,7 @@ type AndroidUpdateInfo = {
   publishedAt?: string;
 };
 
-const FALLBACK_APK_PATH = "/downloads/econorotas-v1.0.0.apk?v=20260605-2";
+const FALLBACK_APK_PATH = "/downloads/econorotas-v1.0.0.apk?v=20260627-1";
 const FALLBACK_VERSION = "1.0.0";
 
 function formatDate(value?: string) {

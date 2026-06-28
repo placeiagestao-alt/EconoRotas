@@ -37,6 +37,13 @@ function readPositiveInt(value: string | undefined, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
 }
 
+const OPTIMIZED_ROUTE_STOP_LIMIT = 160;
+
+function readAtLeastOptimizedRouteStopLimit(value: string | undefined) {
+  const parsed = readPositiveInt(value, OPTIMIZED_ROUTE_STOP_LIMIT);
+  return Math.max(parsed, OPTIMIZED_ROUTE_STOP_LIMIT);
+}
+
 export const ENV = {
   appId: readEnvString(process.env.VITE_APP_ID),
   cookieSecret: readEnvString(process.env.JWT_SECRET),
@@ -92,11 +99,17 @@ export const ENV = {
   osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3000),
   osrmRequired: process.env.OSRM_REQUIRED === "true",
   osrmRequiredMinStops: readPositiveInt(process.env.OSRM_REQUIRED_MIN_STOPS, 101),
-  maxSyncStops: readPositiveInt(process.env.MAX_SYNC_STOPS, 250),
-  maxRouteStops: Math.min(readPositiveInt(process.env.MAX_ROUTE_STOPS, 150), 150),
-  maxGeographicFallbackStops: readPositiveInt(
-    process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS,
-    100
+  maxSyncStops: Math.min(
+    readAtLeastOptimizedRouteStopLimit(process.env.MAX_SYNC_STOPS),
+    OPTIMIZED_ROUTE_STOP_LIMIT
+  ),
+  maxRouteStops: Math.min(
+    readAtLeastOptimizedRouteStopLimit(process.env.MAX_ROUTE_STOPS),
+    OPTIMIZED_ROUTE_STOP_LIMIT
+  ),
+  maxGeographicFallbackStops: Math.min(
+    readAtLeastOptimizedRouteStopLimit(process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS),
+    OPTIMIZED_ROUTE_STOP_LIMIT
   ),
   bullmqRedisUrl: firstEnvString(
     process.env.BULLMQ_REDIS_URL,

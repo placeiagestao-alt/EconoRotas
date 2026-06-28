@@ -8,8 +8,17 @@ import { trpc } from "@/lib/trpc";
 import { FileSpreadsheet, MapPin, Navigation, Plus } from "lucide-react";
 import { Link } from "wouter";
 
-function getStatusLabel(status: string) {
-  switch (status) {
+function getStatusLabel(status: string, operationalStatus?: string, operationalLabel?: string) {
+  if (operationalLabel) return operationalLabel;
+  switch (operationalStatus || status) {
+    case "shopee_stop_sequence":
+      return "Sequencia STOP Shopee";
+    case "attention_strong":
+      return "Atencao forte";
+    case "optimized_attention":
+      return "Otimizada com atencao";
+    case "queued":
+      return "Na fila de otimizacao";
     case "optimized":
       return "Otimizada";
     case "completed":
@@ -120,8 +129,19 @@ export default function Routes() {
                       </p>
                     )}
                   </div>
-                  <Badge variant={route.status === "completed" ? "default" : "outline"}>
-                    {getStatusLabel(route.status)}
+                  <Badge
+                    variant={
+                      route.status === "completed" ||
+                      route.operationalStatus === "optimized"
+                        ? "default"
+                        : "outline"
+                    }
+                  >
+                    {getStatusLabel(
+                      route.status,
+                      route.operationalStatus,
+                      route.operationalStatusLabel
+                    )}
                   </Badge>
                 </CardHeader>
                 <CardContent className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">

@@ -872,7 +872,7 @@ export default function Operations() {
                     <div>
                       <p className="text-sm font-medium">Go Live operacional</p>
                       <p className="text-sm text-muted-foreground">
-                        Capacidade comercial limitada a {goLive500.maxRouteStops ?? 150} paradas, 20 usuarios simultaneos e 5 otimizacoes simultaneas.
+                        Capacidade comercial limitada a {goLive500.maxRouteStops ?? 160} paradas, 20 usuarios simultaneos e 5 otimizacoes simultaneas.
                       </p>
                     </div>
                     <Badge variant={readinessVariant(goLive500.verdict)}>
