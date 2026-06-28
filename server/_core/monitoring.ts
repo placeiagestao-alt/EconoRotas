@@ -4,15 +4,13 @@ const MONITOR_DEDUP_WINDOW_MS = 10 * 60 * 1000;
 
 let lastIssueKey = "";
 let lastIssueAt = 0;
-let pendingOutage:
-  | {
-      key: string;
-      firstSeenAt: string;
-      lastSeenAt: string;
-      message: string;
-      metadata: Record<string, unknown>;
-    }
-  | null = null;
+let pendingOutage: {
+  key: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  message: string;
+  metadata: Record<string, unknown>;
+} | null = null;
 
 function getDatabaseState(database: any) {
   if (!database?.configured) return "unconfigured";
@@ -181,16 +179,27 @@ export async function recordHealthObservation(input: {
     message,
   });
 
-  if (issueKey === lastIssueKey && now - lastIssueAt < MONITOR_DEDUP_WINDOW_MS) {
+  if (
+    issueKey === lastIssueKey &&
+    now - lastIssueAt < MONITOR_DEDUP_WINDOW_MS
+  ) {
     return;
   }
 
   lastIssueKey = issueKey;
   lastIssueAt = now;
 
+  if (!input.storageAvailable) {
+    return;
+  }
+
   await persistMonitorEvent({
     type: "system_health_failed",
-    severity: input.storageAvailable ? "error" : input.database?.reachable ? "error" : "fatal",
+    severity: input.storageAvailable
+      ? "error"
+      : input.database?.reachable
+        ? "error"
+        : "fatal",
     title: input.storageAvailable
       ? "OSRM indisponivel"
       : "Armazenamento indisponivel",

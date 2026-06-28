@@ -20,7 +20,10 @@ import { isAdminEmail } from "./adminAccess";
 import { serveStatic } from "./static";
 import { recordHealthObservation } from "./monitoring";
 import { getOsrmHealth } from "../osrm";
-import { getOptimizationQueueHealth, getOptimizationWorkersDashboard } from "../optimizationQueue";
+import {
+  getOptimizationQueueHealth,
+  getOptimizationWorkersDashboard,
+} from "../optimizationQueue";
 import { getMultiVehicleReadinessDashboard } from "../multiVehicleReadiness";
 import {
   ensurePersistentFallbackDbLoaded,
@@ -54,18 +57,28 @@ function getLocalImileCapturePath() {
 }
 
 async function runLocalImileCapture() {
-  const scriptPath = path.resolve(process.cwd(), "scripts", "capture-imile-screen.mjs");
+  const scriptPath = path.resolve(
+    process.cwd(),
+    "scripts",
+    "capture-imile-screen.mjs"
+  );
 
-  await execFileAsync(process.execPath, [scriptPath, "--pages=130", "--delay=700"], {
-    cwd: process.cwd(),
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: 12 * 60 * 1000,
-    windowsHide: true,
-  });
+  await execFileAsync(
+    process.execPath,
+    [scriptPath, "--pages=130", "--delay=700"],
+    {
+      cwd: process.cwd(),
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: 12 * 60 * 1000,
+      windowsHide: true,
+    }
+  );
 
   const capturePath = getLocalImileCapturePath();
   if (!fs.existsSync(capturePath)) {
-    throw new Error("Captura finalizada, mas o XML consolidado nao foi encontrado.");
+    throw new Error(
+      "Captura finalizada, mas o XML consolidado nao foi encontrado."
+    );
   }
 
   return fs.readFileSync(capturePath, "utf8");
@@ -99,11 +112,8 @@ function normalizeOrigin(origin: string) {
 }
 
 function parseAllowedOrigins() {
-  const configuredOrigins = [
-    ENV.publicAppUrl,
-    ...ENV.allowedOrigins.split(","),
-  ]
-    .map((origin) => origin.trim())
+  const configuredOrigins = [ENV.publicAppUrl, ...ENV.allowedOrigins.split(",")]
+    .map(origin => origin.trim())
     .filter(Boolean)
     .map(normalizeOrigin);
 
@@ -117,7 +127,12 @@ function parseAllowedOrigins() {
 }
 
 function normalizeCaptureOwner(value: string | null | undefined) {
-  return value?.trim().toLowerCase().replace(/[^a-z0-9@._+-]+/g, "-") || "";
+  return (
+    value
+      ?.trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9@._+-]+/g, "-") || ""
+  );
 }
 
 function getCaptureKeys(owner: string) {
@@ -163,7 +178,9 @@ function validateProductionEnvironment() {
   }
 
   if (ENV.cookieSecret.length < 32) {
-    throw new Error("JWT_SECRET must have at least 32 characters in production");
+    throw new Error(
+      "JWT_SECRET must have at least 32 characters in production"
+    );
   }
 
   if (process.env.VITE_ENABLE_DEV_LOGIN === "true") {
@@ -229,7 +246,10 @@ async function getStorageHealthSnapshot(source: string) {
   };
 }
 
-async function requireAdminApiRequest(req: express.Request, res: express.Response) {
+async function requireAdminApiRequest(
+  req: express.Request,
+  res: express.Response
+) {
   try {
     const user = await sdk.authenticateRequest(req);
     if (user.role !== "admin" || !isAdminEmail(user.email, ENV.adminEmails)) {
@@ -264,7 +284,10 @@ export function createApp(options: { serveClient?: boolean } = {}): Express {
         "Access-Control-Allow-Headers",
         "Content-Type, Authorization, X-Requested-With, X-Dev-Login"
       );
-      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+      res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+      );
     }
 
     if (req.method === "OPTIONS") {
@@ -283,8 +306,7 @@ export function createApp(options: { serveClient?: boolean } = {}): Express {
     res
       .status(200)
       .type("application/javascript")
-      .setHeader("Cache-Control", "no-store, max-age=0")
-      .send(`
+      .setHeader("Cache-Control", "no-store, max-age=0").send(`
 const key = "econorotas:asset-refresh";
 try {
   const now = Date.now();
@@ -301,55 +323,96 @@ export default function EconoRotasAssetRefresh() { return null; }
 `);
   });
   app.get("/api/health", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, queue, mode } =
-      await getStorageHealthSnapshot("api.health");
+    try {
+      const {
+        database,
+        fallbackStore,
+        storageAvailable,
+        systemAvailable,
+        osrm,
+        queue,
+        mode,
+      } = await getStorageHealthSnapshot("api.health");
 
-    res.status(systemAvailable ? 200 : 500).json({
-      ok: systemAvailable,
-      app: "EconoRota",
-      environment: ENV.isProduction ? "production" : "development",
-      mode,
-      database,
-      fallbackStore,
-      osrm,
-      queue,
-      requiredManagedDatabase: ENV.requireManagedDatabase,
-      warning: ENV.hasInvalidProductionDatabaseUrl
-        ? "DATABASE_URL aponta para host local/Docker e não funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis."
-        : undefined,
-      timestamp: new Date().toISOString(),
-    });
+      res.status(systemAvailable ? 200 : 500).json({
+        ok: systemAvailable,
+        app: "EconoRota",
+        environment: ENV.isProduction ? "production" : "development",
+        mode,
+        database,
+        fallbackStore,
+        osrm,
+        queue,
+        requiredManagedDatabase: ENV.requireManagedDatabase,
+        warning: ENV.hasInvalidProductionDatabaseUrl
+          ? "DATABASE_URL aponta para host local/Docker e não funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis."
+          : undefined,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+        app: "EconoRota",
+        environment: ENV.isProduction ? "production" : "development",
+        mode: "health-error",
+        error: error instanceof Error ? error.message : String(error),
+        requiredManagedDatabase: ENV.requireManagedDatabase,
+        timestamp: new Date().toISOString(),
+      });
+    }
   });
   app.get("/api/monitor/ping", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, queue, mode } =
-      await getStorageHealthSnapshot("api.monitor.ping");
-    let adminDashboardRefresh: { ok: boolean; error?: string } = { ok: false };
-    if (systemAvailable) {
-      try {
-        await refreshAdminDashboardMetrics();
-        adminDashboardRefresh = { ok: true };
-      } catch (error) {
-        adminDashboardRefresh = {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
+    try {
+      const {
+        database,
+        fallbackStore,
+        storageAvailable,
+        systemAvailable,
+        osrm,
+        queue,
+        mode,
+      } = await getStorageHealthSnapshot("api.monitor.ping");
+      let adminDashboardRefresh: { ok: boolean; error?: string } = {
+        ok: false,
+      };
+      if (systemAvailable) {
+        try {
+          await refreshAdminDashboardMetrics();
+          adminDashboardRefresh = { ok: true };
+        } catch (error) {
+          adminDashboardRefresh = {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
       }
-    }
 
-    res.status(systemAvailable ? 200 : 500).json({
-      ok: systemAvailable,
-      monitor: true,
-      app: "EconoRota",
-      environment: ENV.isProduction ? "production" : "development",
-      mode,
-      database,
-      fallbackStore,
-      osrm,
-      queue,
-      adminDashboardRefresh,
-      requiredManagedDatabase: ENV.requireManagedDatabase,
-      timestamp: new Date().toISOString(),
-    });
+      res.status(systemAvailable ? 200 : 500).json({
+        ok: systemAvailable,
+        monitor: true,
+        app: "EconoRota",
+        environment: ENV.isProduction ? "production" : "development",
+        mode,
+        database,
+        fallbackStore,
+        osrm,
+        queue,
+        adminDashboardRefresh,
+        requiredManagedDatabase: ENV.requireManagedDatabase,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+        monitor: true,
+        app: "EconoRota",
+        environment: ENV.isProduction ? "production" : "development",
+        mode: "health-error",
+        error: error instanceof Error ? error.message : String(error),
+        requiredManagedDatabase: ENV.requireManagedDatabase,
+        timestamp: new Date().toISOString(),
+      });
+    }
   });
   app.get("/api/admin/dashboard", async (req, res) => {
     const user = await requireAdminApiRequest(req, res);
@@ -480,7 +543,8 @@ export default function EconoRotasAssetRefresh() { return null; }
 
     if (!fs.existsSync(capturePath)) {
       res.status(404).json({
-        message: "Nenhuma captura iMile encontrada. Rode a captura no Android antes de importar.",
+        message:
+          "Nenhuma captura iMile encontrada. Rode a captura no Android antes de importar.",
       });
       return;
     }
@@ -515,7 +579,10 @@ export default function EconoRotasAssetRefresh() { return null; }
   });
   app.post(
     "/api/imile/capture/latest",
-    express.text({ limit: "15mb", type: ["application/xml", "text/xml", "text/plain", "*/*"] }),
+    express.text({
+      limit: "15mb",
+      type: ["application/xml", "text/xml", "text/plain", "*/*"],
+    }),
     async (req, res) => {
       const uploadToken = req.headers["x-imile-capture-token"];
       const hasValidUploadToken =
@@ -570,7 +637,9 @@ export default function EconoRotasAssetRefresh() { return null; }
 }
 
 export async function startServer() {
-  const app = createApp({ serveClient: process.env.NODE_ENV !== "development" });
+  const app = createApp({
+    serveClient: process.env.NODE_ENV !== "development",
+  });
   const server = createServer(app);
 
   // development mode uses Vite, production mode uses static files

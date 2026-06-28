@@ -964,7 +964,9 @@ async function getGeocodeCache(cacheKey) {
     }
     return null;
   }
-  const rows = await db.select().from(geocodeCache).where(and(eq(geocodeCache.cacheKey, cacheKey), gte(geocodeCache.expiresAt, now))).limit(1);
+  const rows = await db.select().from(geocodeCache).where(
+    and(eq(geocodeCache.cacheKey, cacheKey), gte(geocodeCache.expiresAt, now))
+  ).limit(1);
   const cached = rows[0];
   if (!cached) return null;
   await db.update(geocodeCache).set({ hitCount: sql`${geocodeCache.hitCount} + 1` }).where(eq(geocodeCache.id, cached.id)).catch((error) => {
@@ -1037,13 +1039,17 @@ async function getLocationCommercialCache(data) {
   const lat = normalizeCacheCoordinate(data.latitude);
   const lng = normalizeCacheCoordinate(data.longitude);
   const radius = Math.round(data.radius);
-  const cutoff = new Date(Date.now() - (data.ttlDays ?? 30) * 24 * 60 * 60 * 1e3);
+  const cutoff = new Date(
+    Date.now() - (data.ttlDays ?? 30) * 24 * 60 * 60 * 1e3
+  );
   const db = await getDb();
   if (!db) {
     if (await shouldUseMemoryDb()) {
       const cached2 = [...memory.locationCommercialCache].filter(
         (item) => String(item.lat) === lat && String(item.lng) === lng && Number(item.radius) === radius && new Date(item.createdAt) >= cutoff
-      ).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+      ).sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      )[0];
       if (!cached2) return null;
       return {
         lat: Number(cached2.lat),
@@ -1124,7 +1130,10 @@ async function persistFallbackDb() {
       lastRemoteFallbackError = null;
     } catch (error) {
       lastRemoteFallbackError = error instanceof Error ? error.message : "Erro desconhecido ao persistir fallback.";
-      console.warn("[Database] Failed to persist remote fallback database:", error);
+      console.warn(
+        "[Database] Failed to persist remote fallback database:",
+        error
+      );
       throw error;
     }
   }
@@ -1133,7 +1142,10 @@ async function persistFallbackDb() {
     fs.mkdirSync(LOCAL_DB_DIR, { recursive: true });
     fs.writeFileSync(LOCAL_DB_FILE, JSON.stringify(memory, null, 2));
   } catch (error) {
-    console.warn("[Database] Failed to persist local fallback database:", error);
+    console.warn(
+      "[Database] Failed to persist local fallback database:",
+      error
+    );
   }
 }
 async function shouldUseMemoryDb() {
@@ -1185,6 +1197,12 @@ function readNonNegativeIntegerEnv(name, fallback) {
   const parsed = Number(process.env[name]);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
 }
+function readDatabaseConnectionLimit() {
+  return readPositiveIntegerEnv(
+    "DB_CONNECTION_LIMIT",
+    ENV.isProduction ? 2 : 5
+  );
+}
 function getMysqlDriverUrl(databaseUrl) {
   try {
     const url = new URL(databaseUrl);
@@ -1202,7 +1220,7 @@ function getDatabasePoolOptions(databaseUrl) {
   const poolOptions = {
     uri: getMysqlDriverUrl(databaseUrl),
     waitForConnections: true,
-    connectionLimit: readPositiveIntegerEnv("DB_CONNECTION_LIMIT", 5),
+    connectionLimit: readDatabaseConnectionLimit(),
     queueLimit: readNonNegativeIntegerEnv("DB_QUEUE_LIMIT", 0),
     enableKeepAlive: true,
     keepAliveInitialDelay: 0
@@ -1219,12 +1237,14 @@ function getDatabasePoolOptions(databaseUrl) {
 function createDatabasePool(databaseUrl) {
   return mysql.createPool(getDatabasePoolOptions(databaseUrl));
 }
-async function getDatabaseSchemaHealth() {
+async function readDatabaseSchemaHealth() {
   if (!_pool) {
     return {
       ok: false,
       checkedColumns: REQUIRED_SCHEMA_COLUMNS.length,
-      missing: REQUIRED_SCHEMA_COLUMNS.map(([table, column]) => `${table}.${column}`),
+      missing: REQUIRED_SCHEMA_COLUMNS.map(
+        ([table, column]) => `${table}.${column}`
+      ),
       error: "Pool MySQL indisponivel."
     };
   }
@@ -1241,7 +1261,9 @@ async function getDatabaseSchemaHealth() {
     const existing = new Set(
       rows.map((row) => `${String(row.tableName)}.${String(row.columnName)}`)
     );
-    const missing = REQUIRED_SCHEMA_COLUMNS.map(([table, column]) => `${table}.${column}`).filter((key) => !existing.has(key));
+    const missing = REQUIRED_SCHEMA_COLUMNS.map(
+      ([table, column]) => `${table}.${column}`
+    ).filter((key) => !existing.has(key));
     return {
       ok: missing.length === 0,
       checkedColumns: REQUIRED_SCHEMA_COLUMNS.length,
@@ -1252,10 +1274,24 @@ async function getDatabaseSchemaHealth() {
     return {
       ok: false,
       checkedColumns: REQUIRED_SCHEMA_COLUMNS.length,
-      missing: REQUIRED_SCHEMA_COLUMNS.map(([table, column]) => `${table}.${column}`),
+      missing: REQUIRED_SCHEMA_COLUMNS.map(
+        ([table, column]) => `${table}.${column}`
+      ),
       error: error instanceof Error ? error.message : "Erro desconhecido ao validar schema."
     };
   }
+}
+async function getDatabaseSchemaHealth() {
+  const now = Date.now();
+  if (_schemaHealthCache && now - _schemaHealthCache.checkedAt < DB_SCHEMA_HEALTH_CACHE_MS) {
+    return _schemaHealthCache.value;
+  }
+  const value = await readDatabaseSchemaHealth();
+  _schemaHealthCache = {
+    checkedAt: now,
+    value
+  };
+  return value;
 }
 function sortByDateDesc(items, field) {
   return [...items].sort(
@@ -1278,22 +1314,37 @@ async function getDb() {
     return null;
   }
   const now = Date.now();
-  if (!ENV.isProduction && now - _lastDbConnectAttempt < DB_CONNECT_RETRY_MS) {
+  if (now - _lastDbConnectAttempt < DB_CONNECT_RETRY_MS) {
     return null;
   }
+  if (_dbConnectPromise) return _dbConnectPromise;
   _lastDbConnectAttempt = now;
-  try {
-    _pool = _pool ?? createDatabasePool(process.env.DATABASE_URL);
-    await _pool.query("SELECT 1");
-    _db = drizzle(_pool);
-    _lastDbConnectionError = null;
-  } catch (error) {
-    console.warn("[Database] Failed to connect:", error);
-    _lastDbConnectionError = error instanceof Error ? error.message : "Erro desconhecido ao conectar.";
-    _db = null;
-    _pool = null;
-  }
-  return _db;
+  _dbConnectPromise = (async () => {
+    const pool = _pool ?? createDatabasePool(process.env.DATABASE_URL);
+    _pool = pool;
+    try {
+      await pool.query("SELECT 1");
+      _db = drizzle(pool);
+      _lastDbConnectionError = null;
+      _schemaHealthCache = null;
+      return _db;
+    } catch (error) {
+      console.warn("[Database] Failed to connect:", error);
+      _lastDbConnectionError = error instanceof Error ? error.message : "Erro desconhecido ao conectar.";
+      _db = null;
+      _schemaHealthCache = null;
+      if (_pool === pool) _pool = null;
+      try {
+        await pool.end();
+      } catch (closeError) {
+        console.warn("[Database] Failed to close unhealthy pool:", closeError);
+      }
+      return null;
+    } finally {
+      _dbConnectPromise = null;
+    }
+  })();
+  return _dbConnectPromise;
 }
 async function getDatabaseHealth() {
   const configured = Boolean(process.env.DATABASE_URL);
@@ -1314,7 +1365,7 @@ async function getDatabaseHealth() {
     connected: Boolean(db) && Boolean(schema?.ok),
     ssl: shouldUseDatabaseSsl(process.env.DATABASE_URL || ""),
     pool: {
-      connectionLimit: readPositiveIntegerEnv("DB_CONNECTION_LIMIT", 5),
+      connectionLimit: readDatabaseConnectionLimit(),
       queueLimit: readNonNegativeIntegerEnv("DB_QUEUE_LIMIT", 0),
       lifecycle: "mysql2-native"
     },
@@ -1598,7 +1649,12 @@ async function upsertUserIntegration(userId, provider, data) {
     }
     requireConfiguredDatabase();
   }
-  const existing = await db.select().from(userIntegrations).where(and(eq(userIntegrations.userId, userId), eq(userIntegrations.provider, provider))).limit(1);
+  const existing = await db.select().from(userIntegrations).where(
+    and(
+      eq(userIntegrations.userId, userId),
+      eq(userIntegrations.provider, provider)
+    )
+  ).limit(1);
   const values = {
     ...data,
     userId,
@@ -1628,7 +1684,12 @@ async function deleteUserIntegration(userId, provider) {
     }
     requireConfiguredDatabase();
   }
-  await db.update(userIntegrations).set({ isActive: false }).where(and(eq(userIntegrations.userId, userId), eq(userIntegrations.provider, provider)));
+  await db.update(userIntegrations).set({ isActive: false }).where(
+    and(
+      eq(userIntegrations.userId, userId),
+      eq(userIntegrations.provider, provider)
+    )
+  );
 }
 async function createRoute(userId, data) {
   const db = await getDb();
@@ -1772,7 +1833,10 @@ async function createStops(routeId, stopsData) {
           isUnsequencedStop: Boolean(stop.isUnsequencedStop),
           metadata: Object.keys(metadata).length ? metadata : null,
           commercialDetectionStatus: stop.commercialDetectionStatus ?? "unknown",
-          commercialConfidence: Math.max(0, Math.min(100, Number(stop.commercialConfidence ?? 0))),
+          commercialConfidence: Math.max(
+            0,
+            Math.min(100, Number(stop.commercialConfidence ?? 0))
+          ),
           commercialPlaceName: stop.commercialPlaceName ?? null,
           commercialCategory: stop.commercialCategory ?? null,
           commercialOpeningHours: stop.commercialOpeningHours ?? null,
@@ -1809,7 +1873,10 @@ async function createStops(routeId, stopsData) {
       isUnsequencedStop: Boolean(s.isUnsequencedStop),
       metadata: Object.keys(metadata).length ? metadata : null,
       commercialDetectionStatus: s.commercialDetectionStatus ?? "unknown",
-      commercialConfidence: Math.max(0, Math.min(100, Number(s.commercialConfidence ?? 0))),
+      commercialConfidence: Math.max(
+        0,
+        Math.min(100, Number(s.commercialConfidence ?? 0))
+      ),
       commercialPlaceName: s.commercialPlaceName ?? null,
       commercialCategory: s.commercialCategory ?? null,
       commercialOpeningHours: s.commercialOpeningHours ?? null,
@@ -1947,7 +2014,9 @@ async function getScheduleById(scheduleId, userId) {
     }
     requireConfiguredDatabase();
   }
-  const result = await db.select().from(routeSchedules).where(and(eq(routeSchedules.id, scheduleId), eq(routeSchedules.userId, userId))).limit(1);
+  const result = await db.select().from(routeSchedules).where(
+    and(eq(routeSchedules.id, scheduleId), eq(routeSchedules.userId, userId))
+  ).limit(1);
   return result.length > 0 ? result[0] : null;
 }
 async function getUserSchedules(userId) {
@@ -1978,7 +2047,9 @@ async function updateSchedule(scheduleId, userId, data) {
     }
     requireConfiguredDatabase();
   }
-  await db.update(routeSchedules).set(data).where(and(eq(routeSchedules.id, scheduleId), eq(routeSchedules.userId, userId)));
+  await db.update(routeSchedules).set(data).where(
+    and(eq(routeSchedules.id, scheduleId), eq(routeSchedules.userId, userId))
+  );
 }
 async function createHistory(userId, data) {
   const db = await getDb();
@@ -2024,7 +2095,9 @@ async function getUserRouteHistory(userId, limit = 50, offset = 0) {
     if (await shouldUseMemoryDb()) {
       return sortByDateDesc(
         memory.routeHistory.filter((history) => history.userId === userId).map((history) => {
-          const route = memory.routes.find((item) => item.id === history.routeId);
+          const route = memory.routes.find(
+            (item) => item.id === history.routeId
+          );
           return {
             ...history,
             routeName: route?.name ?? null
@@ -2065,7 +2138,9 @@ async function getRouteHistory(routeId, userId) {
     }
     requireConfiguredDatabase();
   }
-  return db.select().from(routeHistory).where(and(eq(routeHistory.routeId, routeId), eq(routeHistory.userId, userId))).orderBy(desc(routeHistory.executedDate));
+  return db.select().from(routeHistory).where(
+    and(eq(routeHistory.routeId, routeId), eq(routeHistory.userId, userId))
+  ).orderBy(desc(routeHistory.executedDate));
 }
 async function updateHistory(historyId, userId, data) {
   const db = await getDb();
@@ -2086,14 +2161,18 @@ async function updateHistory(historyId, userId, data) {
     requireConfiguredDatabase();
   }
   const updateData = {};
-  if (data.actualDistance !== void 0) updateData.actualDistance = String(data.actualDistance);
+  if (data.actualDistance !== void 0)
+    updateData.actualDistance = String(data.actualDistance);
   if (data.actualTime !== void 0) updateData.actualTime = data.actualTime;
   if (data.status !== void 0) updateData.status = data.status;
   if (data.notes !== void 0) updateData.notes = data.notes;
   if (data.exportedAt !== void 0) updateData.exportedAt = data.exportedAt;
-  if (data.exportFormat !== void 0) updateData.exportFormat = data.exportFormat;
+  if (data.exportFormat !== void 0)
+    updateData.exportFormat = data.exportFormat;
   if (data.storageKey !== void 0) updateData.storageKey = data.storageKey;
-  await db.update(routeHistory).set(updateData).where(and(eq(routeHistory.id, historyId), eq(routeHistory.userId, userId)));
+  await db.update(routeHistory).set(updateData).where(
+    and(eq(routeHistory.id, historyId), eq(routeHistory.userId, userId))
+  );
 }
 async function addChatMessage(userId, data) {
   const db = await getDb();
@@ -2298,7 +2377,9 @@ function hashAddress(value) {
 function extractCityFromAddress(address) {
   const parts = address.split(",").map((part) => part.trim()).filter(Boolean);
   if (parts.length >= 2) {
-    const stateLike = parts.findIndex((part) => /\bSP\b|\bSao Paulo\b/i.test(part));
+    const stateLike = parts.findIndex(
+      (part) => /\bSP\b|\bSao Paulo\b/i.test(part)
+    );
     if (stateLike > 0) return parts[stateLike - 1].slice(0, 128);
     return parts[Math.max(0, parts.length - 2)].slice(0, 128);
   }
@@ -2418,7 +2499,12 @@ async function getQueueIntegrityDashboard(days = 30) {
       const runningJobs2 = memory.optimizationJobs.filter(
         (job) => job.status === "running"
       );
-      return buildQueueIntegrityDashboard(events2, failedJobs2, runningJobs2, safeDays);
+      return buildQueueIntegrityDashboard(
+        events2,
+        failedJobs2,
+        runningJobs2,
+        safeDays
+      );
     }
     requireConfiguredDatabase();
   }
@@ -2455,7 +2541,10 @@ async function getQueueIntegrityDashboard(days = 30) {
     `,
     [cutoffDate]
   );
-  const averageRuntimeMs = Math.max(6e4, Number(runtimeRows[0]?.averageRuntimeMs || 0));
+  const averageRuntimeMs = Math.max(
+    6e4,
+    Number(runtimeRows[0]?.averageRuntimeMs || 0)
+  );
   const [runningJobs] = await _pool.query(
     `
       SELECT id, route_id AS routeId, user_id AS userId, worker_id AS workerId,
@@ -2468,7 +2557,10 @@ async function getQueueIntegrityDashboard(days = 30) {
       LIMIT 200
     `
   );
-  const runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs);
+  const runningAlerts = buildLongRunningJobAlerts(
+    runningJobs,
+    averageRuntimeMs
+  );
   await persistLongRunningJobAlerts(runningAlerts);
   return buildQueueIntegrityDashboard(
     events,
@@ -2488,7 +2580,9 @@ function buildLongRunningJobAlerts(runningJobs, averageRuntimeMs) {
   return runningJobs.map((job) => {
     const runningMs = Number(job.runningMs || 0) || Math.max(
       0,
-      Date.now() - new Date(job.startedAt || job.started_at || job.createdAt || Date.now()).getTime()
+      Date.now() - new Date(
+        job.startedAt || job.started_at || job.createdAt || Date.now()
+      ).getTime()
     );
     const severity = runningMs > criticalThresholdMs ? "critical" : runningMs > warningThresholdMs ? "warning" : null;
     if (!severity) return null;
@@ -2536,7 +2630,10 @@ function parseOptionalDate(value) {
 }
 function dateAgeHours(date) {
   if (!date) return null;
-  return Math.max(0, Math.round((Date.now() - date.getTime()) / 36e5 * 10) / 10);
+  return Math.max(
+    0,
+    Math.round((Date.now() - date.getTime()) / 36e5 * 10) / 10
+  );
 }
 async function hasRecentDisasterReadinessEvent(type, title, minutes = 360) {
   const db = await getDb();
@@ -2662,7 +2759,9 @@ async function getDisasterReadinessDashboard() {
   const envRestoreAt = parseOptionalDate(ENV.restoreTestLastPassedAt);
   const eventRestoreAt = parseOptionalDate(restorePassedEvent?.createdAt);
   const restoreTestAt = envRestoreAt ?? eventRestoreAt;
-  const restoreTestPassed = ENV.restoreTestPassed || Boolean(restoreTestAt && (!restoreFailedEvent || restoreTestAt >= new Date(restoreFailedEvent.createdAt)));
+  const restoreTestPassed = ENV.restoreTestPassed || Boolean(
+    restoreTestAt && (!restoreFailedEvent || restoreTestAt >= new Date(restoreFailedEvent.createdAt))
+  );
   const criticalTables = await getCriticalTableReadiness();
   const tableErrors = criticalTables.filter((table) => table.status !== "ok");
   const alerts = [];
@@ -2701,7 +2800,10 @@ async function getDisasterReadinessDashboard() {
       severityLabel: "critical",
       title: "Falha de backup registrada",
       message: "A ultima evidencia de backup indica falha.",
-      metadata: { backupStatus, backupFailedAt: backupFailedEvent?.createdAt ?? null }
+      metadata: {
+        backupStatus,
+        backupFailedAt: backupFailedEvent?.createdAt ?? null
+      }
     });
   }
   if (!restoreTestPassed) {
@@ -2711,7 +2813,10 @@ async function getDisasterReadinessDashboard() {
       severityLabel: "warning",
       title: "Restore test nao aprovado",
       message: "Nenhuma evidencia de teste de restore aprovado foi encontrada.",
-      metadata: { rtoTargetHours, restoreTestAt: restoreTestAt?.toISOString() ?? null }
+      metadata: {
+        rtoTargetHours,
+        restoreTestAt: restoreTestAt?.toISOString() ?? null
+      }
     });
   }
   for (const table of tableErrors) {
@@ -2780,11 +2885,20 @@ async function persistLongRunningJobAlerts(alerts) {
 }
 function buildQueueIntegrityDashboard(events, failedJobs, runningJobs, days, averageRuntimeMs = 6e4, runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs)) {
   const duplicateJobs = countEventsByType(events, "duplicate_job_detected");
-  const jobRecoveredAfterCrash = countEventsByType(events, "job_recovered_after_crash");
-  const workerCrashRecovered = countEventsByType(events, "worker_crash_recovered");
+  const jobRecoveredAfterCrash = countEventsByType(
+    events,
+    "job_recovered_after_crash"
+  );
+  const workerCrashRecovered = countEventsByType(
+    events,
+    "worker_crash_recovered"
+  );
   const stalledCount = countEventsByType(events, "optimization_job_stalled");
   const stalledRecoveredCount = jobRecoveredAfterCrash;
-  const redisReconnectCount = countEventsByType(events, "redis_reconnect_detected");
+  const redisReconnectCount = countEventsByType(
+    events,
+    "redis_reconnect_detected"
+  );
   const failedRecoveries = failedJobs.filter((job) => {
     const attemptCount = Number(job.attemptCount ?? job.attempt_count ?? 0);
     const maxAttempts = Number(job.maxAttempts ?? job.max_attempts ?? 3);
@@ -2969,24 +3083,42 @@ function roundMetric(value, digits = 1) {
 }
 function buildPerformanceBenchmarkDashboard(rows, days, tableAvailable = true) {
   const scenarioTargets = [250, 500, 1e3, 2e3].map((stopCount) => {
-    const values = rows.filter((row) => Number(row.stopCount ?? row.stop_count) === stopCount);
-    const runtimes = values.map((row) => Number(row.runtimeMs ?? row.runtime_ms ?? 0));
+    const values = rows.filter(
+      (row) => Number(row.stopCount ?? row.stop_count) === stopCount
+    );
+    const runtimes = values.map(
+      (row) => Number(row.runtimeMs ?? row.runtime_ms ?? 0)
+    );
     const latest = values.slice().sort(
       (a, b) => new Date(b.createdAt ?? b.created_at ?? 0).getTime() - new Date(a.createdAt ?? a.created_at ?? 0).getTime()
     )[0];
-    const latestRuntimeMs = Number(latest?.runtimeMs ?? latest?.runtime_ms ?? 0);
+    const latestRuntimeMs = Number(
+      latest?.runtimeMs ?? latest?.runtime_ms ?? 0
+    );
     const targetMs = PERFORMANCE_BENCHMARK_TARGETS[stopCount];
-    const latestCriteriaMet = Boolean(latest?.criteriaMet ?? latest?.criteria_met ?? false);
+    const latestCriteriaMet = Boolean(
+      latest?.criteriaMet ?? latest?.criteria_met ?? false
+    );
     return {
       stopCount,
       targetMs,
       runs: values.length,
       latestRuntimeMs,
-      latestPeakMemoryMb: Number(latest?.peakMemoryMb ?? latest?.peak_memory_mb ?? 0),
-      latestQueueWaitMs: Number(latest?.queueWaitMs ?? latest?.queue_wait_ms ?? 0),
-      latestOsrmLatencyMs: Number(latest?.osrmLatencyMs ?? latest?.osrm_latency_ms ?? 0),
-      latestAuditCycles: Number(latest?.auditCycles ?? latest?.audit_cycles ?? 0),
-      latestMicroClusterCount: Number(latest?.microClusterCount ?? latest?.micro_cluster_count ?? 0),
+      latestPeakMemoryMb: Number(
+        latest?.peakMemoryMb ?? latest?.peak_memory_mb ?? 0
+      ),
+      latestQueueWaitMs: Number(
+        latest?.queueWaitMs ?? latest?.queue_wait_ms ?? 0
+      ),
+      latestOsrmLatencyMs: Number(
+        latest?.osrmLatencyMs ?? latest?.osrm_latency_ms ?? 0
+      ),
+      latestAuditCycles: Number(
+        latest?.auditCycles ?? latest?.audit_cycles ?? 0
+      ),
+      latestMicroClusterCount: Number(
+        latest?.microClusterCount ?? latest?.micro_cluster_count ?? 0
+      ),
       latestCriteriaMet,
       averageRuntimeMs: Math.round(metricAverage(runtimes)),
       p95RuntimeMs: Math.round(metricPercentile(runtimes, 95)),
@@ -3145,16 +3277,28 @@ function buildGoLive500Dashboard(args) {
     },
     pipeline: {
       auditMsAverage: Math.round(
-        metricAverage(routeMetricsRows.map((row) => Number(row.auditMs ?? row.audit_ms ?? 0)))
+        metricAverage(
+          routeMetricsRows.map((row) => Number(row.auditMs ?? row.audit_ms ?? 0))
+        )
       ),
       correctionMsAverage: Math.round(
-        metricAverage(routeMetricsRows.map((row) => Number(row.correctionMs ?? row.correction_ms ?? 0)))
+        metricAverage(
+          routeMetricsRows.map(
+            (row) => Number(row.correctionMs ?? row.correction_ms ?? 0)
+          )
+        )
       ),
       optimizerMsAverage: Math.round(
-        metricAverage(routeMetricsRows.map((row) => Number(row.optimizerMs ?? row.optimizer_ms ?? 0)))
+        metricAverage(
+          routeMetricsRows.map(
+            (row) => Number(row.optimizerMs ?? row.optimizer_ms ?? 0)
+          )
+        )
       ),
       osrmMsAverage: Math.round(
-        metricAverage(routeMetricsRows.map((row) => Number(row.osrmMs ?? row.osrm_ms ?? 0)))
+        metricAverage(
+          routeMetricsRows.map((row) => Number(row.osrmMs ?? row.osrm_ms ?? 0))
+        )
       ),
       osrmFailureRate
     },
@@ -3188,10 +3332,14 @@ async function getGoLive500Dashboard(days = 30) {
   if (!db) {
     if (await shouldUseMemoryDb()) {
       const stopCountsByRoute = /* @__PURE__ */ new Map();
-      for (const route of memory.routes) stopCountsByRoute.set(Number(route.id), 0);
+      for (const route of memory.routes)
+        stopCountsByRoute.set(Number(route.id), 0);
       for (const stop of memory.stops) {
         const routeId = Number(stop.routeId);
-        stopCountsByRoute.set(routeId, (stopCountsByRoute.get(routeId) || 0) + 1);
+        stopCountsByRoute.set(
+          routeId,
+          (stopCountsByRoute.get(routeId) || 0) + 1
+        );
       }
       const routeMetricRows = memory.routeMetrics.filter(
         (metric) => new Date(metric.createdAt).getTime() >= cutoffDate.getTime()
@@ -3329,10 +3477,18 @@ async function createRouteMetric(data) {
     osrmFailureReason: data.osrmFailureReason?.slice(0, 255) ?? null,
     matrixCacheHit: Math.round(normalizeMetricNumber(data.matrixCacheHit)),
     matrixCacheMiss: Math.round(normalizeMetricNumber(data.matrixCacheMiss)),
-    matrixGenerationMs: Math.round(normalizeMetricNumber(data.matrixGenerationMs)),
-    macroClusterCount: Math.round(normalizeMetricNumber(data.macroClusterCount)),
-    microClusterCount: Math.round(normalizeMetricNumber(data.microClusterCount)),
-    largestClusterSize: Math.round(normalizeMetricNumber(data.largestClusterSize)),
+    matrixGenerationMs: Math.round(
+      normalizeMetricNumber(data.matrixGenerationMs)
+    ),
+    macroClusterCount: Math.round(
+      normalizeMetricNumber(data.macroClusterCount)
+    ),
+    microClusterCount: Math.round(
+      normalizeMetricNumber(data.microClusterCount)
+    ),
+    largestClusterSize: Math.round(
+      normalizeMetricNumber(data.largestClusterSize)
+    ),
     issuesDetectedCount: Math.round(
       normalizeMetricNumber(data.issuesDetectedCount)
     ),
@@ -3362,9 +3518,7 @@ async function createRouteMetric(data) {
     totalDistanceKm: String(
       roundMetric(normalizeMetricNumber(data.totalDistanceKm), 2)
     ),
-    totalTimeMinutes: Math.round(
-      normalizeMetricNumber(data.totalTimeMinutes)
-    ),
+    totalTimeMinutes: Math.round(normalizeMetricNumber(data.totalTimeMinutes)),
     metadata: data.metadata ?? null
   };
   const db = await getDb();
@@ -3436,7 +3590,9 @@ function buildRouteMetricsSummary(metrics, days) {
   const blocked = metrics.filter(
     (metric) => Number(metric.issuesBlockedCount || 0) > 0
   ).length;
-  const osrmFallback = metrics.filter((metric) => Boolean(metric.osrmFallback)).length;
+  const osrmFallback = metrics.filter(
+    (metric) => Boolean(metric.osrmFallback)
+  ).length;
   const revisits = metrics.reduce(
     (totalCount, metric) => totalCount + Number(metric.regionRevisitedCount || 0),
     0
@@ -3462,9 +3618,7 @@ function buildRouteMetricsSummary(metrics, days) {
   const geocodingScoreDistribution = {
     excellent: geocodingAverageScores.filter((score) => score >= 90).length,
     good: geocodingAverageScores.filter((score) => score >= 75 && score < 90).length,
-    attention: geocodingAverageScores.filter(
-      (score) => score >= 60 && score < 75
-    ).length,
+    attention: geocodingAverageScores.filter((score) => score >= 60 && score < 75).length,
     suspicious: geocodingAverageScores.filter((score) => score < 60).length,
     notClassified: Math.max(0, total - geocodingAverageScores.length)
   };
@@ -3514,7 +3668,11 @@ function buildRouteMetricsSummary(metrics, days) {
   const largestPartitionSizes = partitionedMetrics.map(
     (metric) => Number(getMetricRouteMetadata(metric).largestPartitionSize || 0)
   );
-  const routeModes = ["shortest_distance", "shortest_time", "balanced"];
+  const routeModes = [
+    "shortest_distance",
+    "shortest_time",
+    "balanced"
+  ];
   const stageNames = [
     "dbFetchMs",
     "clusteringMs",
@@ -3553,7 +3711,9 @@ function buildRouteMetricsSummary(metrics, days) {
     0
   );
   const executionStarted = metrics.filter(
-    (metric) => ["started", "completed", "abandoned"].includes(String(metric.executionStatus || ""))
+    (metric) => ["started", "completed", "abandoned"].includes(
+      String(metric.executionStatus || "")
+    )
   ).length;
   const executionCompleted = metrics.filter(
     (metric) => metric.executionStatus === "completed"
@@ -3575,16 +3735,24 @@ function buildRouteMetricsSummary(metrics, days) {
       mode,
       routeMetricCount: modeTotal,
       averageQualityScore: roundMetric(
-        metricAverage(modeMetrics.map((metric) => Number(metric.qualityScore || 0)))
+        metricAverage(
+          modeMetrics.map((metric) => Number(metric.qualityScore || 0))
+        )
       ),
       averageDistanceKm: roundMetric(
-        metricAverage(modeMetrics.map((metric) => Number(metric.totalDistanceKm || 0))),
+        metricAverage(
+          modeMetrics.map((metric) => Number(metric.totalDistanceKm || 0))
+        ),
         2
       ),
       averageTimeMinutes: roundMetric(
-        metricAverage(modeMetrics.map((metric) => Number(metric.totalTimeMinutes || 0)))
+        metricAverage(
+          modeMetrics.map((metric) => Number(metric.totalTimeMinutes || 0))
+        )
       ),
-      auditorCorrectionRate: roundMetric(metricPercent(modeCorrected, modeTotal)),
+      auditorCorrectionRate: roundMetric(
+        metricPercent(modeCorrected, modeTotal)
+      ),
       osrmFallbackRate: roundMetric(metricPercent(modeFallback, modeTotal)),
       averageGeocodingConfidence: roundMetric(
         metricAverage(
@@ -3616,9 +3784,7 @@ function buildRouteMetricsSummary(metrics, days) {
     osrmFallbackCount: osrmFallback,
     osrmFallbackRate: roundMetric(metricPercent(osrmFallback, total)),
     geocodingConfidence: {
-      averageScore: roundMetric(
-        metricAverage(geocodingAverageScores)
-      ),
+      averageScore: roundMetric(metricAverage(geocodingAverageScores)),
       minScore: geocodingMinScores.length ? Math.min(...geocodingMinScores) : 0,
       suspiciousStopCount: suspiciousGeocoding,
       suspiciousStopRate: roundMetric(
@@ -3657,7 +3823,10 @@ function buildRouteMetricsSummary(metrics, days) {
       3
     ),
     maxClusterRadiusKm: roundMetric(
-      Math.max(0, ...metrics.map((metric) => Number(metric.maxClusterRadius || 0))),
+      Math.max(
+        0,
+        ...metrics.map((metric) => Number(metric.maxClusterRadius || 0))
+      ),
       3
     ),
     routeOutcomes: {
@@ -3676,12 +3845,24 @@ function buildRouteMetricsSummary(metrics, days) {
       abandonedCount: executionAbandoned,
       pendingCount: Math.max(0, total - executionStarted),
       startRate: roundMetric(metricPercent(executionStarted, total)),
-      completionRate: roundMetric(metricPercent(executionCompleted, executionStarted)),
-      abandonmentRate: roundMetric(metricPercent(executionAbandoned, executionStarted)),
-      averageExecutionDurationMs: roundMetric(metricAverage(executionDurations)),
-      p50ExecutionDurationMs: roundMetric(metricPercentile(executionDurations, 50)),
-      p95ExecutionDurationMs: roundMetric(metricPercentile(executionDurations, 95)),
-      p99ExecutionDurationMs: roundMetric(metricPercentile(executionDurations, 99))
+      completionRate: roundMetric(
+        metricPercent(executionCompleted, executionStarted)
+      ),
+      abandonmentRate: roundMetric(
+        metricPercent(executionAbandoned, executionStarted)
+      ),
+      averageExecutionDurationMs: roundMetric(
+        metricAverage(executionDurations)
+      ),
+      p50ExecutionDurationMs: roundMetric(
+        metricPercentile(executionDurations, 50)
+      ),
+      p95ExecutionDurationMs: roundMetric(
+        metricPercentile(executionDurations, 95)
+      ),
+      p99ExecutionDurationMs: roundMetric(
+        metricPercentile(executionDurations, 99)
+      )
     },
     issues: {
       regionRevisited: revisits,
@@ -3694,9 +3875,9 @@ function buildRouteMetricsSummary(metrics, days) {
       remaining: issuesRemaining
     },
     optimizerV2: {
-      averageAuditCycles: roundMetric(metricAverage(
-        metrics.map((metric) => Number(metric.auditCycles || 0))
-      )),
+      averageAuditCycles: roundMetric(
+        metricAverage(metrics.map((metric) => Number(metric.auditCycles || 0)))
+      ),
       totalAuditCycles: auditCycles,
       batchCorrectionCount: batchCorrections,
       averageIssuesCorrectedPerBatch: roundMetric(
@@ -3712,7 +3893,9 @@ function buildRouteMetricsSummary(metrics, days) {
     },
     partitioning: {
       partitionedRouteCount: partitionedMetrics.length,
-      partitionedRouteRate: roundMetric(metricPercent(partitionedMetrics.length, total)),
+      partitionedRouteRate: roundMetric(
+        metricPercent(partitionedMetrics.length, total)
+      ),
       averagePartitionCount: roundMetric(metricAverage(partitionCounts)),
       maxPartitionCount: Math.max(0, ...partitionCounts),
       largestPartitionSize: Math.max(0, ...largestPartitionSizes)
@@ -3722,9 +3905,13 @@ function buildRouteMetricsSummary(metrics, days) {
       osrm: {
         callCount: osrmCallCount,
         failureCount: osrmFailureCount,
-        failureRate: roundMetric(metricPercent(osrmFailureCount, osrmCallCount)),
+        failureRate: roundMetric(
+          metricPercent(osrmFailureCount, osrmCallCount)
+        ),
         totalMs: Math.round(osrmTotalMs),
-        averageMs: Math.round(osrmCallCount > 0 ? osrmTotalMs / osrmCallCount : 0)
+        averageMs: Math.round(
+          osrmCallCount > 0 ? osrmTotalMs / osrmCallCount : 0
+        )
       }
     },
     modePerformance
@@ -3750,18 +3937,27 @@ async function getRouteMetricsDashboard(days = 30) {
 function buildExecutionReportPeriod(metrics, blockedEvents, days) {
   const optimized = metrics.length;
   const started = metrics.filter(
-    (metric) => ["started", "completed", "abandoned"].includes(String(metric.executionStatus || ""))
+    (metric) => ["started", "completed", "abandoned"].includes(
+      String(metric.executionStatus || "")
+    )
   ).length;
-  const completed = metrics.filter((metric) => metric.executionStatus === "completed").length;
-  const abandoned = metrics.filter((metric) => metric.executionStatus === "abandoned").length;
+  const completed = metrics.filter(
+    (metric) => metric.executionStatus === "completed"
+  ).length;
+  const abandoned = metrics.filter(
+    (metric) => metric.executionStatus === "abandoned"
+  ).length;
   const pending = Math.max(0, optimized - started);
   const durations = metrics.map((metric) => Number(metric.executionDurationMs || 0)).filter((value) => Number.isFinite(value) && value > 0);
-  const blockedByReason = blockedEvents.reduce((acc, event) => {
-    const metadata = parseOperationalMetadata(event.metadata);
-    const reason = String(metadata.reason || metadata.blockReason || "other");
-    acc[reason] = (acc[reason] || 0) + 1;
-    return acc;
-  }, {});
+  const blockedByReason = blockedEvents.reduce(
+    (acc, event) => {
+      const metadata = parseOperationalMetadata(event.metadata);
+      const reason = String(metadata.reason || metadata.blockReason || "other");
+      acc[reason] = (acc[reason] || 0) + 1;
+      return acc;
+    },
+    {}
+  );
   return {
     periodDays: days,
     optimizedRoutes: optimized,
@@ -3826,8 +4022,12 @@ async function getOperationExecutionReport() {
     last30Days,
     comparison: {
       startRate: roundMetric(last7Days.startRate - last30Days.startRate),
-      completionRate: roundMetric(last7Days.completionRate - last30Days.completionRate),
-      abandonmentRate: roundMetric(last7Days.abandonmentRate - last30Days.abandonmentRate),
+      completionRate: roundMetric(
+        last7Days.completionRate - last30Days.completionRate
+      ),
+      abandonmentRate: roundMetric(
+        last7Days.abandonmentRate - last30Days.abandonmentRate
+      ),
       optimizedRoutes: last7Days.optimizedRoutes - last30Days.optimizedRoutes,
       startedRoutes: last7Days.startedRoutes - last30Days.startedRoutes,
       completedRoutes: last7Days.completedRoutes - last30Days.completedRoutes,
@@ -3959,7 +4159,9 @@ function buildProviderDistribution(events, stopRows) {
   }
   for (const event of events) {
     const metadata = parseOperationalMetadata(event.metadata);
-    const provider = String(metadata.provider_used || metadata.providerUsed || "");
+    const provider = String(
+      metadata.provider_used || metadata.providerUsed || ""
+    );
     if (!provider) continue;
     const amount = Number(metadata.geocoding_cache_hit_local || 0) || Number(metadata.geocoding_cache_hit_backend || 0) || Number(metadata.geocoding_cache_miss || 0) || 1;
     incrementKey(providers, provider, amount);
@@ -3977,8 +4179,10 @@ function buildManualCorrectionsSummary(corrections) {
   for (const correction of corrections) {
     const address = String(correction.originalAddress || "").slice(0, 160);
     const city = correction.city || extractCityFromAddress(String(correction.correctedAddress || ""));
-    if (address) addressCounts.set(address, (addressCounts.get(address) || 0) + 1);
-    if (city) cityCounts.set(String(city), (cityCounts.get(String(city)) || 0) + 1);
+    if (address)
+      addressCounts.set(address, (addressCounts.get(address) || 0) + 1);
+    if (city)
+      cityCounts.set(String(city), (cityCounts.get(String(city)) || 0) + 1);
   }
   const top = (entries) => entries.sort((a, b) => b[1] - a[1]).slice(0, 8).map(([value, count]) => ({ value, count }));
   return {
@@ -4017,12 +4221,24 @@ function buildGeocodingWindowSummary(args) {
 function buildImpactComparison(last7Days, last30Days) {
   const compare = (current, baseline) => baseline > 0 ? roundMetric((current - baseline) / baseline * 100) : 0;
   return {
-    processedRoutes: compare(last7Days.processedRoutes, last30Days.processedRoutes),
-    averageConfidence: compare(last7Days.averageConfidence, last30Days.averageConfidence),
+    processedRoutes: compare(
+      last7Days.processedRoutes,
+      last30Days.processedRoutes
+    ),
+    averageConfidence: compare(
+      last7Days.averageConfidence,
+      last30Days.averageConfidence
+    ),
     minConfidence: compare(last7Days.minConfidence, last30Days.minConfidence),
-    suspiciousStops: compare(last7Days.suspiciousStops, last30Days.suspiciousStops),
+    suspiciousStops: compare(
+      last7Days.suspiciousStops,
+      last30Days.suspiciousStops
+    ),
     fiscalBlocks: compare(last7Days.fiscalBlocks, last30Days.fiscalBlocks),
-    autoCorrections: compare(last7Days.autoCorrections, last30Days.autoCorrections),
+    autoCorrections: compare(
+      last7Days.autoCorrections,
+      last30Days.autoCorrections
+    ),
     averageOperationalScore: compare(
       last7Days.averageOperationalScore,
       last30Days.averageOperationalScore
@@ -4113,12 +4329,15 @@ function collectIssueTypes(value) {
     if (!item || typeof item !== "object") continue;
     const issue = item;
     if (typeof issue.type === "string") issueTypes.push(issue.type);
-    if (issue.blockingIssue?.type) issueTypes.push(String(issue.blockingIssue.type));
+    if (issue.blockingIssue?.type)
+      issueTypes.push(String(issue.blockingIssue.type));
   }
   return issueTypes;
 }
 function buildRouteQualityDashboard(events) {
-  const routeEvents = events.filter((event) => String(event.type || "").startsWith("route_"));
+  const routeEvents = events.filter(
+    (event) => String(event.type || "").startsWith("route_")
+  );
   const scores = [];
   let corrections = 0;
   let revisitsAvoided = 0;
@@ -4127,7 +4346,11 @@ function buildRouteQualityDashboard(events) {
   let estimatedKmSaved = 0;
   for (const event of routeEvents) {
     const metadata = parseOperationalMetadata(event.metadata);
-    const score = metadataNumber(metadata, ["auditScore", "finalScore", "score"]);
+    const score = metadataNumber(metadata, [
+      "auditScore",
+      "finalScore",
+      "score"
+    ]);
     if (score !== void 0) scores.push(score);
     const issueTypes = [
       ...collectIssueTypes(metadata.firstBlockingIssue),
@@ -4138,7 +4361,8 @@ function buildRouteQualityDashboard(events) {
     if (event.type === "route_audit_corrected_optimization") {
       corrections += 1;
       if (issueTypes.includes("region_revisited")) revisitsAvoided += 1;
-      if (issueTypes.includes("premature_region_exit")) prematureExitsCorrected += 1;
+      if (issueTypes.includes("premature_region_exit"))
+        prematureExitsCorrected += 1;
     }
     if (issueTypes.includes("route_crossing")) routeCrossingsDetected += 1;
     const firstBlockingIssue = metadata.firstBlockingIssue;
@@ -4215,7 +4439,9 @@ function buildGeocodingCacheDashboard(events) {
     hitRate: roundMetric(metricPercent(localHits + backendHits, total)),
     backendReuseRate: roundMetric(metricPercent(backendHits, total)),
     externalCallRate: roundMetric(metricPercent(misses, total)),
-    externalCallsSavedRate: roundMetric(metricPercent(localHits + backendHits, total)),
+    externalCallsSavedRate: roundMetric(
+      metricPercent(localHits + backendHits, total)
+    ),
     localReuseRate: roundMetric(metricPercent(localHits, total)),
     localReuseRateFromClient: roundMetric(metricPercent(localHits, localTotal))
   };
@@ -4231,7 +4457,10 @@ async function buildAdminOperationalDashboardLive() {
       today.setHours(0, 0, 0, 0);
       const events = sortByDateDesc(memory.operationalEvents, "createdAt");
       const recentUsers2 = sortByDateDesc(memory.users, "createdAt").slice(0, 8);
-      const recentRoutes2 = sortByDateDesc(memory.routes, "createdAt").slice(0, 8);
+      const recentRoutes2 = sortByDateDesc(memory.routes, "createdAt").slice(
+        0,
+        8
+      );
       const routeMetrics2 = buildRouteMetricsSummary(
         memory.routeMetrics.filter(
           (metric) => now - new Date(metric.createdAt).getTime() <= 30 * oneDay
@@ -4252,13 +4481,21 @@ async function buildAdminOperationalDashboardLive() {
       return {
         stats: {
           usersTotal: memory.users.length,
-          usersToday: memory.users.filter((user) => new Date(user.createdAt) >= today).length,
+          usersToday: memory.users.filter(
+            (user) => new Date(user.createdAt) >= today
+          ).length,
           activeUsers7d: new Set(
-            memory.operationalEvents.filter((event) => new Date(event.createdAt).getTime() >= sevenDaysAgo && event.userId).map((event) => event.userId)
+            memory.operationalEvents.filter(
+              (event) => new Date(event.createdAt).getTime() >= sevenDaysAgo && event.userId
+            ).map((event) => event.userId)
           ).size,
           routesTotal: memory.routes.length,
-          routesToday: memory.routes.filter((route) => new Date(route.createdAt) >= today).length,
-          events24h: events.filter((event) => now - new Date(event.createdAt).getTime() <= oneDay).length,
+          routesToday: memory.routes.filter(
+            (route) => new Date(route.createdAt) >= today
+          ).length,
+          events24h: events.filter(
+            (event) => now - new Date(event.createdAt).getTime() <= oneDay
+          ).length,
           criticalEvents24h: events.filter(
             (event) => now - new Date(event.createdAt).getTime() <= oneDay && ["error", "fatal"].includes(event.severity)
           ).length,
@@ -4282,8 +4519,18 @@ async function buildAdminOperationalDashboardLive() {
     }
     requireConfiguredDatabase();
   }
-  const [[statsRow], routeMetricsSummary, geocodingImpact, geocodingExecutiveReport, optimizationJobsSummary, operationExecutionReport, performanceBenchmarks2, goLive500] = await Promise.all([
-    _pool.query(`
+  const [
+    [statsRow],
+    routeMetricsSummary,
+    geocodingImpact,
+    geocodingExecutiveReport,
+    optimizationJobsSummary,
+    operationExecutionReport,
+    performanceBenchmarks2,
+    goLive500
+  ] = await Promise.all([
+    _pool.query(
+      `
         SELECT
           (SELECT COUNT(*) FROM users) AS usersTotal,
           (SELECT COUNT(*) FROM users WHERE createdAt >= CURRENT_DATE()) AS usersToday,
@@ -4293,7 +4540,8 @@ async function buildAdminOperationalDashboardLive() {
           (SELECT COUNT(*) FROM operationalEvents WHERE createdAt >= DATE_SUB(NOW(), INTERVAL 1 DAY)) AS events24h,
           (SELECT COUNT(*) FROM operationalEvents WHERE createdAt >= DATE_SUB(NOW(), INTERVAL 1 DAY) AND severity IN ('error', 'fatal')) AS criticalEvents24h,
           (SELECT COUNT(*) FROM operationalEvents WHERE createdAt >= DATE_SUB(NOW(), INTERVAL 1 DAY) AND severity = 'warning' AND type LIKE 'route_%') AS routeWarnings24h
-      `).then(([rows]) => rows),
+      `
+    ).then(([rows]) => rows),
     getRouteMetricsDashboard(30),
     getGeocodingImpactDashboard(),
     getGeocodingExecutiveReport(),
@@ -4495,7 +4743,9 @@ async function getUserStats(userId, days = 30) {
       const userCompletedHistory = memory.routeHistory.filter(
         (history) => history.userId === userId && history.status === "completed" && new Date(history.executedDate) >= cutoffDate2
       );
-      const distances = userRoutes.map((route) => Number(route.totalDistance || 0));
+      const distances = userRoutes.map(
+        (route) => Number(route.totalDistance || 0)
+      );
       const times = userRoutes.map((route) => Number(route.totalTime || 0)).filter((time) => time > 0);
       return {
         totalRoutes: userRoutes.length,
@@ -4511,7 +4761,13 @@ async function getUserStats(userId, days = 30) {
   const totalRoutes = await db.select({ count: sql`COUNT(*)` }).from(routes).where(and(eq(routes.userId, userId), gte(routes.createdAt, cutoffDate)));
   const totalDistance = await db.select({ sum: sql`SUM(totalDistance)` }).from(routes).where(and(eq(routes.userId, userId), gte(routes.createdAt, cutoffDate)));
   const avgTime = await db.select({ avg: sql`AVG(totalTime)` }).from(routes).where(and(eq(routes.userId, userId), gte(routes.createdAt, cutoffDate)));
-  const completedRoutes = await db.select({ count: sql`COUNT(*)` }).from(routeHistory).where(and(eq(routeHistory.userId, userId), eq(routeHistory.status, "completed"), gte(routeHistory.executedDate, cutoffDate)));
+  const completedRoutes = await db.select({ count: sql`COUNT(*)` }).from(routeHistory).where(
+    and(
+      eq(routeHistory.userId, userId),
+      eq(routeHistory.status, "completed"),
+      gte(routeHistory.executedDate, cutoffDate)
+    )
+  );
   return {
     totalRoutes: Number(totalRoutes[0]?.count || 0),
     totalDistance: parseFloat(String(totalDistance[0]?.sum || "0")),
@@ -4531,7 +4787,12 @@ async function getRouteStatsOverTime(userId, days = 30) {
           continue;
         }
         const date = toDateKey(history.executedDate);
-        const current = grouped.get(date) ?? { date, count: 0, totalDistance: 0, totalTime: 0 };
+        const current = grouped.get(date) ?? {
+          date,
+          count: 0,
+          totalDistance: 0,
+          totalTime: 0
+        };
         current.count += 1;
         current.totalDistance += Number(history.actualDistance || 0);
         current.totalTime += Number(history.actualTime || 0);
@@ -4550,12 +4811,11 @@ async function getRouteStatsOverTime(userId, days = 30) {
     count: sql`COUNT(*)`,
     totalDistance: sql`SUM(actualDistance)`,
     totalTime: sql`SUM(actualTime)`
-  }).from(routeHistory).where(and(
-    eq(routeHistory.userId, userId),
-    sql`executedDate >= ${startDate}`
-  )).groupBy(sql`DATE(executedDate)`).orderBy(asc(sql`DATE(executedDate)`));
+  }).from(routeHistory).where(
+    and(eq(routeHistory.userId, userId), sql`executedDate >= ${startDate}`)
+  ).groupBy(sql`DATE(executedDate)`).orderBy(asc(sql`DATE(executedDate)`));
 }
-var _db, _pool, _lastDbConnectAttempt, _lastDbConnectionError, DB_CONNECT_RETRY_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, FALLBACK_DB_KEY, FALLBACK_KV_PREFIX, localDbLoaded, remoteDbLoaded, remoteDbLoadPromise, lastRemoteFallbackError, memory, REQUIRED_SCHEMA_COLUMNS, QUEUE_INTEGRITY_EVENT_TYPES, DISASTER_CRITICAL_TABLES, DISASTER_EVENT_TYPES, PERFORMANCE_BENCHMARK_TARGETS;
+var _db, _pool, _dbConnectPromise, _lastDbConnectAttempt, _lastDbConnectionError, _schemaHealthCache, DB_CONNECT_RETRY_MS, DB_SCHEMA_HEALTH_CACHE_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, FALLBACK_DB_KEY, FALLBACK_KV_PREFIX, localDbLoaded, remoteDbLoaded, remoteDbLoadPromise, lastRemoteFallbackError, memory, REQUIRED_SCHEMA_COLUMNS, QUEUE_INTEGRITY_EVENT_TYPES, DISASTER_CRITICAL_TABLES, DISASTER_EVENT_TYPES, PERFORMANCE_BENCHMARK_TARGETS;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
@@ -4565,9 +4825,12 @@ var init_db = __esm({
     init_stopMetadata();
     _db = null;
     _pool = null;
+    _dbConnectPromise = null;
     _lastDbConnectAttempt = 0;
     _lastDbConnectionError = null;
+    _schemaHealthCache = null;
     DB_CONNECT_RETRY_MS = 3e4;
+    DB_SCHEMA_HEALTH_CACHE_MS = 6e4;
     LOCAL_DB_DIR = path.join(process.cwd(), ".data");
     LOCAL_DB_FILE = path.join(LOCAL_DB_DIR, "routing-pwa-db.json");
     FALLBACK_DB_KEY = process.env.FALLBACK_DB_KEY || "econorotas:fallback-db:v1";
@@ -12647,6 +12910,9 @@ async function recordHealthObservation(input) {
   }
   lastIssueKey = issueKey;
   lastIssueAt = now;
+  if (!input.storageAvailable) {
+    return;
+  }
   await persistMonitorEvent({
     type: "system_health_failed",
     severity: input.storageAvailable ? "error" : input.database?.reachable ? "error" : "fatal",
@@ -12669,16 +12935,26 @@ function getLocalImileCapturePath() {
   );
 }
 async function runLocalImileCapture() {
-  const scriptPath = path3.resolve(process.cwd(), "scripts", "capture-imile-screen.mjs");
-  await execFileAsync(process.execPath, [scriptPath, "--pages=130", "--delay=700"], {
-    cwd: process.cwd(),
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: 12 * 60 * 1e3,
-    windowsHide: true
-  });
+  const scriptPath = path3.resolve(
+    process.cwd(),
+    "scripts",
+    "capture-imile-screen.mjs"
+  );
+  await execFileAsync(
+    process.execPath,
+    [scriptPath, "--pages=130", "--delay=700"],
+    {
+      cwd: process.cwd(),
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: 12 * 60 * 1e3,
+      windowsHide: true
+    }
+  );
   const capturePath = getLocalImileCapturePath();
   if (!fs3.existsSync(capturePath)) {
-    throw new Error("Captura finalizada, mas o XML consolidado nao foi encontrado.");
+    throw new Error(
+      "Captura finalizada, mas o XML consolidado nao foi encontrado."
+    );
   }
   return fs3.readFileSync(capturePath, "utf8");
 }
@@ -12690,10 +12966,7 @@ function normalizeOrigin(origin) {
   }
 }
 function parseAllowedOrigins() {
-  const configuredOrigins = [
-    ENV.publicAppUrl,
-    ...ENV.allowedOrigins.split(",")
-  ].map((origin) => origin.trim()).filter(Boolean).map(normalizeOrigin);
+  const configuredOrigins = [ENV.publicAppUrl, ...ENV.allowedOrigins.split(",")].map((origin) => origin.trim()).filter(Boolean).map(normalizeOrigin);
   return /* @__PURE__ */ new Set([
     ...configuredOrigins,
     "capacitor://localhost",
@@ -12742,7 +13015,9 @@ function validateProductionEnvironment() {
     );
   }
   if (ENV.cookieSecret.length < 32) {
-    throw new Error("JWT_SECRET must have at least 32 characters in production");
+    throw new Error(
+      "JWT_SECRET must have at least 32 characters in production"
+    );
   }
   if (process.env.VITE_ENABLE_DEV_LOGIN === "true") {
     throw new Error("VITE_ENABLE_DEV_LOGIN cannot be true in production");
@@ -12816,7 +13091,10 @@ function createApp(options = {}) {
         "Access-Control-Allow-Headers",
         "Content-Type, Authorization, X-Requested-With, X-Dev-Login"
       );
-      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+      res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+      );
     }
     if (req.method === "OPTIONS") {
       res.sendStatus(204);
@@ -12846,49 +13124,92 @@ export default function EconoRotasAssetRefresh() { return null; }
 `);
   });
   app2.get("/api/health", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, queue: queue2, mode } = await getStorageHealthSnapshot("api.health");
-    res.status(systemAvailable ? 200 : 500).json({
-      ok: systemAvailable,
-      app: "EconoRota",
-      environment: ENV.isProduction ? "production" : "development",
-      mode,
-      database,
-      fallbackStore,
-      osrm,
-      queue: queue2,
-      requiredManagedDatabase: ENV.requireManagedDatabase,
-      warning: ENV.hasInvalidProductionDatabaseUrl ? "DATABASE_URL aponta para host local/Docker e n\xE3o funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis." : void 0,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
-    });
+    try {
+      const {
+        database,
+        fallbackStore,
+        storageAvailable,
+        systemAvailable,
+        osrm,
+        queue: queue2,
+        mode
+      } = await getStorageHealthSnapshot("api.health");
+      res.status(systemAvailable ? 200 : 500).json({
+        ok: systemAvailable,
+        app: "EconoRota",
+        environment: ENV.isProduction ? "production" : "development",
+        mode,
+        database,
+        fallbackStore,
+        osrm,
+        queue: queue2,
+        requiredManagedDatabase: ENV.requireManagedDatabase,
+        warning: ENV.hasInvalidProductionDatabaseUrl ? "DATABASE_URL aponta para host local/Docker e n\xE3o funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis." : void 0,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+        app: "EconoRota",
+        environment: ENV.isProduction ? "production" : "development",
+        mode: "health-error",
+        error: error instanceof Error ? error.message : String(error),
+        requiredManagedDatabase: ENV.requireManagedDatabase,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
   });
   app2.get("/api/monitor/ping", async (_req, res) => {
-    const { database, fallbackStore, storageAvailable, systemAvailable, osrm, queue: queue2, mode } = await getStorageHealthSnapshot("api.monitor.ping");
-    let adminDashboardRefresh = { ok: false };
-    if (systemAvailable) {
-      try {
-        await refreshAdminDashboardMetrics();
-        adminDashboardRefresh = { ok: true };
-      } catch (error) {
-        adminDashboardRefresh = {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error)
-        };
+    try {
+      const {
+        database,
+        fallbackStore,
+        storageAvailable,
+        systemAvailable,
+        osrm,
+        queue: queue2,
+        mode
+      } = await getStorageHealthSnapshot("api.monitor.ping");
+      let adminDashboardRefresh = {
+        ok: false
+      };
+      if (systemAvailable) {
+        try {
+          await refreshAdminDashboardMetrics();
+          adminDashboardRefresh = { ok: true };
+        } catch (error) {
+          adminDashboardRefresh = {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
       }
+      res.status(systemAvailable ? 200 : 500).json({
+        ok: systemAvailable,
+        monitor: true,
+        app: "EconoRota",
+        environment: ENV.isProduction ? "production" : "development",
+        mode,
+        database,
+        fallbackStore,
+        osrm,
+        queue: queue2,
+        adminDashboardRefresh,
+        requiredManagedDatabase: ENV.requireManagedDatabase,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+        monitor: true,
+        app: "EconoRota",
+        environment: ENV.isProduction ? "production" : "development",
+        mode: "health-error",
+        error: error instanceof Error ? error.message : String(error),
+        requiredManagedDatabase: ENV.requireManagedDatabase,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
     }
-    res.status(systemAvailable ? 200 : 500).json({
-      ok: systemAvailable,
-      monitor: true,
-      app: "EconoRota",
-      environment: ENV.isProduction ? "production" : "development",
-      mode,
-      database,
-      fallbackStore,
-      osrm,
-      queue: queue2,
-      adminDashboardRefresh,
-      requiredManagedDatabase: ENV.requireManagedDatabase,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
-    });
   });
   app2.get("/api/admin/dashboard", async (req, res) => {
     const user = await requireAdminApiRequest(req, res);
@@ -13026,7 +13347,10 @@ export default function EconoRotasAssetRefresh() { return null; }
   });
   app2.post(
     "/api/imile/capture/latest",
-    express2.text({ limit: "15mb", type: ["application/xml", "text/xml", "text/plain", "*/*"] }),
+    express2.text({
+      limit: "15mb",
+      type: ["application/xml", "text/xml", "text/plain", "*/*"]
+    }),
     async (req, res) => {
       const uploadToken = req.headers["x-imile-capture-token"];
       const hasValidUploadToken = ENV.imileCaptureUploadToken && typeof uploadToken === "string" && uploadToken === ENV.imileCaptureUploadToken;
