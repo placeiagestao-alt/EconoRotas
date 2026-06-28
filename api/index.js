@@ -10242,6 +10242,32 @@ function shouldProceedAfterCorrectionLimits(audit, reason, limitsReached, option
     (issue) => limitsReached.has(issue.type) || options.allowLargeRouteAttention && isCoherenceFixIssueType(issue.type)
   );
 }
+function getCoherenceIssuePriority(issue) {
+  switch (issue.type) {
+    case "premature_region_exit":
+      return 3;
+    case "region_revisited":
+      return 2;
+    case "nearby_stop_skipped":
+      return 1;
+    default:
+      return 0;
+  }
+}
+function getCoherenceIssueImpact(issue) {
+  const gap = Number(issue.gapKm ?? 0);
+  const distance = Number(issue.distanceKm ?? 0);
+  const nearestDistance = Number(issue.nearestDistanceKm ?? 0);
+  const pendingCount = issue.pendingSequences?.length ?? 0;
+  return Math.max(0, gap, distance - nearestDistance) + pendingCount * 0.1;
+}
+function compareCoherenceIssuesByImpact(a, b) {
+  const priorityDiff = getCoherenceIssuePriority(b) - getCoherenceIssuePriority(a);
+  if (priorityDiff !== 0) return priorityDiff;
+  const impactDiff = getCoherenceIssueImpact(b) - getCoherenceIssueImpact(a);
+  if (impactDiff !== 0) return impactDiff;
+  return String(a.type).localeCompare(String(b.type));
+}
 function moveWaypointsBeforeSequence(waypoints, movedSequences, beforeSequence) {
   const movedSet = new Set(movedSequences);
   if (movedSet.size === 0 || movedSet.has(beforeSequence)) return false;
@@ -10278,15 +10304,16 @@ function buildBatchAuditRepairPlan(audit) {
     premature_region_exit: 0
   };
   const cappedTypes = /* @__PURE__ */ new Set();
-  for (const issue of audit.issues) {
-    if (!isCoherenceFixIssueType(issue.type)) continue;
-    const limit = correctionLimitForIssueType(issue.type);
-    const currentCount = counts[issue.type] ?? 0;
+  const coherenceIssues = audit.issues.filter((issue) => isCoherenceFixIssueType(issue.type)).sort(compareCoherenceIssuesByImpact);
+  for (const issue of coherenceIssues) {
+    const issueType = issue.type;
+    const limit = correctionLimitForIssueType(issueType);
+    const currentCount = counts[issueType] ?? 0;
     if (currentCount >= limit) {
-      cappedTypes.add(issue.type);
+      cappedTypes.add(issueType);
       continue;
     }
-    counts[issue.type] = currentCount + 1;
+    counts[issueType] = currentCount + 1;
     selectedIssues.push(issue);
   }
   return {
@@ -11073,6 +11100,9 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
           repairAttempt: repairAttempt + 1,
           availableIssueCounts: batchRepair.plan.availableIssueCounts,
           appliedIssueCounts: batchRepair.plan.appliedIssueCounts,
+          prioritizedIssueTypes: batchRepair.plan.selectedIssues.map(
+            (issue) => issue.type
+          ),
           cappedTypes: Array.from(batchRepair.plan.cappedTypes),
           crossingAlerts: batchRepair.plan.crossingAlerts.length
         }
@@ -11105,6 +11135,9 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
             blockingIssue: postOptimizationBlockingReason.issue,
             availableIssueCounts: batchRepair.plan.availableIssueCounts,
             appliedIssueCounts: batchRepair.plan.appliedIssueCounts,
+            prioritizedIssueTypes: batchRepair.plan.selectedIssues.map(
+              (issue) => issue.type
+            ),
             cappedTypes: Array.from(batchRepair.plan.cappedTypes)
           }
         }).catch((error) => {
@@ -11130,6 +11163,9 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         batch: {
           availableIssueCounts: batchRepair.plan.availableIssueCounts,
           appliedIssueCounts: batchRepair.plan.appliedIssueCounts,
+          prioritizedIssueTypes: batchRepair.plan.selectedIssues.map(
+            (issue) => issue.type
+          ),
           cappedTypes: Array.from(batchRepair.plan.cappedTypes)
         }
       });
@@ -11156,6 +11192,9 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
           batch: {
             availableIssueCounts: batchRepair.plan.availableIssueCounts,
             appliedIssueCounts: batchRepair.plan.appliedIssueCounts,
+            prioritizedIssueTypes: batchRepair.plan.selectedIssues.map(
+              (issue) => issue.type
+            ),
             cappedTypes: Array.from(batchRepair.plan.cappedTypes)
           }
         }

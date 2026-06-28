@@ -405,6 +405,64 @@ describe("Route endpoints", () => {
     expect(outcome.remainingCoherenceIssues).toBe(0);
   });
 
+  it("prioritizes high-impact regional issues before small nearby fixes in the global audit plan", () => {
+    const plan = __routeOptimizationTestHooks.buildBatchAuditRepairPlan({
+      status: "attention" as const,
+      score: 50,
+      quality: "attention" as const,
+      stopCount: 6,
+      issueCount: 3,
+      criticalCount: 0,
+      warningCount: 3,
+      totalDistanceKm: 8,
+      maxLegKm: 4,
+      clusterMetrics: {
+        clusterCount: 2,
+        averageRadiusKm: 0.5,
+        maxRadiusKm: 1,
+        spreadClusters: [],
+      },
+      issues: [
+        {
+          type: "nearby_stop_skipped" as const,
+          severity: "high" as const,
+          title: "Parada proxima pulada",
+          message: "Pequeno ajuste local.",
+          toSequence: 2,
+          nearestSequence: 5,
+          distanceKm: 0.4,
+          nearestDistanceKm: 0.2,
+          gapKm: 0.2,
+        },
+        {
+          type: "region_revisited" as const,
+          severity: "high" as const,
+          title: "Retorno de regiao",
+          message: "Retorno caro para regiao ja visitada.",
+          toSequence: 4,
+          nearestSequence: 6,
+          distanceKm: 3.2,
+          nearestDistanceKm: 0.1,
+        },
+        {
+          type: "premature_region_exit" as const,
+          severity: "high" as const,
+          title: "Saida prematura",
+          message: "Saiu da regiao antes de concluir pendencias.",
+          toSequence: 3,
+          pendingSequences: [4, 5],
+          distanceKm: 1.5,
+        },
+      ],
+    });
+
+    expect(plan.selectedIssues.map((issue) => issue.type)).toEqual([
+      "premature_region_exit",
+      "region_revisited",
+      "nearby_stop_skipped",
+    ]);
+  });
+
   it("creates stops and optimizes route in one backend operation", async () => {
     const caller = appRouter.createCaller(createAuthContext(8201));
 
