@@ -11508,17 +11508,24 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
   }
   const { optimized, audit, auditSource } = optimizationAttempt;
   const osrmRequiredForRoute = ENV.osrmRequired && routeStops.length >= ENV.osrmRequiredMinStops;
-  if (osrmRequiredForRoute && !optimizationAttempt.usedRoadMetrics) {
+  const osrmRequiredBlocked = osrmRequiredForRoute && !optimizationAttempt.usedRoadMetrics && optimizationAttempt.auditPolicy !== SHOPEE_STOP_AUDIT_POLICY;
+  if (osrmRequiredBlocked) {
+    const osrmFallbackIssue = audit.issues.find((issue) => issue.type === "osrm_fallback") ?? {
+      type: "osrm_fallback",
+      severity: "critical",
+      title: "OSRM obrigatorio indisponivel",
+      message: "A rota exige calculo por ruas, mas o OSRM nao retornou matriz utilizavel."
+    };
     const osrmBlockingReason = {
-      issue: audit.issues.find((issue) => issue.type === "osrm_fallback") ?? null,
-      message: "OSRM obrigatorio indisponivel. A rota foi salva com alerta usando a melhor estimativa disponivel."
+      issue: osrmFallbackIssue,
+      message: "OSRM obrigatorio indisponivel. A rota nao foi salva como otimizada para evitar sequencia incoerente."
     };
     await createOperationalEvent({
       userId,
       routeId,
       stopId: null,
       type: "route_osrm_required_unavailable",
-      severity: "warning",
+      severity: "error",
       source: "routes.optimize",
       title: "OSRM obrigatorio indisponivel",
       message: osrmBlockingReason.message,
@@ -11539,6 +11546,11 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       }
     }).catch((error) => {
       console.warn("[Routes] Failed to record required OSRM event:", error);
+    });
+    await recordRouteMetricForAttempt(osrmBlockingReason);
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: osrmBlockingReason.message
     });
   }
   if (postOptimizationBlockingReason) {
@@ -13047,6 +13059,135 @@ function validateProductionEnvironment() {
     );
   }
 }
+function rankReadinessStatus(status) {
+  return status === "critical" ? 3 : status === "attention" ? 2 : 1;
+}
+function buildOperationalReadiness(args) {
+  const checks = [];
+  const addCheck = (name, status2, message, metadata) => checks.push({ name, status: status2, message, metadata });
+  addCheck(
+    "storage",
+    args.storageAvailable ? "ready" : "critical",
+    args.storageAvailable ? `Armazenamento operacional em modo ${args.mode}.` : "Armazenamento indisponivel para operacao real.",
+    { mode: args.mode }
+  );
+  if (!args.osrm?.enabled) {
+    addCheck(
+      "osrm",
+      args.osrm?.required ? "critical" : "attention",
+      args.osrm?.required ? "OSRM obrigatorio esta desativado." : "OSRM esta desativado; rotas dependerao de estimativa geografica.",
+      { required: Boolean(args.osrm?.required), baseUrl: args.osrm?.baseUrl ?? null }
+    );
+  } else if (args.osrm.required && !args.osrm.reachable) {
+    addCheck(
+      "osrm",
+      "critical",
+      "OSRM obrigatorio esta indisponivel.",
+      {
+        baseUrl: args.osrm.baseUrl ?? null,
+        latencyMs: args.osrm.latencyMs ?? null,
+        error: args.osrm.error ?? null
+      }
+    );
+  } else if (!args.osrm.reachable) {
+    addCheck(
+      "osrm",
+      "attention",
+      "OSRM indisponivel; rotas pequenas podem usar fallback e rotas grandes podem ser bloqueadas.",
+      {
+        baseUrl: args.osrm.baseUrl ?? null,
+        latencyMs: args.osrm.latencyMs ?? null,
+        error: args.osrm.error ?? null
+      }
+    );
+  } else if (String(args.osrm.baseUrl || "").includes("router.project-osrm.org")) {
+    addCheck(
+      "osrm",
+      "attention",
+      "OSRM usa endpoint publico. Funciona, mas nao e infra propria de producao.",
+      {
+        baseUrl: args.osrm.baseUrl,
+        latencyMs: args.osrm.latencyMs ?? null,
+        required: Boolean(args.osrm.required)
+      }
+    );
+  } else {
+    addCheck("osrm", "ready", "OSRM operacional.", {
+      baseUrl: args.osrm.baseUrl ?? null,
+      latencyMs: args.osrm.latencyMs ?? null,
+      required: Boolean(args.osrm.required)
+    });
+  }
+  if (!args.queue?.configured) {
+    addCheck(
+      "queue",
+      "attention",
+      "Fila assincrona nao configurada; otimizacoes ficam limitadas ao modo sincrono."
+    );
+  } else if (!args.queue.reachable) {
+    addCheck("queue", "critical", "Fila Redis/BullMQ configurada, mas indisponivel.", {
+      error: args.queue.error ?? null
+    });
+  } else if (Number(args.queue.workerCount ?? 0) < Number(args.queue.minimumWorkerCount ?? 0)) {
+    addCheck(
+      "workers",
+      "attention",
+      `Workers online abaixo do minimo (${args.queue.workerCount}/${args.queue.minimumWorkerCount}).`,
+      {
+        workerCount: args.queue.workerCount ?? 0,
+        minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
+        alert: args.queue.alert ?? null
+      }
+    );
+  } else {
+    addCheck("workers", "ready", "Workers operacionais.", {
+      workerCount: args.queue.workerCount ?? 0,
+      minimumWorkerCount: args.queue.minimumWorkerCount ?? 0
+    });
+  }
+  if (args.queueIntegrity) {
+    const healthy = args.queueIntegrity.status === "healthy";
+    addCheck(
+      "queueIntegrity",
+      healthy ? "ready" : "attention",
+      healthy ? "Integridade da fila sem anomalias recentes." : "Integridade da fila exige atencao.",
+      {
+        status: args.queueIntegrity.status,
+        duplicateJobs: args.queueIntegrity.duplicateJobs ?? 0,
+        stalledJobs: args.queueIntegrity.stalledJobs ?? 0,
+        failedRecoveries: args.queueIntegrity.failedRecoveries ?? 0
+      }
+    );
+  }
+  if (args.disasterReadiness) {
+    const status2 = args.disasterReadiness.status === "healthy" ? "ready" : args.disasterReadiness.status === "critical" ? "critical" : "attention";
+    addCheck(
+      "disasterRecovery",
+      status2,
+      status2 === "ready" ? "Backup e restore com evidencias validas." : "Backup/restore ainda nao esta pronto para operacao comercial.",
+      {
+        status: args.disasterReadiness.status,
+        lastBackupAt: args.disasterReadiness.lastBackupAt ?? null,
+        backupAgeHours: args.disasterReadiness.backupAgeHours ?? null,
+        restoreTestAt: args.disasterReadiness.restoreTestAt ?? null,
+        restoreTestPassed: Boolean(args.disasterReadiness.restoreTestPassed),
+        alerts: args.disasterReadiness.alerts ?? []
+      }
+    );
+  }
+  const status = checks.reduce(
+    (current, check) => rankReadinessStatus(check.status) > rankReadinessStatus(current) ? check.status : current,
+    "ready"
+  );
+  return {
+    status,
+    ready: status === "ready",
+    attention: status === "attention",
+    critical: status === "critical",
+    checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    checks
+  };
+}
 async function getStorageHealthSnapshot(source) {
   const database = await getDatabaseHealth();
   const osrm = await getOsrmHealth();
@@ -13063,6 +13204,12 @@ async function getStorageHealthSnapshot(source) {
   const osrmAvailable = !osrm.required || osrm.enabled && osrm.reachable;
   const systemAvailable = storageAvailable && osrmAvailable;
   const mode = database.connected ? "persistent" : fallbackStore.configured ? "redis-fallback" : "local-fallback";
+  const operationalReadiness = buildOperationalReadiness({
+    storageAvailable,
+    mode,
+    osrm,
+    queue: queue2
+  });
   await recordHealthObservation({
     database,
     fallbackStore,
@@ -13079,6 +13226,7 @@ async function getStorageHealthSnapshot(source) {
     systemAvailable,
     osrm,
     queue: queue2,
+    operationalReadiness,
     mode
   };
 }
@@ -13151,6 +13299,7 @@ export default function EconoRotasAssetRefresh() { return null; }
         systemAvailable,
         osrm,
         queue: queue2,
+        operationalReadiness,
         mode
       } = await getStorageHealthSnapshot("api.health");
       res.status(systemAvailable ? 200 : 500).json({
@@ -13162,6 +13311,7 @@ export default function EconoRotasAssetRefresh() { return null; }
         fallbackStore,
         osrm,
         queue: queue2,
+        operationalReadiness,
         requiredManagedDatabase: ENV.requireManagedDatabase,
         warning: ENV.hasInvalidProductionDatabaseUrl ? "DATABASE_URL aponta para host local/Docker e n\xE3o funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis." : void 0,
         timestamp: (/* @__PURE__ */ new Date()).toISOString()
@@ -13187,13 +13337,18 @@ export default function EconoRotasAssetRefresh() { return null; }
         systemAvailable,
         osrm,
         queue: queue2,
+        operationalReadiness: baseOperationalReadiness,
         mode
       } = await getStorageHealthSnapshot("api.monitor.ping");
+      let queueIntegrity = null;
+      let disasterReadiness = null;
       let adminDashboardRefresh = {
         ok: false
       };
       if (systemAvailable) {
         try {
+          queueIntegrity = await getQueueIntegrityDashboard();
+          disasterReadiness = await getDisasterReadinessDashboard();
           await refreshAdminDashboardMetrics();
           adminDashboardRefresh = { ok: true };
         } catch (error) {
@@ -13203,6 +13358,14 @@ export default function EconoRotasAssetRefresh() { return null; }
           };
         }
       }
+      const operationalReadiness = buildOperationalReadiness({
+        storageAvailable,
+        mode,
+        osrm,
+        queue: queue2,
+        queueIntegrity: queueIntegrity ?? void 0,
+        disasterReadiness: disasterReadiness ?? void 0
+      });
       res.status(systemAvailable ? 200 : 500).json({
         ok: systemAvailable,
         monitor: true,
@@ -13213,6 +13376,9 @@ export default function EconoRotasAssetRefresh() { return null; }
         fallbackStore,
         osrm,
         queue: queue2,
+        queueIntegrity,
+        disasterReadiness,
+        operationalReadiness: systemAvailable ? operationalReadiness : baseOperationalReadiness,
         adminDashboardRefresh,
         requiredManagedDatabase: ENV.requireManagedDatabase,
         timestamp: (/* @__PURE__ */ new Date()).toISOString()

@@ -32,6 +32,7 @@ function createAuthContext(userId: number, role: "user" | "admin" = "user"): Trp
 describe("Route endpoints", () => {
   afterEach(() => {
     ENV.osrmRequired = false;
+    ENV.osrmRequiredMinStops = 101;
     ENV.maxSyncStops = 160;
     ENV.maxRouteStops = 160;
     ENV.maxGeographicFallbackStops = 160;
@@ -769,8 +770,9 @@ describe("Route endpoints", () => {
     )).toBe(true);
   });
 
-  it("optimizes with warning when OSRM is required and road metrics are unavailable", async () => {
+  it("rejects optimization when OSRM is required and road metrics are unavailable", async () => {
     ENV.osrmRequired = true;
+    ENV.osrmRequiredMinStops = 1;
     const caller = appRouter.createCaller(createAuthContext(8217));
 
     const route = await caller.routes.create({
@@ -795,13 +797,12 @@ describe("Route endpoints", () => {
       ],
     });
 
-    const optimized = await caller.routes.optimize({ id: route.id });
+    await expect(caller.routes.optimize({ id: route.id })).rejects.toThrow(
+      "OSRM obrigatorio indisponivel"
+    );
 
     const storedRoute = await caller.routes.get({ id: route.id });
-    expect(optimized.audit.issues.some((issue: any) =>
-      issue.type === "osrm_fallback"
-    )).toBe(true);
-    expect(storedRoute?.status).toBe("optimized");
+    expect(storedRoute?.status).toBe("draft");
   });
 
   it("optimizes a 134-stop Shopee route with partitioned geographic fallback when OSRM is unavailable", async () => {

@@ -32,6 +32,7 @@ import {
 import {
   auditRouteSequence,
   type AuditableStop,
+  type RouteAuditIssue,
   type RouteAuditReport,
 } from "./routeAudit";
 import { chatWithLLM, formatChatHistory } from "./chat";
@@ -2306,11 +2307,23 @@ export async function optimizeUserRoute(
   const { optimized, audit, auditSource } = optimizationAttempt;
   const osrmRequiredForRoute =
     ENV.osrmRequired && routeStops.length >= ENV.osrmRequiredMinStops;
-  if (osrmRequiredForRoute && !optimizationAttempt.usedRoadMetrics) {
+  const osrmRequiredBlocked =
+    osrmRequiredForRoute &&
+    !optimizationAttempt.usedRoadMetrics &&
+    optimizationAttempt.auditPolicy !== SHOPEE_STOP_AUDIT_POLICY;
+  if (osrmRequiredBlocked) {
+    const osrmFallbackIssue: RouteAuditIssue =
+      audit.issues.find((issue) => issue.type === "osrm_fallback") ?? {
+        type: "osrm_fallback",
+        severity: "critical",
+        title: "OSRM obrigatorio indisponivel",
+        message:
+          "A rota exige calculo por ruas, mas o OSRM nao retornou matriz utilizavel.",
+      };
     const osrmBlockingReason = {
-      issue: audit.issues.find((issue) => issue.type === "osrm_fallback") ?? null,
+      issue: osrmFallbackIssue,
       message:
-        "OSRM obrigatorio indisponivel. A rota foi salva com alerta usando a melhor estimativa disponivel.",
+        "OSRM obrigatorio indisponivel. A rota nao foi salva como otimizada para evitar sequencia incoerente.",
     };
 
     await db.createOperationalEvent({
@@ -2318,7 +2331,7 @@ export async function optimizeUserRoute(
       routeId,
       stopId: null,
       type: "route_osrm_required_unavailable",
-      severity: "warning",
+      severity: "error",
       source: "routes.optimize",
       title: "OSRM obrigatorio indisponivel",
       message: osrmBlockingReason.message,
@@ -2339,6 +2352,13 @@ export async function optimizeUserRoute(
       },
     }).catch((error) => {
       console.warn("[Routes] Failed to record required OSRM event:", error);
+    });
+
+    await recordRouteMetricForAttempt(osrmBlockingReason);
+
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: osrmBlockingReason.message,
     });
   }
 

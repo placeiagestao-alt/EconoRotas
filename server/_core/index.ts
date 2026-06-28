@@ -198,6 +198,184 @@ function validateProductionEnvironment() {
   }
 }
 
+type OperationalReadinessStatus = "ready" | "attention" | "critical";
+
+type OperationalReadinessCheck = {
+  name: string;
+  status: OperationalReadinessStatus;
+  message: string;
+  metadata?: Record<string, unknown>;
+};
+
+function rankReadinessStatus(status: OperationalReadinessStatus) {
+  return status === "critical" ? 3 : status === "attention" ? 2 : 1;
+}
+
+function buildOperationalReadiness(args: {
+  storageAvailable: boolean;
+  mode: string;
+  osrm: any;
+  queue: any;
+  queueIntegrity?: any;
+  disasterReadiness?: any;
+}) {
+  const checks: OperationalReadinessCheck[] = [];
+  const addCheck = (
+    name: string,
+    status: OperationalReadinessStatus,
+    message: string,
+    metadata?: Record<string, unknown>
+  ) => checks.push({ name, status, message, metadata });
+
+  addCheck(
+    "storage",
+    args.storageAvailable ? "ready" : "critical",
+    args.storageAvailable
+      ? `Armazenamento operacional em modo ${args.mode}.`
+      : "Armazenamento indisponivel para operacao real.",
+    { mode: args.mode }
+  );
+
+  if (!args.osrm?.enabled) {
+    addCheck(
+      "osrm",
+      args.osrm?.required ? "critical" : "attention",
+      args.osrm?.required
+        ? "OSRM obrigatorio esta desativado."
+        : "OSRM esta desativado; rotas dependerao de estimativa geografica.",
+      { required: Boolean(args.osrm?.required), baseUrl: args.osrm?.baseUrl ?? null }
+    );
+  } else if (args.osrm.required && !args.osrm.reachable) {
+    addCheck(
+      "osrm",
+      "critical",
+      "OSRM obrigatorio esta indisponivel.",
+      {
+        baseUrl: args.osrm.baseUrl ?? null,
+        latencyMs: args.osrm.latencyMs ?? null,
+        error: args.osrm.error ?? null,
+      }
+    );
+  } else if (!args.osrm.reachable) {
+    addCheck(
+      "osrm",
+      "attention",
+      "OSRM indisponivel; rotas pequenas podem usar fallback e rotas grandes podem ser bloqueadas.",
+      {
+        baseUrl: args.osrm.baseUrl ?? null,
+        latencyMs: args.osrm.latencyMs ?? null,
+        error: args.osrm.error ?? null,
+      }
+    );
+  } else if (String(args.osrm.baseUrl || "").includes("router.project-osrm.org")) {
+    addCheck(
+      "osrm",
+      "attention",
+      "OSRM usa endpoint publico. Funciona, mas nao e infra propria de producao.",
+      {
+        baseUrl: args.osrm.baseUrl,
+        latencyMs: args.osrm.latencyMs ?? null,
+        required: Boolean(args.osrm.required),
+      }
+    );
+  } else {
+    addCheck("osrm", "ready", "OSRM operacional.", {
+      baseUrl: args.osrm.baseUrl ?? null,
+      latencyMs: args.osrm.latencyMs ?? null,
+      required: Boolean(args.osrm.required),
+    });
+  }
+
+  if (!args.queue?.configured) {
+    addCheck(
+      "queue",
+      "attention",
+      "Fila assincrona nao configurada; otimizacoes ficam limitadas ao modo sincrono."
+    );
+  } else if (!args.queue.reachable) {
+    addCheck("queue", "critical", "Fila Redis/BullMQ configurada, mas indisponivel.", {
+      error: args.queue.error ?? null,
+    });
+  } else if (
+    Number(args.queue.workerCount ?? 0) <
+    Number(args.queue.minimumWorkerCount ?? 0)
+  ) {
+    addCheck(
+      "workers",
+      "attention",
+      `Workers online abaixo do minimo (${args.queue.workerCount}/${args.queue.minimumWorkerCount}).`,
+      {
+        workerCount: args.queue.workerCount ?? 0,
+        minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
+        alert: args.queue.alert ?? null,
+      }
+    );
+  } else {
+    addCheck("workers", "ready", "Workers operacionais.", {
+      workerCount: args.queue.workerCount ?? 0,
+      minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
+    });
+  }
+
+  if (args.queueIntegrity) {
+    const healthy = args.queueIntegrity.status === "healthy";
+    addCheck(
+      "queueIntegrity",
+      healthy ? "ready" : "attention",
+      healthy
+        ? "Integridade da fila sem anomalias recentes."
+        : "Integridade da fila exige atencao.",
+      {
+        status: args.queueIntegrity.status,
+        duplicateJobs: args.queueIntegrity.duplicateJobs ?? 0,
+        stalledJobs: args.queueIntegrity.stalledJobs ?? 0,
+        failedRecoveries: args.queueIntegrity.failedRecoveries ?? 0,
+      }
+    );
+  }
+
+  if (args.disasterReadiness) {
+    const status: OperationalReadinessStatus =
+      args.disasterReadiness.status === "healthy"
+        ? "ready"
+        : args.disasterReadiness.status === "critical"
+          ? "critical"
+          : "attention";
+    addCheck(
+      "disasterRecovery",
+      status,
+      status === "ready"
+        ? "Backup e restore com evidencias validas."
+        : "Backup/restore ainda nao esta pronto para operacao comercial.",
+      {
+        status: args.disasterReadiness.status,
+        lastBackupAt: args.disasterReadiness.lastBackupAt ?? null,
+        backupAgeHours: args.disasterReadiness.backupAgeHours ?? null,
+        restoreTestAt: args.disasterReadiness.restoreTestAt ?? null,
+        restoreTestPassed: Boolean(args.disasterReadiness.restoreTestPassed),
+        alerts: args.disasterReadiness.alerts ?? [],
+      }
+    );
+  }
+
+  const status = checks.reduce<OperationalReadinessStatus>(
+    (current, check) =>
+      rankReadinessStatus(check.status) > rankReadinessStatus(current)
+        ? check.status
+        : current,
+    "ready"
+  );
+
+  return {
+    status,
+    ready: status === "ready",
+    attention: status === "attention",
+    critical: status === "critical",
+    checkedAt: new Date().toISOString(),
+    checks,
+  };
+}
+
 async function getStorageHealthSnapshot(source: string) {
   const database = await getDatabaseHealth();
   const osrm = await getOsrmHealth();
@@ -224,6 +402,12 @@ async function getStorageHealthSnapshot(source: string) {
     : fallbackStore.configured
       ? "redis-fallback"
       : "local-fallback";
+  const operationalReadiness = buildOperationalReadiness({
+    storageAvailable,
+    mode,
+    osrm,
+    queue,
+  });
 
   await recordHealthObservation({
     database,
@@ -242,6 +426,7 @@ async function getStorageHealthSnapshot(source: string) {
     systemAvailable,
     osrm,
     queue,
+    operationalReadiness,
     mode,
   };
 }
@@ -331,6 +516,7 @@ export default function EconoRotasAssetRefresh() { return null; }
         systemAvailable,
         osrm,
         queue,
+        operationalReadiness,
         mode,
       } = await getStorageHealthSnapshot("api.health");
 
@@ -343,6 +529,7 @@ export default function EconoRotasAssetRefresh() { return null; }
         fallbackStore,
         osrm,
         queue,
+        operationalReadiness,
         requiredManagedDatabase: ENV.requireManagedDatabase,
         warning: ENV.hasInvalidProductionDatabaseUrl
           ? "DATABASE_URL aponta para host local/Docker e não funciona em Vercel. Configure MySQL gerenciado ou remova DATABASE_URL e use Upstash Redis."
@@ -370,13 +557,22 @@ export default function EconoRotasAssetRefresh() { return null; }
         systemAvailable,
         osrm,
         queue,
+        operationalReadiness: baseOperationalReadiness,
         mode,
       } = await getStorageHealthSnapshot("api.monitor.ping");
+      let queueIntegrity: Awaited<
+        ReturnType<typeof getQueueIntegrityDashboard>
+      > | null = null;
+      let disasterReadiness: Awaited<
+        ReturnType<typeof getDisasterReadinessDashboard>
+      > | null = null;
       let adminDashboardRefresh: { ok: boolean; error?: string } = {
         ok: false,
       };
       if (systemAvailable) {
         try {
+          queueIntegrity = await getQueueIntegrityDashboard();
+          disasterReadiness = await getDisasterReadinessDashboard();
           await refreshAdminDashboardMetrics();
           adminDashboardRefresh = { ok: true };
         } catch (error) {
@@ -386,6 +582,14 @@ export default function EconoRotasAssetRefresh() { return null; }
           };
         }
       }
+      const operationalReadiness = buildOperationalReadiness({
+        storageAvailable,
+        mode,
+        osrm,
+        queue,
+        queueIntegrity: queueIntegrity ?? undefined,
+        disasterReadiness: disasterReadiness ?? undefined,
+      });
 
       res.status(systemAvailable ? 200 : 500).json({
         ok: systemAvailable,
@@ -397,6 +601,11 @@ export default function EconoRotasAssetRefresh() { return null; }
         fallbackStore,
         osrm,
         queue,
+        queueIntegrity,
+        disasterReadiness,
+        operationalReadiness: systemAvailable
+          ? operationalReadiness
+          : baseOperationalReadiness,
         adminDashboardRefresh,
         requiredManagedDatabase: ENV.requireManagedDatabase,
         timestamp: new Date().toISOString(),
