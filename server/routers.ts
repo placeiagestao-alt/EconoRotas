@@ -31,7 +31,6 @@ import {
 } from "./osrm";
 import {
   auditRouteSequence,
-  detectRouteCrossings,
   type AuditableStop,
   type RouteAuditReport,
 } from "./routeAudit";
@@ -463,8 +462,7 @@ function isSequenceCoherenceIssue(issue: RouteAuditReport["issues"][number]) {
   return (
     issue.type === "nearby_stop_skipped" ||
     issue.type === "region_revisited" ||
-    issue.type === "premature_region_exit" ||
-    issue.type === "route_crossing"
+    issue.type === "premature_region_exit"
   );
 }
 
@@ -984,46 +982,6 @@ function isAuditAttemptBetter(
   return candidate.optimized.totalDistance < current.optimized.totalDistance;
 }
 
-function removeRouteCrossings(route: OptimizedRoute): Location[] | null {
-  const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
-  let changed = false;
-  const maxPasses = Math.max(20, Math.min(2000, waypoints.length * 8));
-
-  for (let pass = 0; pass < maxPasses; pass += 1) {
-    const [crossing] = detectRouteCrossings(waypoints as AuditableStop[]);
-    if (!crossing) {
-      return changed ? routeWaypointsToLocations(waypoints) : null;
-    }
-
-    const firstSegmentEndIndex = waypoints.findIndex(
-      (waypoint) => waypoint.sequence === crossing.toSequence
-    );
-    const secondSegmentStartIndex = waypoints.findIndex(
-      (waypoint) => waypoint.sequence === crossing.crossingFromSequence
-    );
-
-    if (
-      firstSegmentEndIndex < 0 ||
-      secondSegmentStartIndex < 0 ||
-      secondSegmentStartIndex <= firstSegmentEndIndex
-    ) {
-      break;
-    }
-
-    const reversedMiddle = waypoints
-      .slice(firstSegmentEndIndex, secondSegmentStartIndex + 1)
-      .reverse();
-    waypoints.splice(
-      firstSegmentEndIndex,
-      secondSegmentStartIndex - firstSegmentEndIndex + 1,
-      ...reversedMiddle
-    );
-    changed = true;
-  }
-
-  return changed ? routeWaypointsToLocations(waypoints) : null;
-}
-
 function reorderRouteByAuditIssue(
   route: OptimizedRoute,
   issue: RouteAuditReport["issues"][number]
@@ -1037,10 +995,6 @@ function reorderRouteByAuditIssue(
   }
 
   const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
-
-  if (issue.type === "route_crossing") {
-    return removeRouteCrossings(route);
-  }
 
   if (issue.type === "premature_region_exit" && issue.pendingSequences?.length) {
     const plannedIndex = waypoints.findIndex(
@@ -1711,7 +1665,7 @@ export async function optimizeUserRoute(
       throw new TRPCError({
         code: "BAD_REQUEST",
         message:
-          "OSRM indisponivel para rota grande. Fallback geografico bloqueado para evitar timeout e sequencia incoerente.",
+          "Nao foi possivel calcular esta rota grande agora. O servico de rotas por ruas esta indisponivel e a estimativa simples foi bloqueada para evitar uma sequencia ruim. Tente novamente em alguns minutos ou reduza a rota.",
       });
     }
 

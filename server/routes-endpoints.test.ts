@@ -368,6 +368,42 @@ describe("Route endpoints", () => {
     expect(outcome.sequenceCoherenceVerified).toBe(false);
   });
 
+  it("keeps route crossings as visual attention instead of strong operational incoherence", () => {
+    const outcome = __routeOptimizationTestHooks.getRouteOperationalOutcome(
+      {
+        status: "attention" as const,
+        score: 82,
+        quality: "good" as const,
+        stopCount: 4,
+        issueCount: 1,
+        criticalCount: 0,
+        warningCount: 1,
+        totalDistanceKm: 4,
+        maxLegKm: 1,
+        clusterMetrics: {
+          clusterCount: 1,
+          averageRadiusKm: 1,
+          maxRadiusKm: 1,
+          spreadClusters: [],
+        },
+        issues: [
+          {
+            type: "route_crossing" as const,
+            severity: "low" as const,
+            title: "Cruzamento visual no trajeto",
+            message: "O trecho cruza outro trecho no mapa.",
+          },
+        ],
+      },
+      null
+    );
+
+    expect(outcome.status).toBe("optimized_attention");
+    expect(outcome.commerciallySatisfactory).toBe(true);
+    expect(outcome.sequenceCoherenceVerified).toBe(true);
+    expect(outcome.remainingCoherenceIssues).toBe(0);
+  });
+
   it("creates stops and optimizes route in one backend operation", async () => {
     const caller = appRouter.createCaller(createAuthContext(8201));
 

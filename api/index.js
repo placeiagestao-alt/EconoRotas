@@ -10078,7 +10078,7 @@ function getPostOptimizationBlockingReason(audit) {
   return null;
 }
 function isSequenceCoherenceIssue(issue) {
-  return issue.type === "nearby_stop_skipped" || issue.type === "region_revisited" || issue.type === "premature_region_exit" || issue.type === "route_crossing";
+  return issue.type === "nearby_stop_skipped" || issue.type === "region_revisited" || issue.type === "premature_region_exit";
 }
 function countAuditIssues(audit, type) {
   return audit.issues.filter((issue) => issue.type === type).length;
@@ -10426,42 +10426,11 @@ function isAuditAttemptBetter(current, candidate) {
   }
   return candidate.optimized.totalDistance < current.optimized.totalDistance;
 }
-function removeRouteCrossings(route) {
-  const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
-  let changed = false;
-  const maxPasses = Math.max(20, Math.min(2e3, waypoints.length * 8));
-  for (let pass = 0; pass < maxPasses; pass += 1) {
-    const [crossing] = detectRouteCrossings(waypoints);
-    if (!crossing) {
-      return changed ? routeWaypointsToLocations(waypoints) : null;
-    }
-    const firstSegmentEndIndex = waypoints.findIndex(
-      (waypoint) => waypoint.sequence === crossing.toSequence
-    );
-    const secondSegmentStartIndex = waypoints.findIndex(
-      (waypoint) => waypoint.sequence === crossing.crossingFromSequence
-    );
-    if (firstSegmentEndIndex < 0 || secondSegmentStartIndex < 0 || secondSegmentStartIndex <= firstSegmentEndIndex) {
-      break;
-    }
-    const reversedMiddle = waypoints.slice(firstSegmentEndIndex, secondSegmentStartIndex + 1).reverse();
-    waypoints.splice(
-      firstSegmentEndIndex,
-      secondSegmentStartIndex - firstSegmentEndIndex + 1,
-      ...reversedMiddle
-    );
-    changed = true;
-  }
-  return changed ? routeWaypointsToLocations(waypoints) : null;
-}
 function reorderRouteByAuditIssue(route, issue) {
   if (!isSequenceCoherenceIssue(issue) || issue.nearestSequence === void 0 || issue.toSequence === void 0) {
     return null;
   }
   const waypoints = route.waypoints.map((waypoint) => ({ ...waypoint }));
-  if (issue.type === "route_crossing") {
-    return removeRouteCrossings(route);
-  }
   if (issue.type === "premature_region_exit" && issue.pendingSequences?.length) {
     const plannedIndex2 = waypoints.findIndex(
       (waypoint) => waypoint.sequence === issue.toSequence
@@ -10989,7 +10958,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       });
       throw new TRPCError3({
         code: "BAD_REQUEST",
-        message: "OSRM indisponivel para rota grande. Fallback geografico bloqueado para evitar timeout e sequencia incoerente."
+        message: "Nao foi possivel calcular esta rota grande agora. O servico de rotas por ruas esta indisponivel e a estimativa simples foi bloqueada para evitar uma sequencia ruim. Tente novamente em alguns minutos ou reduza a rota."
       });
     }
     if (shouldUseLargePartitionedFallback) {

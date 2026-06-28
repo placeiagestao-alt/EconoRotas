@@ -228,6 +228,23 @@ function getStatusLabel(status?: string, operationalStatus?: string, operational
   }
 }
 
+function isShopeeStopSequenceRoute(route: unknown) {
+  const routeData = route as
+    | {
+        operationalStatus?: string | null;
+        routingStrategy?: string | null;
+        structuralAuditOnly?: boolean | null;
+      }
+    | null
+    | undefined;
+
+  return (
+    routeData?.operationalStatus === "shopee_stop_sequence" ||
+    routeData?.routingStrategy === "shopee_stop_sequence" ||
+    routeData?.structuralAuditOnly === true
+  );
+}
+
 function buildStopNavigationUrl(stop?: Stop) {
   if (!stop) return "#";
 
@@ -1021,6 +1038,11 @@ export default function RouteDetail() {
   const hasReoptimizableAuditIssues =
     hasBlockingAuditIssues && !hasStructuralAuditIssues;
   const canSeeRouteAuditPanel = authQuery.data?.role === "admin";
+  const routeOperationalStatus = (routeQuery.data as any)?.operationalStatus as
+    | string
+    | undefined;
+  const routeIsShopeeStopSequence = isShopeeStopSequenceRoute(routeQuery.data);
+  const routeNeedsStrongAttention = routeOperationalStatus === "attention_strong";
 
   const completeRoute = async () => {
     await updateRouteMutation.mutateAsync({
@@ -1055,7 +1077,7 @@ export default function RouteDetail() {
 
     try {
       toast.message(
-        "Fiscal encontrou incoerência. Recalculando a rota para novo julgamento..."
+        "Recalculando a sequência da rota para uma nova validação..."
       );
       const currentPosition = await getCurrentPosition();
       const payload = {
@@ -1077,7 +1099,7 @@ export default function RouteDetail() {
     } catch (error: any) {
       toast.error(
         error?.message ||
-          "Não foi possível obter sua localização para refazer a rota pelo fiscal."
+          "Não foi possível obter sua localização para refazer a rota."
       );
     } finally {
       setIsLocatingForReoptimization(false);
@@ -1163,6 +1185,7 @@ export default function RouteDetail() {
   ) => {
     const targetStop = stops[stopIndex];
     if (!targetStop) return;
+    const isShopeeStopSequence = isShopeeStopSequenceRoute(routeQuery.data);
     const previousDeliveryState = getDeliverySnapshot(deliveryState);
     const previousHandled = new Set([
       ...deliveryState.delivered,
@@ -1239,6 +1262,7 @@ export default function RouteDetail() {
         const nearestStop =
           nearestPendingIndex >= 0 ? stops[nearestPendingIndex] : null;
         if (
+          !isShopeeStopSequence &&
           sequenceStop &&
           nearestStop &&
           nearestPendingIndex !== firstPendingIndex &&
@@ -1313,6 +1337,10 @@ export default function RouteDetail() {
       metadata: {
         result,
         stopIndex,
+        routeExecutionStrategy: isShopeeStopSequence
+          ? "shopee_stop_sequence"
+          : "optimized_sequence",
+        sequenceCoherenceCheckSkipped: isShopeeStopSequence,
         stopPackage: getStopDisplayLabel(targetStop, stopIndex),
         stopAddress: targetStop.address,
         stopLatitude: roundCoordinate(targetStop.latitude),
@@ -1364,6 +1392,10 @@ export default function RouteDetail() {
         stopId: targetStop.id,
         metadata: {
           stopIndex,
+          routeExecutionStrategy: isShopeeStopSequence
+            ? "shopee_stop_sequence"
+            : "optimized_sequence",
+          sequenceCoherenceCheckSkipped: isShopeeStopSequence,
           stopPackage: getStopDisplayLabel(targetStop, stopIndex),
           stopAddress: targetStop.address,
           distanceFromExpectedStopKm: distanceRounded,
@@ -1385,6 +1417,10 @@ export default function RouteDetail() {
         stopId: targetStop.id,
         metadata: {
           stopIndex,
+          routeExecutionStrategy: isShopeeStopSequence
+            ? "shopee_stop_sequence"
+            : "optimized_sequence",
+          sequenceCoherenceCheckSkipped: isShopeeStopSequence,
           stopPackage: getStopDisplayLabel(targetStop, stopIndex),
           stopAddress: targetStop.address,
           distanceFromExpectedStopKm: distanceRounded,
@@ -1407,6 +1443,10 @@ export default function RouteDetail() {
         metadata: {
           result,
           actionTrigger: trigger,
+          routeExecutionStrategy: isShopeeStopSequence
+            ? "shopee_stop_sequence"
+            : "optimized_sequence",
+          sequenceCoherenceCheckSkipped: isShopeeStopSequence,
           confirmedStopIndex: stopIndex,
           confirmedStopPackage: getStopDisplayLabel(targetStop, stopIndex),
           confirmedStopAddress: targetStop.address,
@@ -1427,6 +1467,7 @@ export default function RouteDetail() {
     }
 
     if (
+      !isShopeeStopSequence &&
       typeof sequenceGapKm === "number" &&
       (sequenceGapKm > SEQUENCE_INCOHERENCE_ALERT_KM ||
         autoSelectedNearbyStop) &&
@@ -1624,7 +1665,7 @@ export default function RouteDetail() {
     if (hasStructuralAuditIssues) {
       const firstIssue = structuralAuditIssues[0];
       toast.error(
-        `${firstIssue.title}: corrija os problemas apontados pelo fiscal antes de otimizar.`
+        `${firstIssue.title}: corrija os problemas de endereço antes de otimizar.`
       );
       return;
     }
@@ -1662,7 +1703,7 @@ export default function RouteDetail() {
     if (hasStructuralAuditIssues) {
       const firstIssue = structuralAuditIssues[0];
       toast.error(
-        `${firstIssue.title}: corrija os problemas apontados pelo fiscal antes de reotimizar.`
+        `${firstIssue.title}: corrija os problemas de endereço antes de reotimizar.`
       );
       return;
     }
@@ -1703,7 +1744,7 @@ export default function RouteDetail() {
     if (hasStructuralAuditIssues) {
       const firstIssue = structuralAuditIssues[0];
       toast.error(
-        `${firstIssue.title}: corrija os problemas apontados pelo fiscal antes de ajustar a sequência.`
+        `${firstIssue.title}: corrija os problemas de endereço antes de ajustar a sequência.`
       );
       return;
     }
@@ -2134,6 +2175,38 @@ export default function RouteDetail() {
           </div>
         </div>
 
+        {routeNeedsStrongAttention ? (
+          <Alert className="border-amber-300 bg-amber-50 text-amber-950">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription>
+              <div className="space-y-1">
+                <p className="font-semibold">
+                  Rota com atenção forte na sequência.
+                </p>
+                <p className="text-sm">
+                  A rota pode ser iniciada, mas ainda existe sinal de saída
+                  prematura de região ou parada próxima deixada para depois.
+                  Se possível, use Reotimizar restantes ou Não gostei da
+                  sequência antes de sair.
+                </p>
+              </div>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {routeIsShopeeStopSequence ? (
+          <Alert className="border-orange-300 bg-orange-50 text-orange-950">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription>
+              <p className="text-sm">
+                Sequência STOP Shopee preservada. O app não troca a ordem por
+                proximidade; apenas encaixa paradas sem STOP conforme a regra da
+                tabela.
+              </p>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
         {canSeeRouteAuditPanel && auditQuery.data ? (
           <Alert
             className={
@@ -2193,7 +2266,7 @@ export default function RouteDetail() {
                   <p className="text-sm font-semibold">
                     {hasStructuralAuditIssues
                       ? "Corrija os problemas de endereço ou coordenada antes de otimizar ou iniciar a rota."
-                      : "O fiscal encontrou incoerência de sequência. Ao iniciar, o sistema vai refazer a rota para novo julgamento; você também pode usar Reotimizar restantes ou Não gostei da sequência."}
+                      : "A validação encontrou incoerência de sequência. Ao iniciar, o sistema vai refazer a rota para nova validação; você também pode usar Reotimizar restantes ou Não gostei da sequência."}
                   </p>
                 ) : null}
                 {auditQuery.data.issues.length ? (
