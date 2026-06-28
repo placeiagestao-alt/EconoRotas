@@ -18,11 +18,13 @@ import { saveAuthSessionToken } from "@/lib/authSession";
 import { readDeliveryProgress, readLastRouteProgress } from "@/lib/routeProgress";
 import { trpc } from "@/lib/trpc";
 import {
+  ArrowRight,
   BarChart3,
   Calendar,
   CheckCircle2,
   ClipboardList,
   Clock,
+  Download,
   FileCheck2,
   Fuel,
   History,
@@ -51,10 +53,10 @@ const GOOGLE_LOGIN_CONFIGURED =
     Boolean(import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim()));
 
 const trustItems = [
-  { icon: ShieldCheck, label: "LGPD e privacidade" },
-  { icon: MessageCircle, label: "Suporte WhatsApp" },
-  { icon: FileCheck2, label: "Politica e termos" },
-  { icon: CheckCircle2, label: "PWA oficial" },
+  { icon: ShieldCheck, label: "LGPD" },
+  { icon: MessageCircle, label: "WhatsApp" },
+  { icon: FileCheck2, label: "Política" },
+  { icon: CheckCircle2, label: "Termos" },
 ];
 
 const steps = [
@@ -66,7 +68,7 @@ const steps = [
   {
     icon: WandSparkles,
     title: "Otimize",
-    text: "Escolha sequencia STOP, ordem da tabela ou rota inteligente.",
+    text: "Escolha sequência STOP, ordem da tabela ou rota inteligente.",
   },
   {
     icon: Navigation,
@@ -269,17 +271,17 @@ export default function Home() {
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-background px-4 py-6 text-foreground sm:px-6 lg:px-8">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-          <header className="flex flex-col gap-4 rounded-2xl border border-border/85 bg-white/90 p-4 shadow-[0_10px_24px_rgb(15_23_42_/_7%)] dark:bg-card sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-h-screen bg-[#fff7ed] px-4 py-5 text-slate-950 sm:px-6 lg:px-8">
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
+          <header className="flex flex-col gap-4 rounded-[28px] border border-orange-100 bg-white/92 p-4 shadow-[0_16px_42px_rgb(15_23_42_/_8%)] backdrop-blur dark:border-slate-800 dark:bg-card sm:flex-row sm:items-center sm:justify-between">
             <BrandLogo variant="full" className="h-16 w-56 justify-start" />
-            <div className="flex flex-wrap gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
+            <div className="flex flex-wrap gap-2 text-sm font-normal text-slate-600 dark:text-slate-300">
               {trustItems.map((item) => (
                 <span
                   key={item.label}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary/60 px-3 py-2"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-orange-100 bg-orange-50 px-3 py-2 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
                 >
-                  <item.icon className="h-3.5 w-3.5 text-primary" />
+                  <item.icon className="h-3.5 w-3.5 text-[#ff6d00]" />
                   {item.label}
                 </span>
               ))}
@@ -287,95 +289,127 @@ export default function Home() {
           </header>
 
           <main className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr] lg:items-start">
-            <section className="space-y-5 rounded-2xl border border-border/85 bg-white p-5 shadow-[0_14px_36px_rgb(15_23_42_/_8%)] dark:bg-card sm:p-7">
-              <div className="space-y-4">
-                <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold uppercase text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">
-                  <ShieldCheck className="h-4 w-4" />
-                  PWA oficial recomendado
-                </div>
-                <div className="space-y-3">
-                  <h1 className="max-w-3xl text-[32px] font-extrabold leading-tight tracking-normal text-slate-950 dark:text-white">
-                    Organize suas entregas em 1 toque.
-                  </h1>
-                  <p className="max-w-2xl text-base leading-7 text-slate-600 dark:text-slate-300">
-                    Especialista em SPX/Shopee para seguir a sequencia STOP,
-                    encaixar paradas sem STOP e otimizar quando voce quiser.
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-[auto_1fr] sm:items-center">
-                <PwaInstallButton
-                  className="h-12 gap-2 px-5 text-base font-bold"
-                  label="Instalar pelo navegador"
-                />
-                <p className="text-sm leading-6 text-muted-foreground">
-                  Nao precisa baixar APK. Funciona como app no celular e evita
-                  alertas de instalacao externa.
-                </p>
-              </div>
-
-              {SHOW_ANDROID_DOWNLOAD_LINK && (
-                <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-                  APK disponivel apenas para testes Android.{" "}
-                  <Link className="font-semibold text-primary" href="/baixar-aplicativo">
-                    Ver opcoes de instalacao
-                  </Link>
-                </div>
-              )}
-
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div className="rounded-2xl border border-border bg-secondary/45 p-4">
-                  <Fuel className="mb-3 h-6 w-6 text-primary" />
-                  <p className="text-2xl font-extrabold text-slate-950 dark:text-white">
-                    28 km
-                  </p>
-                  <p className="text-sm text-muted-foreground">a menos por dia*</p>
-                </div>
-                <div className="rounded-2xl border border-border bg-secondary/45 p-4">
-                  <Clock className="mb-3 h-6 w-6 text-blue-600" />
-                  <p className="text-2xl font-extrabold text-slate-950 dark:text-white">
-                    1h20
-                  </p>
-                  <p className="text-sm text-muted-foreground">economizados por turno*</p>
-                </div>
-                <div className="rounded-2xl border border-border bg-secondary/45 p-4">
-                  <Package className="mb-3 h-6 w-6 text-orange-600" />
-                  <p className="text-2xl font-extrabold text-slate-950 dark:text-white">
-                    150
-                  </p>
-                  <p className="text-sm text-muted-foreground">paradas por rota em teste</p>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                *Estimativa operacional usada como referencia de produto. O ganho real
-                varia conforme cidade, tabela e sequencia escolhida.
-              </p>
-
-              <div className="grid gap-3 sm:grid-cols-3">
-                {steps.map((step, index) => (
-                  <div
-                    key={step.title}
-                    className="rounded-2xl border border-border bg-white p-4 shadow-[0_8px_20px_rgb(15_23_42_/_5%)] dark:bg-slate-950"
-                  >
-                    <div className="mb-4 flex items-center justify-between">
-                      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-950 text-sm font-bold text-white dark:bg-white dark:text-slate-950">
-                        {index + 1}
-                      </span>
-                      <step.icon className="h-6 w-6 text-primary" />
-                    </div>
-                    <h2 className="text-xl font-bold tracking-normal text-slate-950 dark:text-white">
-                      {step.title}
-                    </h2>
-                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                      {step.text}
+            <section className="overflow-hidden rounded-[32px] border border-orange-100 bg-white shadow-[0_24px_60px_rgb(15_23_42_/_10%)] dark:border-slate-800 dark:bg-card">
+              <div className="space-y-6 p-5 sm:p-7">
+                <div className="space-y-4">
+                  <div className="inline-flex items-center gap-2 rounded-full border border-orange-200 bg-orange-50 px-3 py-2 text-sm font-semibold text-[#9a3412] dark:border-orange-900 dark:bg-orange-950/40 dark:text-orange-200">
+                    <ShieldCheck className="h-4 w-4" />
+                    Instalação recomendada: PWA
+                  </div>
+                  <div className="space-y-3">
+                    <h1 className="max-w-3xl text-[32px] font-extrabold leading-tight tracking-normal text-slate-950 dark:text-white">
+                      Roteirização simples para quem entrega SPX/Shopee.
+                    </h1>
+                    <p className="max-w-2xl text-sm font-normal leading-6 text-slate-600 dark:text-slate-300">
+                      Escolha seguir a sequência STOP, usar a ordem da tabela ou
+                      otimizar por setores. O número do pacote fica visível na
+                      parada para reduzir erro na rua.
                     </p>
                   </div>
-                ))}
+                </div>
+
+                <div className="rounded-[28px] border border-orange-100 bg-[#fff7ed] p-4 dark:border-slate-800 dark:bg-slate-950">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <PwaInstallButton
+                      className="h-14 min-w-64 gap-2 rounded-2xl bg-[#ff6d00] px-6 text-base font-extrabold text-white shadow-[0_14px_30px_rgb(255_109_0_/_28%)] hover:bg-[#f97316] hover:brightness-100"
+                      label="Instalar pelo navegador"
+                    />
+                    <div className="space-y-1">
+                      <p className="text-xl font-semibold tracking-normal text-slate-950 dark:text-white">
+                        Não precisa baixar APK
+                      </p>
+                      <p className="text-sm font-normal leading-6 text-slate-600 dark:text-slate-300">
+                        Abre como aplicativo no celular, com ícone próprio e
+                        menos atrito para o usuário final.
+                      </p>
+                    </div>
+                  </div>
+
+                  {SHOW_ANDROID_DOWNLOAD_LINK && (
+                    <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-dashed border-orange-200 bg-white/80 p-3 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700 dark:bg-slate-900">
+                      <div className="flex items-start gap-3">
+                        <Download className="mt-0.5 h-4 w-4 text-slate-500" />
+                        <div>
+                          <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                            APK para testes Android
+                          </p>
+                          <p className="text-sm font-normal text-slate-500 dark:text-slate-400">
+                            Opção secundária para testadores e aparelhos
+                            específicos.
+                          </p>
+                        </div>
+                      </div>
+                      <Button
+                        asChild
+                        variant="outline"
+                        size="sm"
+                        className="rounded-xl border-orange-200 bg-white text-[#9a3412] hover:bg-orange-50"
+                      >
+                        <Link href="/baixar-aplicativo">Ver APK</Link>
+                      </Button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-[28px] bg-slate-950 p-5 text-white shadow-[0_16px_36px_rgb(15_23_42_/_18%)]">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold uppercase tracking-[0.14em] text-orange-200">
+                        Prova operacional
+                      </p>
+                      <p className="mt-2 text-[32px] font-extrabold leading-tight tracking-normal">
+                        28 km e 1h20 a menos por turno
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      <div className="rounded-2xl bg-white/10 p-3">
+                        <Fuel className="mx-auto mb-2 h-5 w-5 text-orange-200" />
+                        <p className="text-xl font-semibold">28 km</p>
+                      </div>
+                      <div className="rounded-2xl bg-white/10 p-3">
+                        <Clock className="mx-auto mb-2 h-5 w-5 text-orange-200" />
+                        <p className="text-xl font-semibold">1h20</p>
+                      </div>
+                      <div className="rounded-2xl bg-white/10 p-3">
+                        <Package className="mx-auto mb-2 h-5 w-5 text-orange-200" />
+                        <p className="text-xl font-semibold">150</p>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="mt-3 text-sm font-normal leading-6 text-slate-300">
+                    Estimativa de referência. O ganho real varia conforme cidade,
+                    tabela, trânsito e modo de sequência escolhido.
+                  </p>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {steps.map((step, index) => (
+                    <div
+                      key={step.title}
+                      className="relative rounded-[24px] border border-orange-100 bg-white p-4 shadow-[0_10px_24px_rgb(15_23_42_/_6%)] dark:border-slate-800 dark:bg-slate-950"
+                    >
+                      <div className="mb-4 flex items-center justify-between">
+                        <span className="flex h-9 w-9 items-center justify-center rounded-full bg-orange-100 text-sm font-semibold text-[#9a3412] dark:bg-orange-950 dark:text-orange-200">
+                          {index + 1}
+                        </span>
+                        <step.icon className="h-6 w-6 text-[#ff6d00]" />
+                      </div>
+                      <h2 className="text-xl font-semibold tracking-normal text-slate-950 dark:text-white">
+                        {step.title}
+                      </h2>
+                      <p className="mt-2 text-sm font-normal leading-6 text-slate-600 dark:text-slate-300">
+                        {step.text}
+                      </p>
+                      {index < steps.length - 1 && (
+                        <ArrowRight className="absolute -right-4 top-1/2 hidden h-5 w-5 -translate-y-1/2 text-orange-300 sm:block" />
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             </section>
 
-            <Card className="border-border/85 bg-white shadow-[0_14px_36px_rgb(15_23_42_/_8%)] dark:bg-card">
+            <Card className="rounded-[32px] border-orange-100 bg-white shadow-[0_24px_60px_rgb(15_23_42_/_10%)] dark:border-slate-800 dark:bg-card">
               <CardHeader>
                 <CardTitle className="text-xl font-bold">
                   {authMode === "login" ? "Entrar" : "Criar conta"}
@@ -516,7 +550,7 @@ export default function Home() {
                         type="checkbox"
                         checked={rememberDevice}
                         onChange={(event) => setRememberDevice(event.target.checked)}
-                        className="mt-1 h-4 w-4 accent-emerald-600"
+                        className="mt-1 h-4 w-4 accent-[#ff6d00]"
                       />
                       <span>
                         Manter conectado neste aparelho. O EconoRota mantera sua
@@ -547,7 +581,7 @@ export default function Home() {
                         type="checkbox"
                         checked={acceptTerms}
                         onChange={(event) => setAcceptTerms(event.target.checked)}
-                        className="mt-1 h-4 w-4 accent-emerald-600"
+                        className="mt-1 h-4 w-4 accent-[#ff6d00]"
                         required
                       />
                       <span>
@@ -559,7 +593,7 @@ export default function Home() {
 
                   {authError && <p className="text-sm text-red-600">{authError}</p>}
                   {resetMessage && (
-                    <p className="text-sm text-emerald-700">{resetMessage}</p>
+                    <p className="text-sm text-[#9a3412]">{resetMessage}</p>
                   )}
 
                   <Button
@@ -590,18 +624,18 @@ export default function Home() {
 
                   <nav
                     aria-label="Links publicos do EconoRota"
-                    className="grid gap-2 rounded-xl border border-border/80 bg-secondary/45 p-3 text-sm sm:grid-cols-2"
+                    className="grid gap-2 rounded-2xl border border-orange-100 bg-orange-50/80 p-3 text-sm sm:grid-cols-2 dark:border-slate-800 dark:bg-slate-900"
                   >
-                    <Link className="font-medium text-emerald-700" href="/spx-shopee">
+                    <Link className="font-medium text-[#9a3412] dark:text-orange-200" href="/spx-shopee">
                       SPX/Shopee completo
                     </Link>
-                    <Link className="font-medium text-emerald-700" href="/baixar-aplicativo">
+                    <Link className="font-medium text-[#9a3412] dark:text-orange-200" href="/baixar-aplicativo">
                       Instalar no celular
                     </Link>
-                    <Link className="font-medium text-emerald-700" href="/privacidade">
+                    <Link className="font-medium text-[#9a3412] dark:text-orange-200" href="/privacidade">
                       Privacidade
                     </Link>
-                    <Link className="font-medium text-emerald-700" href="/suporte">
+                    <Link className="font-medium text-[#9a3412] dark:text-orange-200" href="/suporte">
                       Suporte
                     </Link>
                   </nav>

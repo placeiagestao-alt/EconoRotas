@@ -3,6 +3,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Download, Trash2, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
@@ -130,11 +131,27 @@ export default function History() {
         </div>
 
         {historyQuery.isLoading ? (
-          <Card>
-            <CardContent className="pt-6">
-              <p className="text-center text-muted-foreground">Carregando histórico...</p>
-            </CardContent>
-          </Card>
+          <div className="space-y-4">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <Card key={index}>
+                <CardContent className="space-y-4 pt-6">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="space-y-2">
+                      <Skeleton className="h-5 w-56" />
+                      <Skeleton className="h-4 w-36" />
+                    </div>
+                    <Skeleton className="h-6 w-24 rounded-full" />
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <Skeleton className="h-20 rounded-xl" />
+                    <Skeleton className="h-20 rounded-xl" />
+                    <Skeleton className="h-20 rounded-xl" />
+                  </div>
+                  <Skeleton className="h-9 w-28 rounded-xl" />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
         ) : history.length === 0 ? (
           <Card>
             <CardContent className="pt-6">

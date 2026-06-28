@@ -30,6 +30,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { buildNavigationUrl } from "@/lib/navigationPreference";
 import {
   readDeliveryProgress,
@@ -2092,9 +2093,41 @@ export default function RouteDetail() {
         ) : null}
 
         {routeQuery.isLoading || stopsQuery.isLoading ? (
-          <Card className="p-8 text-center text-muted-foreground">
-            Carregando rota...
-          </Card>
+          <div className="grid gap-4 md:grid-cols-[1fr_340px]">
+            <div className="space-y-4">
+              <Card>
+                <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <Skeleton className="h-6 w-48" />
+                  <Skeleton className="h-10 w-40 rounded-xl" />
+                </CardHeader>
+                <CardContent className="grid gap-4 lg:grid-cols-2">
+                  <Skeleton className="h-44 rounded-2xl" />
+                  <Skeleton className="h-44 rounded-2xl" />
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent className="space-y-3 pt-6">
+                  {Array.from({ length: 6 }).map((_, index) => (
+                    <div key={index} className="flex gap-3">
+                      <Skeleton className="h-12 w-12 rounded-xl" />
+                      <div className="flex-1 space-y-2">
+                        <Skeleton className="h-5 w-4/5" />
+                        <Skeleton className="h-4 w-1/2" />
+                      </div>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            </div>
+            <Card>
+              <CardContent className="space-y-4 pt-6">
+                <Skeleton className="h-28 rounded-2xl" />
+                <Skeleton className="h-12 rounded-xl" />
+                <Skeleton className="h-12 rounded-xl" />
+                <Skeleton className="h-12 rounded-xl" />
+              </CardContent>
+            </Card>
+          </div>
         ) : routeQuery.error || stopsQuery.error ? (
           <Alert variant="destructive">
             <AlertDescription>
