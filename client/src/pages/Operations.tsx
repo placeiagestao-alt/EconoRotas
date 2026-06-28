@@ -1611,26 +1611,26 @@ export default function Operations() {
                 recentEvents.map((event: any) => (
                   <div
                     key={event.id}
-                    className="rounded-lg border border-border/80 bg-white p-3"
+                    className="rounded-lg border border-border/80 bg-white p-3 text-slate-950 dark:bg-white dark:text-slate-950"
                   >
                     <div className="flex flex-wrap items-center gap-2">
                       <Badge variant={severityVariant(event.severity) as any}>
                         {event.severity}
                       </Badge>
-                      <span className="text-sm font-medium">{event.title}</span>
-                      <span className="text-xs text-muted-foreground">
+                      <span className="text-sm font-medium text-slate-950">{event.title}</span>
+                      <span className="text-xs text-slate-600">
                         {formatDate(event.createdAt)}
                       </span>
                     </div>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {event.userName || event.userEmail || "Usuário não identificado"}
-                      {event.routeName ? ` · ${event.routeName}` : ""}
+                    <p className="mt-1 text-sm text-slate-700">
+                      {event.userName || event.userEmail || "Usuario nao identificado"}
+                      {event.routeName ? ` - ${event.routeName}` : ""}
                     </p>
                     {event.message ? (
-                      <p className="mt-1 line-clamp-2 text-sm">{event.message}</p>
+                      <p className="mt-1 line-clamp-2 text-sm text-slate-950">{event.message}</p>
                     ) : null}
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {event.source} · {event.type}
+                    <p className="mt-1 text-xs text-slate-600">
+                      {event.source} - {event.type}
                     </p>
                   </div>
                 ))

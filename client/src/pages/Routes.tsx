@@ -30,6 +30,20 @@ function getStatusLabel(status: string, operationalStatus?: string, operationalL
   }
 }
 
+function getStatusBadgeClass(status: string, operationalStatus?: string) {
+  switch (operationalStatus || status) {
+    case "shopee_stop_sequence":
+      return "border-orange-300 bg-orange-50 text-orange-950 hover:bg-orange-50 dark:bg-orange-50 dark:text-orange-950";
+    case "optimized_attention":
+    case "attention_strong":
+      return "border-amber-300 bg-amber-50 text-amber-950 hover:bg-amber-50 dark:bg-amber-50 dark:text-amber-950";
+    case "draft":
+      return "border-slate-300 bg-white text-slate-950 hover:bg-white dark:bg-white dark:text-slate-950";
+    default:
+      return "";
+  }
+}
+
 function RoutesLoadingSkeleton() {
   return (
     <div className="grid gap-4">
@@ -136,6 +150,7 @@ export default function Routes() {
                         ? "default"
                         : "outline"
                     }
+                    className={getStatusBadgeClass(route.status, route.operationalStatus)}
                   >
                     {getStatusLabel(
                       route.status,
