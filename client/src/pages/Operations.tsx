@@ -34,6 +34,12 @@ function readinessVariant(status: string) {
   return "secondary";
 }
 
+function readyBadgeClass(status: string) {
+  return status === "READY" || status === "ready"
+    ? "border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-600"
+    : undefined;
+}
+
 function StatCard({
   title,
   value,
@@ -505,7 +511,10 @@ export default function Operations() {
                         VRP e operacoes acima do produto comercial atual.
                       </p>
                     </div>
-                    <Badge variant={readinessVariant(multiVehicleReadiness.status)}>
+                    <Badge
+                      variant={readinessVariant(multiVehicleReadiness.status)}
+                      className={readyBadgeClass(multiVehicleReadiness.status)}
+                    >
                       {multiVehicleReadiness.status}
                     </Badge>
                   </div>
@@ -523,7 +532,10 @@ export default function Operations() {
                                 .replace(/([A-Z])/g, " $1")
                                 .replace(/^./, (letter) => letter.toUpperCase())}
                             </p>
-                            <Badge variant={readinessVariant(item.status)}>
+                            <Badge
+                              variant={readinessVariant(item.status)}
+                              className={readyBadgeClass(item.status)}
+                            >
                               {item.status}
                             </Badge>
                           </div>
@@ -875,7 +887,10 @@ export default function Operations() {
                         Capacidade comercial limitada a {goLive500.maxRouteStops ?? 160} paradas, 20 usuarios simultaneos e 5 otimizacoes simultaneas.
                       </p>
                     </div>
-                    <Badge variant={readinessVariant(goLive500.verdict)}>
+                    <Badge
+                      variant={readinessVariant(goLive500.verdict)}
+                      className={readyBadgeClass(goLive500.verdict)}
+                    >
                       {goLive500.verdict === "NO_GO" ? "NO-GO" : goLive500.verdict}
                     </Badge>
                   </div>
@@ -983,6 +998,7 @@ export default function Operations() {
                             ? "destructive"
                             : "secondary"
                       }
+                      className={readyBadgeClass(performanceBenchmarks.status)}
                     >
                       {performanceBenchmarks.status === "ready"
                         ? "READY"
@@ -1046,6 +1062,7 @@ export default function Operations() {
                                 ? "destructive"
                                 : "secondary"
                           }
+                          className={readyBadgeClass(target.status)}
                         >
                           {target.status === "ready"
                             ? "READY"

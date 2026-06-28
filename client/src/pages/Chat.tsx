@@ -65,13 +65,22 @@ export default function Chat() {
                       )
                     }
                   >
-                    <SelectTrigger className="mt-2">
+                    <SelectTrigger className="mt-2 bg-white text-slate-950 dark:bg-white dark:text-slate-950 [&_svg]:text-slate-700">
                       <SelectValue placeholder="Todas as rotas" />
                     </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={ALL_ROUTES_VALUE}>Todas as rotas</SelectItem>
+                    <SelectContent className="bg-white text-slate-950">
+                      <SelectItem
+                        value={ALL_ROUTES_VALUE}
+                        className="text-slate-950 focus:text-slate-950"
+                      >
+                        Todas as rotas
+                      </SelectItem>
                       {routes.map((route: any) => (
-                        <SelectItem key={route.id} value={String(route.id)}>
+                        <SelectItem
+                          key={route.id}
+                          value={String(route.id)}
+                          className="text-slate-950 focus:text-slate-950"
+                        >
                           {route.name}
                         </SelectItem>
                       ))}
