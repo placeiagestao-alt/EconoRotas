@@ -4920,6 +4920,320 @@ function buildExecutionReportPeriod(
   };
 }
 
+const EXECUTIVE_OBSERVABILITY_EVENT_TYPES = [
+  "route_optimization_attention_strong",
+  "route_stop_delivered",
+  "route_stop_failed",
+  "route_stop_far_from_driver",
+  "route_stop_remote_confirmation",
+] as const;
+
+function countUniqueEventRoutes(events: any[], type: string) {
+  const routeIds = new Set<number | string>();
+  let withoutRouteId = 0;
+
+  for (const event of events) {
+    if (event.type !== type) continue;
+    if (event.routeId === null || event.routeId === undefined) {
+      withoutRouteId += 1;
+    } else {
+      routeIds.add(event.routeId);
+    }
+  }
+
+  return routeIds.size + withoutRouteId;
+}
+
+function getMetricOperationalStatus(metric: any) {
+  const metadata = parseMetricMetadata(metric.metadata);
+  return String(
+    metadata.operationalStatus || metadata.operational_status || ""
+  );
+}
+
+function isFarGpsStopAction(event: any) {
+  const metadata = parseOperationalMetadata(event.metadata);
+  const integrity = String(metadata.locationIntegrity || "");
+  return (
+    integrity === "far_from_stop" ||
+    integrity === "remote_confirmation" ||
+    metadata.remoteConfirmation === true
+  );
+}
+
+function buildExecutiveObservabilityPeriod(
+  metrics: any[],
+  events: any[],
+  days: number
+) {
+  const routeMetricsSummary = buildRouteMetricsSummary(metrics, days);
+  const execution = routeMetricsSummary.execution;
+  const attentionStrongByMetrics = metrics.filter(
+    metric => getMetricOperationalStatus(metric) === "attention_strong"
+  ).length;
+  const attentionStrongByEvents = countUniqueEventRoutes(
+    events,
+    "route_optimization_attention_strong"
+  );
+  const attentionStrongRoutes = Math.max(
+    attentionStrongByMetrics,
+    attentionStrongByEvents
+  );
+  const stopActionEvents = events.filter(event =>
+    ["route_stop_delivered", "route_stop_failed"].includes(String(event.type))
+  );
+  const deliveredStopActions = stopActionEvents.filter(
+    event => event.type === "route_stop_delivered"
+  ).length;
+  const farGpsEvents = events.filter(
+    event => event.type === "route_stop_far_from_driver"
+  ).length;
+  const farGpsFromStopActions =
+    stopActionEvents.filter(isFarGpsStopAction).length;
+  const farGpsMarks = Math.max(farGpsEvents, farGpsFromStopActions);
+  const remoteConfirmationEvents = events.filter(
+    event => event.type === "route_stop_remote_confirmation"
+  ).length;
+  const remoteConfirmationsFromStopActions = stopActionEvents.filter(event => {
+    const metadata = parseOperationalMetadata(event.metadata);
+    return (
+      event.type === "route_stop_delivered" &&
+      metadata.remoteConfirmation === true
+    );
+  }).length;
+  const remoteDeliveryConfirmations = Math.max(
+    remoteConfirmationEvents,
+    remoteConfirmationsFromStopActions
+  );
+
+  return {
+    periodDays: days,
+    optimizedRoutes: routeMetricsSummary.routeMetricCount,
+    startedRoutes: execution.startedCount,
+    completedRoutes: execution.completedCount,
+    abandonedRoutes: execution.abandonedCount,
+    startRate: execution.startRate,
+    completionRate: execution.completionRate,
+    abandonmentRate: execution.abandonmentRate,
+    osrmFallbackCount: routeMetricsSummary.osrmFallbackCount,
+    osrmFallbackRate: routeMetricsSummary.osrmFallbackRate,
+    attentionStrongRoutes,
+    attentionStrongRate: roundMetric(
+      metricPercent(attentionStrongRoutes, routeMetricsSummary.routeMetricCount)
+    ),
+    deliveryStopActions: stopActionEvents.length,
+    deliveredStopActions,
+    farGpsMarks,
+    farGpsRate: roundMetric(
+      metricPercent(farGpsMarks, Math.max(stopActionEvents.length, farGpsMarks))
+    ),
+    remoteDeliveryConfirmations,
+    remoteDeliveryRate: roundMetric(
+      metricPercent(
+        remoteDeliveryConfirmations,
+        Math.max(deliveredStopActions, remoteDeliveryConfirmations)
+      )
+    ),
+    averageOptimizationRuntimeMs:
+      routeMetricsSummary.averageOptimizationRuntimeMs,
+    averageOptimizationRuntimeSeconds:
+      routeMetricsSummary.averageOptimizationRuntimeSeconds,
+  };
+}
+
+function buildExecutiveSignal(args: {
+  key: string;
+  label: string;
+  current: number;
+  baseline: number;
+  healthyWhen: "up" | "down";
+  unit?: string;
+  stableThreshold?: number;
+}) {
+  const delta = roundMetric(
+    Number(args.current || 0) - Number(args.baseline || 0)
+  );
+  const threshold = args.stableThreshold ?? 0.1;
+  const status =
+    Math.abs(delta) <= threshold
+      ? "stable"
+      : args.healthyWhen === "up"
+        ? delta > 0
+          ? "better"
+          : "worse"
+        : delta < 0
+          ? "better"
+          : "worse";
+
+  return {
+    key: args.key,
+    label: args.label,
+    current: args.current,
+    baseline: args.baseline,
+    delta,
+    unit: args.unit ?? "",
+    healthyWhen: args.healthyWhen,
+    status,
+  };
+}
+
+function buildExecutiveObservabilityComparison(
+  last7Days: any,
+  last30Days: any
+) {
+  const weeklyPace = (value30: number) => (Number(value30 || 0) / 30) * 7;
+  const signals = [
+    buildExecutiveSignal({
+      key: "startRate",
+      label: "Taxa de inicio",
+      current: last7Days.startRate,
+      baseline: last30Days.startRate,
+      healthyWhen: "up",
+      unit: "p.p.",
+    }),
+    buildExecutiveSignal({
+      key: "completionRate",
+      label: "Taxa de conclusao",
+      current: last7Days.completionRate,
+      baseline: last30Days.completionRate,
+      healthyWhen: "up",
+      unit: "p.p.",
+    }),
+    buildExecutiveSignal({
+      key: "abandonmentRate",
+      label: "Taxa de abandono",
+      current: last7Days.abandonmentRate,
+      baseline: last30Days.abandonmentRate,
+      healthyWhen: "down",
+      unit: "p.p.",
+    }),
+    buildExecutiveSignal({
+      key: "osrmFallbackRate",
+      label: "Fallback OSRM",
+      current: last7Days.osrmFallbackRate,
+      baseline: last30Days.osrmFallbackRate,
+      healthyWhen: "down",
+      unit: "p.p.",
+    }),
+    buildExecutiveSignal({
+      key: "attentionStrongRate",
+      label: "Attention strong",
+      current: last7Days.attentionStrongRate,
+      baseline: last30Days.attentionStrongRate,
+      healthyWhen: "down",
+      unit: "p.p.",
+    }),
+    buildExecutiveSignal({
+      key: "remoteDeliveryRate",
+      label: "Entregas longe do GPS",
+      current: last7Days.remoteDeliveryRate,
+      baseline: last30Days.remoteDeliveryRate,
+      healthyWhen: "down",
+      unit: "p.p.",
+    }),
+    buildExecutiveSignal({
+      key: "averageOptimizationRuntimeMs",
+      label: "Tempo medio de otimizacao",
+      current: last7Days.averageOptimizationRuntimeMs,
+      baseline: last30Days.averageOptimizationRuntimeMs,
+      healthyWhen: "down",
+      unit: "ms",
+      stableThreshold: 100,
+    }),
+  ];
+  const score = signals.reduce((total, signal) => {
+    if (signal.status === "better") return total + 1;
+    if (signal.status === "worse") return total - 1;
+    return total;
+  }, 0);
+
+  return {
+    optimizedRoutesPace: roundMetric(
+      last7Days.optimizedRoutes - weeklyPace(last30Days.optimizedRoutes)
+    ),
+    startedRoutesPace: roundMetric(
+      last7Days.startedRoutes - weeklyPace(last30Days.startedRoutes)
+    ),
+    completedRoutesPace: roundMetric(
+      last7Days.completedRoutes - weeklyPace(last30Days.completedRoutes)
+    ),
+    abandonedRoutesPace: roundMetric(
+      last7Days.abandonedRoutes - weeklyPace(last30Days.abandonedRoutes)
+    ),
+    signals,
+    score,
+  };
+}
+
+async function getExecutiveObservabilityEvents(days: number) {
+  const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const cutoff = cutoffDate.getTime();
+      return sortByDateDesc(
+        memory.operationalEvents.filter(
+          event =>
+            EXECUTIVE_OBSERVABILITY_EVENT_TYPES.includes(event.type as any) &&
+            new Date(event.createdAt).getTime() >= cutoff
+        ),
+        "createdAt"
+      );
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [rows] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT id, userId, routeId, stopId, type, severity, source, title, message, metadata, createdAt
+      FROM operationalEvents FORCE INDEX (operationalEvents_type_createdAt_idx)
+      WHERE type IN (${EXECUTIVE_OBSERVABILITY_EVENT_TYPES.map(() => "?").join(",")})
+        AND createdAt >= ?
+      ORDER BY createdAt DESC
+      LIMIT 5000
+    `,
+    [...EXECUTIVE_OBSERVABILITY_EVENT_TYPES, cutoffDate]
+  );
+  return rows;
+}
+
+export async function getExecutiveObservabilityReport() {
+  const [metrics30, events30] = await Promise.all([
+    getRouteMetricsRows(30),
+    getExecutiveObservabilityEvents(30),
+  ]);
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const metrics7 = metrics30.filter(
+    (metric: any) => new Date(metric.createdAt).getTime() >= sevenDaysAgo
+  );
+  const events7 = events30.filter(
+    event => new Date(event.createdAt).getTime() >= sevenDaysAgo
+  );
+  const last7Days = buildExecutiveObservabilityPeriod(metrics7, events7, 7);
+  const last30Days = buildExecutiveObservabilityPeriod(metrics30, events30, 30);
+  const comparison = buildExecutiveObservabilityComparison(
+    last7Days,
+    last30Days
+  );
+  const status =
+    last30Days.optimizedRoutes === 0
+      ? "no_data"
+      : comparison.score > 1
+        ? "improving"
+        : comparison.score < -1
+          ? "worsening"
+          : "stable";
+
+  return {
+    generatedAt: new Date().toISOString(),
+    status,
+    score: comparison.score,
+    last7Days,
+    last30Days,
+    comparison,
+  };
+}
+
 async function getExecutionBlockedEvents(days: number) {
   const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const db = await getDb();
@@ -5524,6 +5838,7 @@ async function buildAdminOperationalDashboardLive() {
       const geocodingExecutiveReport = await getGeocodingExecutiveReport();
       const optimizationJobsSummary = await getOptimizationJobsDashboard(30);
       const operationExecutionReport = await getOperationExecutionReport();
+      const executiveObservability = await getExecutiveObservabilityReport();
       const performanceBenchmarks = await getPerformanceBenchmarkDashboard(30);
       const goLive500 = await getGoLive500Dashboard(30);
 
@@ -5565,6 +5880,7 @@ async function buildAdminOperationalDashboardLive() {
         routeMetrics,
         optimizationJobs: optimizationJobsSummary,
         operationExecutionReport,
+        executiveObservability,
         performanceBenchmarks,
         goLive500,
         geocodingCache,
@@ -5585,6 +5901,7 @@ async function buildAdminOperationalDashboardLive() {
     geocodingExecutiveReport,
     optimizationJobsSummary,
     operationExecutionReport,
+    executiveObservability,
     performanceBenchmarks,
     goLive500,
   ] = await Promise.all([
@@ -5608,6 +5925,7 @@ async function buildAdminOperationalDashboardLive() {
     getGeocodingExecutiveReport(),
     getOptimizationJobsDashboard(30),
     getOperationExecutionReport(),
+    getExecutiveObservabilityReport(),
     getPerformanceBenchmarkDashboard(30),
     getGoLive500Dashboard(30),
   ]);
@@ -5664,6 +5982,7 @@ async function buildAdminOperationalDashboardLive() {
     routeMetrics: routeMetricsSummary,
     optimizationJobs: optimizationJobsSummary,
     operationExecutionReport,
+    executiveObservability,
     performanceBenchmarks,
     goLive500,
     geocodingCache,

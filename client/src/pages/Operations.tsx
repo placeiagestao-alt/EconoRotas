@@ -152,6 +152,68 @@ function formatPercent(value: unknown) {
   return `${sign}${number.toFixed(1)}%`;
 }
 
+function executiveStatusLabel(status: string) {
+  if (status === "improving") return "Melhorando";
+  if (status === "worsening") return "Piorando";
+  if (status === "no_data") return "Sem dados";
+  return "Estavel";
+}
+
+function executiveStatusClass(status: string) {
+  if (status === "improving") {
+    return "border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-600";
+  }
+  if (status === "worsening") {
+    return "border-red-600 bg-red-600 text-white hover:bg-red-600";
+  }
+  if (status === "no_data") {
+    return "border-slate-500 bg-slate-100 text-slate-900 hover:bg-slate-100";
+  }
+  return "border-amber-500 bg-amber-100 text-amber-950 hover:bg-amber-100";
+}
+
+function signalStatusClass(status: string) {
+  if (status === "better") return "text-emerald-700";
+  if (status === "worse") return "text-red-700";
+  return "text-muted-foreground";
+}
+
+function signalStatusLabel(status: string) {
+  if (status === "better") return "melhor";
+  if (status === "worse") return "pior";
+  return "estavel";
+}
+
+function formatSignalDelta(signal: any) {
+  const delta = Number(signal?.delta || 0);
+  const sign = delta > 0 ? "+" : "";
+  if (signal?.unit === "ms") return `${sign}${Math.round(delta)} ms`;
+  if (signal?.unit === "p.p.") return `${sign}${delta.toFixed(1)} p.p.`;
+  return `${sign}${delta.toFixed(1)}${signal?.unit ?? ""}`;
+}
+
+function ExecutiveMetric({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: number | string;
+  detail?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-border/80 p-3">
+      <p className="text-xs font-medium uppercase text-muted-foreground">
+        {label}
+      </p>
+      <p className="mt-2 text-2xl font-semibold tracking-tight">{value}</p>
+      {detail ? (
+        <p className="text-xs text-muted-foreground">{detail}</p>
+      ) : null}
+    </div>
+  );
+}
+
 function ImpactMetricRow({
   label,
   value7,
@@ -233,17 +295,19 @@ export default function Operations() {
       await utils.admin.dashboard.invalidate();
       toast.success("Metricas do painel atualizadas.");
     },
-    onError: (error) => {
+    onError: error => {
       toast.error(error.message || "Nao foi possivel atualizar as metricas.");
     },
   });
   const cleanupE2eUsersMutation = trpc.admin.cleanupE2eUsers.useMutation({
-    onSuccess: async (result) => {
+    onSuccess: async result => {
       await utils.admin.dashboard.invalidate();
       toast.success(`${result.deletedCount} usuario(s) de teste removido(s).`);
     },
-    onError: (error) => {
-      toast.error(error.message || "Nao foi possivel limpar usuarios de teste.");
+    onError: error => {
+      toast.error(
+        error.message || "Nao foi possivel limpar usuarios de teste."
+      );
     },
   });
 
@@ -262,9 +326,13 @@ export default function Operations() {
   const geocodingImpact = (data as any)?.geocodingImpact;
   const executiveReport = (data as any)?.geocodingExecutiveReport;
   const operationExecutionReport = (data as any)?.operationExecutionReport;
+  const executiveObservability = (data as any)?.executiveObservability;
   const execution30 = operationExecutionReport?.last30Days;
   const execution7 = operationExecutionReport?.last7Days;
   const executionComparison = operationExecutionReport?.comparison;
+  const executive30 = executiveObservability?.last30Days;
+  const executive7 = executiveObservability?.last7Days;
+  const executiveSignals = executiveObservability?.comparison?.signals ?? [];
   const materialized = (data as any)?.materialized;
   const recentEvents = eventsQuery.data?.events ?? [];
   const impact7 = geocodingImpact?.last7Days;
@@ -276,7 +344,7 @@ export default function Operations() {
   );
   const maxConfidenceBucket = Math.max(
     0,
-    ...confidenceItems.map((item) => Number(item.value || 0))
+    ...confidenceItems.map(item => Number(item.value || 0))
   );
   const providerItems = impact30?.providers ?? [];
 
@@ -313,16 +381,15 @@ export default function Operations() {
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-6 w-6 text-primary" />
-            <h1 className="text-3xl font-semibold tracking-tight">
-              Operação
-            </h1>
+            <h1 className="text-3xl font-semibold tracking-tight">Operação</h1>
           </div>
           <p className="text-sm text-muted-foreground">
             Controle de usuários, rotas, erros e sinais de otimização ruim.
           </p>
           {materialized?.generatedAt ? (
             <p className="text-xs text-muted-foreground">
-              Ultima atualizacao das metricas: {formatDate(materialized.generatedAt)}
+              Ultima atualizacao das metricas:{" "}
+              {formatDate(materialized.generatedAt)}
               {materialized.stale ? " · snapshot aguardando atualizacao" : ""}
             </p>
           ) : null}
@@ -351,19 +418,137 @@ export default function Operations() {
                 disabled={refreshDashboardMutation.isPending}
                 onClick={() => refreshDashboardMutation.mutate()}
               >
-                {refreshDashboardMutation.isPending ? "Atualizando..." : "Atualizar metricas"}
+                {refreshDashboardMutation.isPending
+                  ? "Atualizando..."
+                  : "Atualizar metricas"}
               </Button>
             </CardContent>
           </Card>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-            <StatCard title="Usuários cadastrados" value={stats?.usersTotal ?? 0} icon={Users} />
-            <StatCard title="Ativos em 7 dias" value={stats?.activeUsers7d ?? 0} icon={Activity} />
-            <StatCard title="Rotas criadas" value={stats?.routesTotal ?? 0} icon={Route} />
-            <StatCard title="Erros 24h" value={stats?.criticalEvents24h ?? 0} icon={AlertTriangle} />
-            <StatCard title="Alertas de rota 24h" value={stats?.routeWarnings24h ?? 0} icon={MapPinned} />
+            <StatCard
+              title="Usuários cadastrados"
+              value={stats?.usersTotal ?? 0}
+              icon={Users}
+            />
+            <StatCard
+              title="Ativos em 7 dias"
+              value={stats?.activeUsers7d ?? 0}
+              icon={Activity}
+            />
+            <StatCard
+              title="Rotas criadas"
+              value={stats?.routesTotal ?? 0}
+              icon={Route}
+            />
+            <StatCard
+              title="Erros 24h"
+              value={stats?.criticalEvents24h ?? 0}
+              icon={AlertTriangle}
+            />
+            <StatCard
+              title="Alertas de rota 24h"
+              value={stats?.routeWarnings24h ?? 0}
+              icon={MapPinned}
+            />
           </div>
         )}
+
+        {!dashboardQuery.isLoading && executiveObservability ? (
+          <Card>
+            <CardHeader>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <CardTitle className="flex items-center gap-2">
+                  <Activity className="h-5 w-5 text-primary" />
+                  Observabilidade executiva
+                </CardTitle>
+                <Badge
+                  variant="outline"
+                  className={executiveStatusClass(
+                    executiveObservability.status
+                  )}
+                >
+                  {executiveStatusLabel(executiveObservability.status)}
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <ExecutiveMetric
+                  label="Rotas otimizadas"
+                  value={executive30?.optimizedRoutes ?? 0}
+                  detail={`${executive7?.optimizedRoutes ?? 0} nos ultimos 7 dias`}
+                />
+                <ExecutiveMetric
+                  label="Rotas iniciadas"
+                  value={executive30?.startedRoutes ?? 0}
+                  detail={`${Math.round(executive30?.startRate ?? 0)}% das otimizadas`}
+                />
+                <ExecutiveMetric
+                  label="Rotas concluidas"
+                  value={executive30?.completedRoutes ?? 0}
+                  detail={`${Math.round(executive30?.completionRate ?? 0)}% das iniciadas`}
+                />
+                <ExecutiveMetric
+                  label="Rotas abandonadas"
+                  value={executive30?.abandonedRoutes ?? 0}
+                  detail={`${Math.round(executive30?.abandonmentRate ?? 0)}% das iniciadas`}
+                />
+                <ExecutiveMetric
+                  label="Fallback OSRM"
+                  value={`${Math.round(executive30?.osrmFallbackRate ?? 0)}%`}
+                  detail={`${executive30?.osrmFallbackCount ?? 0} rota(s)`}
+                />
+                <ExecutiveMetric
+                  label="Attention strong"
+                  value={executive30?.attentionStrongRoutes ?? 0}
+                  detail={`${Math.round(executive30?.attentionStrongRate ?? 0)}% das otimizadas`}
+                />
+                <ExecutiveMetric
+                  label="Entregas longe do GPS"
+                  value={executive30?.remoteDeliveryConfirmations ?? 0}
+                  detail={`${Math.round(executive30?.remoteDeliveryRate ?? 0)}% das entregas`}
+                />
+                <ExecutiveMetric
+                  label="Tempo medio otimizacao"
+                  value={formatMs(executive30?.averageOptimizationRuntimeMs)}
+                  detail={`${formatMs(executive7?.averageOptimizationRuntimeMs)} nos ultimos 7 dias`}
+                />
+              </div>
+
+              <div className="rounded-lg border border-border/80 p-4">
+                <div className="mb-2 grid grid-cols-[1.2fr_0.7fr_0.7fr_0.7fr] gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <span>Sinal</span>
+                  <span>7 dias</span>
+                  <span>30 dias</span>
+                  <span>Tendencia</span>
+                </div>
+                {executiveSignals.map((signal: any) => (
+                  <div
+                    key={signal.key}
+                    className="grid grid-cols-[1.2fr_0.7fr_0.7fr_0.7fr] gap-2 border-t border-border/70 py-2 text-sm"
+                  >
+                    <span className="font-medium">{signal.label}</span>
+                    <span>
+                      {signal.unit === "ms"
+                        ? formatMs(signal.current)
+                        : `${Number(signal.current || 0).toFixed(1)}%`}
+                    </span>
+                    <span>
+                      {signal.unit === "ms"
+                        ? formatMs(signal.baseline)
+                        : `${Number(signal.baseline || 0).toFixed(1)}%`}
+                    </span>
+                    <span className={signalStatusClass(signal.status)}>
+                      {signalStatusLabel(signal.status)} (
+                      {formatSignalDelta(signal)})
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
 
         {!dashboardQuery.isLoading && operationExecutionReport ? (
           <Card>
@@ -521,8 +706,9 @@ export default function Operations() {
                         Backlog Enterprise: Multi-Vehicle
                       </p>
                       <p className="text-sm text-muted-foreground">
-                        Fora do limite comercial atual. Usado apenas como portao futuro para frota,
-                        VRP e operacoes acima do produto comercial atual.
+                        Fora do limite comercial atual. Usado apenas como portao
+                        futuro para frota, VRP e operacoes acima do produto
+                        comercial atual.
                       </p>
                     </div>
                     <Badge
@@ -544,7 +730,7 @@ export default function Operations() {
                             <p className="font-medium">
                               {key
                                 .replace(/([A-Z])/g, " $1")
-                                .replace(/^./, (letter) => letter.toUpperCase())}
+                                .replace(/^./, letter => letter.toUpperCase())}
                             </p>
                             <Badge
                               variant={readinessVariant(item.status)}
@@ -553,7 +739,8 @@ export default function Operations() {
                               {item.status}
                             </Badge>
                           </div>
-                          {Array.isArray(item.blockers) && item.blockers.length > 0 ? (
+                          {Array.isArray(item.blockers) &&
+                          item.blockers.length > 0 ? (
                             <p className="mt-2 text-xs text-muted-foreground">
                               {item.blockers[0]}
                             </p>
@@ -567,7 +754,9 @@ export default function Operations() {
                     )}
                   </div>
 
-                  {Array.isArray(multiVehicleReadiness.multiVehicle?.blockers) &&
+                  {Array.isArray(
+                    multiVehicleReadiness.multiVehicle?.blockers
+                  ) &&
                   multiVehicleReadiness.multiVehicle.blockers.length > 0 ? (
                     <div className="mt-4 rounded-lg border border-border/70 bg-background/80 p-3 text-sm">
                       <p className="font-medium">Bloqueios principais</p>
@@ -586,22 +775,38 @@ export default function Operations() {
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
                 <StatCard
                   title="Jobs em fila"
-                  value={optimizationQueue?.counts?.waiting ?? optimizationJobs?.queued ?? 0}
+                  value={
+                    optimizationQueue?.counts?.waiting ??
+                    optimizationJobs?.queued ??
+                    0
+                  }
                   icon={Activity}
                 />
                 <StatCard
                   title="Executando"
-                  value={optimizationQueue?.counts?.active ?? optimizationJobs?.running ?? 0}
+                  value={
+                    optimizationQueue?.counts?.active ??
+                    optimizationJobs?.running ??
+                    0
+                  }
                   icon={Activity}
                 />
                 <StatCard
                   title="Workers"
-                  value={optimizationWorkers?.workerCount ?? optimizationQueue?.workerCount ?? 0}
+                  value={
+                    optimizationWorkers?.workerCount ??
+                    optimizationQueue?.workerCount ??
+                    0
+                  }
                   icon={ShieldCheck}
                 />
                 <StatCard
                   title="Falhos"
-                  value={optimizationQueue?.counts?.failed ?? optimizationJobs?.failed ?? 0}
+                  value={
+                    optimizationQueue?.counts?.failed ??
+                    optimizationJobs?.failed ??
+                    0
+                  }
                   icon={AlertTriangle}
                 />
                 <StatCard
@@ -637,9 +842,13 @@ export default function Operations() {
                       </p>
                     </div>
                     <Badge
-                      variant={optimizationWorkers.alert ? "secondary" : "outline"}
+                      variant={
+                        optimizationWorkers.alert ? "secondary" : "outline"
+                      }
                     >
-                      {optimizationWorkers.status === "healthy" ? "Saudavel" : "Atencao"}
+                      {optimizationWorkers.status === "healthy"
+                        ? "Saudavel"
+                        : "Atencao"}
                     </Badge>
                   </div>
 
@@ -708,13 +917,20 @@ export default function Operations() {
                     <div>
                       <p className="text-sm font-medium">Integridade da fila</p>
                       <p className="text-sm text-muted-foreground">
-                        Meta: 0 jobs duplicados, 0 jobs perdidos e recuperacao apos falha.
+                        Meta: 0 jobs duplicados, 0 jobs perdidos e recuperacao
+                        apos falha.
                       </p>
                     </div>
                     <Badge
-                      variant={queueIntegrity.status === "healthy" ? "outline" : "secondary"}
+                      variant={
+                        queueIntegrity.status === "healthy"
+                          ? "outline"
+                          : "secondary"
+                      }
                     >
-                      {queueIntegrity.status === "healthy" ? "Saudavel" : "Atencao"}
+                      {queueIntegrity.status === "healthy"
+                        ? "Saudavel"
+                        : "Atencao"}
                     </Badge>
                   </div>
                   <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
@@ -725,12 +941,20 @@ export default function Operations() {
                     />
                     <StatCard
                       title="Jobs travados"
-                      value={queueIntegrity.stalledJobs ?? queueIntegrity.stalledCount ?? 0}
+                      value={
+                        queueIntegrity.stalledJobs ??
+                        queueIntegrity.stalledCount ??
+                        0
+                      }
                       icon={AlertTriangle}
                     />
                     <StatCard
                       title="Jobs recuperados"
-                      value={queueIntegrity.stalledRecoveredCount ?? queueIntegrity.recoveredJobs ?? 0}
+                      value={
+                        queueIntegrity.stalledRecoveredCount ??
+                        queueIntegrity.recoveredJobs ??
+                        0
+                      }
                       icon={ShieldCheck}
                     />
                     <StatCard
@@ -752,24 +976,28 @@ export default function Operations() {
                   {Array.isArray(queueIntegrity.longRunningJobs) &&
                   queueIntegrity.longRunningJobs.length > 0 ? (
                     <div className="mt-4 space-y-2">
-                      {queueIntegrity.longRunningJobs.slice(0, 5).map((job: any) => (
-                        <div
-                          key={job.jobId}
-                          className="rounded-lg border border-amber-200 bg-background/80 p-3 text-sm"
-                        >
-                          <p className="font-medium">
-                            Job {job.jobId} acima de {job.thresholdMultiplier}x o runtime medio
-                          </p>
-                          <p className="text-muted-foreground">
-                            Em execucao ha {formatMs(job.runningMs)}. Worker:{" "}
-                            {job.workerId ?? "desconhecido"}
-                          </p>
-                        </div>
-                      ))}
+                      {queueIntegrity.longRunningJobs
+                        .slice(0, 5)
+                        .map((job: any) => (
+                          <div
+                            key={job.jobId}
+                            className="rounded-lg border border-amber-200 bg-background/80 p-3 text-sm"
+                          >
+                            <p className="font-medium">
+                              Job {job.jobId} acima de {job.thresholdMultiplier}
+                              x o runtime medio
+                            </p>
+                            <p className="text-muted-foreground">
+                              Em execucao ha {formatMs(job.runningMs)}. Worker:{" "}
+                              {job.workerId ?? "desconhecido"}
+                            </p>
+                          </div>
+                        ))}
                     </div>
                   ) : null}
                   <p className="mt-3 text-xs text-muted-foreground">
-                    Ultima checagem: {formatDate(queueIntegrity.lastIntegrityCheck)}
+                    Ultima checagem:{" "}
+                    {formatDate(queueIntegrity.lastIntegrityCheck)}
                   </p>
                 </div>
               ) : null}
@@ -788,8 +1016,8 @@ export default function Operations() {
                     <div>
                       <p className="text-sm font-medium">Disaster recovery</p>
                       <p className="text-sm text-muted-foreground">
-                        Meta: RPO &lt; {disasterReadiness.rpoTargetHours ?? 24}h e RTO &lt;{" "}
-                        {disasterReadiness.rtoTargetHours ?? 4}h.
+                        Meta: RPO &lt; {disasterReadiness.rpoTargetHours ?? 24}h
+                        e RTO &lt; {disasterReadiness.rtoTargetHours ?? 4}h.
                       </p>
                     </div>
                     <Badge
@@ -826,7 +1054,9 @@ export default function Operations() {
                         Restore test
                       </p>
                       <p className="mt-1 text-sm font-semibold">
-                        {disasterReadiness.restoreTestPassed ? "Aprovado" : "Sem evidencia"}
+                        {disasterReadiness.restoreTestPassed
+                          ? "Aprovado"
+                          : "Sem evidencia"}
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {formatDate(disasterReadiness.restoreTestAt)}
@@ -865,23 +1095,27 @@ export default function Operations() {
                   {Array.isArray(disasterReadiness.alerts) &&
                   disasterReadiness.alerts.length > 0 ? (
                     <div className="mt-4 space-y-2">
-                      {disasterReadiness.alerts.slice(0, 4).map((alert: any) => (
-                        <div
-                          key={`${alert.type}-${alert.title}`}
-                          className="rounded-lg border border-border/70 bg-background/80 p-3 text-sm"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="font-medium">{alert.title}</p>
-                            <Badge
-                              variant={severityVariant(alert.severity)}
-                              className={severityBadgeClass(alert.severity)}
-                            >
-                              {alert.severityLabel ?? alert.severity}
-                            </Badge>
+                      {disasterReadiness.alerts
+                        .slice(0, 4)
+                        .map((alert: any) => (
+                          <div
+                            key={`${alert.type}-${alert.title}`}
+                            className="rounded-lg border border-border/70 bg-background/80 p-3 text-sm"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="font-medium">{alert.title}</p>
+                              <Badge
+                                variant={severityVariant(alert.severity)}
+                                className={severityBadgeClass(alert.severity)}
+                              >
+                                {alert.severityLabel ?? alert.severity}
+                              </Badge>
+                            </div>
+                            <p className="mt-1 text-slate-700">
+                              {alert.message}
+                            </p>
                           </div>
-                          <p className="mt-1 text-slate-700">{alert.message}</p>
-                        </div>
-                      ))}
+                        ))}
                     </div>
                   ) : null}
                 </div>
@@ -901,14 +1135,18 @@ export default function Operations() {
                     <div>
                       <p className="text-sm font-medium">Go Live operacional</p>
                       <p className="text-sm text-muted-foreground">
-                        Capacidade comercial limitada a {goLive500.maxRouteStops ?? 160} paradas, 20 usuarios simultaneos e 5 otimizacoes simultaneas.
+                        Capacidade comercial limitada a{" "}
+                        {goLive500.maxRouteStops ?? 160} paradas, 20 usuarios
+                        simultaneos e 5 otimizacoes simultaneas.
                       </p>
                     </div>
                     <Badge
                       variant={readinessVariant(goLive500.verdict)}
                       className={readyBadgeClass(goLive500.verdict)}
                     >
-                      {goLive500.verdict === "NO_GO" ? "NO-GO" : goLive500.verdict}
+                      {goLive500.verdict === "NO_GO"
+                        ? "NO-GO"
+                        : goLive500.verdict}
                     </Badge>
                   </div>
 
@@ -946,14 +1184,25 @@ export default function Operations() {
                     <div className="rounded-lg border border-border/70 bg-background/80 p-3">
                       <MiniBar
                         label="Utilizacao do limite"
-                        value={Math.round(goLive500.routes?.utilizationPercent ?? 0)}
+                        value={Math.round(
+                          goLive500.routes?.utilizationPercent ?? 0
+                        )}
                         max={100}
                       />
                       <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
-                        <span>Rotas totais: {goLive500.routes?.total ?? 0}</span>
-                        <span>Media: {goLive500.routes?.averageStops ?? 0} paradas</span>
-                        <span>&gt;250: {goLive500.routes?.routesAbove250 ?? 0}</span>
-                        <span>Perto do limite: {goLive500.routes?.routesNearLimit ?? 0}</span>
+                        <span>
+                          Rotas totais: {goLive500.routes?.total ?? 0}
+                        </span>
+                        <span>
+                          Media: {goLive500.routes?.averageStops ?? 0} paradas
+                        </span>
+                        <span>
+                          &gt;250: {goLive500.routes?.routesAbove250 ?? 0}
+                        </span>
+                        <span>
+                          Perto do limite:{" "}
+                          {goLive500.routes?.routesNearLimit ?? 0}
+                        </span>
                       </div>
                     </div>
                     <div className="rounded-lg border border-border/70 bg-background/80 p-3 text-sm">
@@ -970,7 +1219,8 @@ export default function Operations() {
                     </div>
                   </div>
 
-                  {Array.isArray(goLive500.issues) && goLive500.issues.length > 0 ? (
+                  {Array.isArray(goLive500.issues) &&
+                  goLive500.issues.length > 0 ? (
                     <div className="mt-4 space-y-2">
                       {goLive500.issues.map((issue: any, index: number) => (
                         <div
@@ -979,8 +1229,16 @@ export default function Operations() {
                         >
                           <div className="flex items-center justify-between gap-2">
                             <p className="font-medium">{issue.message}</p>
-                            <Badge variant={issue.severity === "critical" ? "destructive" : "secondary"}>
-                              {issue.severity === "critical" ? "Critico" : "Atencao"}
+                            <Badge
+                              variant={
+                                issue.severity === "critical"
+                                  ? "destructive"
+                                  : "secondary"
+                              }
+                            >
+                              {issue.severity === "critical"
+                                ? "Critico"
+                                : "Atencao"}
                             </Badge>
                           </div>
                         </div>
@@ -1002,9 +1260,12 @@ export default function Operations() {
                 >
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                      <p className="text-sm font-medium">Performance historica</p>
+                      <p className="text-sm font-medium">
+                        Performance historica
+                      </p>
                       <p className="text-sm text-muted-foreground">
-                        Benchmark automatizado para cenarios progressivos de volume.
+                        Benchmark automatizado para cenarios progressivos de
+                        volume.
                       </p>
                     </div>
                     <Badge
@@ -1041,13 +1302,17 @@ export default function Operations() {
                     />
                     <StatCard
                       title="Dentro da meta"
-                      value={Math.round(performanceBenchmarks.criteriaMetRate ?? 0)}
+                      value={Math.round(
+                        performanceBenchmarks.criteriaMetRate ?? 0
+                      )}
                       suffix="%"
                       icon={Activity}
                     />
                     <StatCard
                       title="Falha OSRM"
-                      value={Math.round(performanceBenchmarks.osrmFailureRate ?? 0)}
+                      value={Math.round(
+                        performanceBenchmarks.osrmFailureRate ?? 0
+                      )}
                       suffix="%"
                       icon={AlertTriangle}
                     />
@@ -1055,40 +1320,46 @@ export default function Operations() {
 
                   {performanceBenchmarks.tableAvailable === false ? (
                     <p className="mt-3 text-sm text-muted-foreground">
-                      Tabela de benchmarks ainda indisponivel. Aplique a migration antes de
-                      executar a suite oficial.
+                      Tabela de benchmarks ainda indisponivel. Aplique a
+                      migration antes de executar a suite oficial.
                     </p>
                   ) : null}
 
                   <div className="mt-4 grid gap-2">
-                    {(performanceBenchmarks.targets ?? []).map((target: any) => (
-                      <div
-                        key={target.stopCount}
-                        className="grid gap-2 rounded-lg border border-border/70 bg-background/80 p-3 text-sm md:grid-cols-[0.8fr_1fr_1fr_1fr_1fr_0.8fr]"
-                      >
-                        <span className="font-medium">{target.stopCount} paradas</span>
-                        <span>Meta: {formatMs(target.targetMs)}</span>
-                        <span>Ultimo: {formatMs(target.latestRuntimeMs)}</span>
-                        <span>P95: {formatMs(target.p95RuntimeMs)}</span>
-                        <span>Pico: {target.latestPeakMemoryMb ?? 0} MB</span>
-                        <Badge
-                          variant={
-                            target.status === "ready"
-                              ? "outline"
-                              : target.status === "no-go"
-                                ? "destructive"
-                                : "secondary"
-                          }
-                          className={readyBadgeClass(target.status)}
+                    {(performanceBenchmarks.targets ?? []).map(
+                      (target: any) => (
+                        <div
+                          key={target.stopCount}
+                          className="grid gap-2 rounded-lg border border-border/70 bg-background/80 p-3 text-sm md:grid-cols-[0.8fr_1fr_1fr_1fr_1fr_0.8fr]"
                         >
-                          {target.status === "ready"
-                            ? "READY"
-                            : target.status === "no-go"
-                              ? "NO-GO"
-                              : "Sem dado"}
-                        </Badge>
-                      </div>
-                    ))}
+                          <span className="font-medium">
+                            {target.stopCount} paradas
+                          </span>
+                          <span>Meta: {formatMs(target.targetMs)}</span>
+                          <span>
+                            Ultimo: {formatMs(target.latestRuntimeMs)}
+                          </span>
+                          <span>P95: {formatMs(target.p95RuntimeMs)}</span>
+                          <span>Pico: {target.latestPeakMemoryMb ?? 0} MB</span>
+                          <Badge
+                            variant={
+                              target.status === "ready"
+                                ? "outline"
+                                : target.status === "no-go"
+                                  ? "destructive"
+                                  : "secondary"
+                            }
+                            className={readyBadgeClass(target.status)}
+                          >
+                            {target.status === "ready"
+                              ? "READY"
+                              : target.status === "no-go"
+                                ? "NO-GO"
+                                : "Sem dado"}
+                          </Badge>
+                        </div>
+                      )
+                    )}
                   </div>
                 </div>
               ) : null}
@@ -1096,7 +1367,9 @@ export default function Operations() {
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
                 <StatCard
                   title="Fila media"
-                  value={Math.round((optimizationJobs?.queueWait?.averageMs ?? 0) / 1000)}
+                  value={Math.round(
+                    (optimizationJobs?.queueWait?.averageMs ?? 0) / 1000
+                  )}
                   suffix="s"
                   icon={Gauge}
                 />
@@ -1112,15 +1385,17 @@ export default function Operations() {
                 />
                 <StatCard
                   title="Falha OSRM"
-                  value={Math.round(routeMetrics?.performance?.osrm?.failureRate ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.performance?.osrm?.failureRate ?? 0
+                  )}
                   suffix="%"
                   icon={AlertTriangle}
                 />
                 <StatCard
                   title="P95 total"
                   value={Math.round(
-                    (routeMetrics?.performance?.stages?.totalRuntimeMs?.p95Ms ?? 0) /
-                      1000
+                    (routeMetrics?.performance?.stages?.totalRuntimeMs?.p95Ms ??
+                      0) / 1000
                   )}
                   suffix="s"
                   icon={Gauge}
@@ -1265,9 +1540,11 @@ export default function Operations() {
 
               <div className="grid gap-4 xl:grid-cols-3">
                 <div className="rounded-lg border border-border/80 p-4">
-                  <p className="text-sm font-medium">Distribuicao de confianca</p>
+                  <p className="text-sm font-medium">
+                    Distribuicao de confianca
+                  </p>
                   <div className="mt-3 space-y-3">
-                    {confidenceItems.map((item) => (
+                    {confidenceItems.map(item => (
                       <MiniBar
                         key={item.label}
                         label={item.label}
@@ -1278,7 +1555,9 @@ export default function Operations() {
                   </div>
                 </div>
                 <div className="rounded-lg border border-border/80 p-4">
-                  <p className="text-sm font-medium">Cache e consultas externas</p>
+                  <p className="text-sm font-medium">
+                    Cache e consultas externas
+                  </p>
                   <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
                     <div>
                       <p className="text-xs text-muted-foreground">Local</p>
@@ -1357,7 +1636,9 @@ export default function Operations() {
                   <p className="text-sm font-medium">Relatorio executivo</p>
                   <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
                     <span>Confianca media</span>
-                    <strong>{executiveReport?.averageConfidence ?? 0}/100</strong>
+                    <strong>
+                      {executiveReport?.averageConfidence ?? 0}/100
+                    </strong>
                     <span>Taxa de cache</span>
                     <strong>{executiveReport?.cacheRate ?? 0}%</strong>
                     <span>Taxa fallback</span>
@@ -1401,19 +1682,25 @@ export default function Operations() {
                 />
                 <StatCard
                   title="Confiança endereço"
-                  value={Math.round(routeMetrics?.geocodingConfidence?.averageScore ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.geocodingConfidence?.averageScore ?? 0
+                  )}
                   suffix="/100"
                   icon={MapPinned}
                 />
                 <StatCard
                   title="Menor confiança"
-                  value={Math.round(routeMetrics?.geocodingConfidence?.minScore ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.geocodingConfidence?.minScore ?? 0
+                  )}
                   suffix="/100"
                   icon={AlertTriangle}
                 />
                 <StatCard
                   title="Paradas suspeitas"
-                  value={Math.round(routeMetrics?.geocodingConfidence?.suspiciousStopRate ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.geocodingConfidence?.suspiciousStopRate ?? 0
+                  )}
                   suffix="%"
                   icon={Gauge}
                 />
@@ -1492,7 +1779,9 @@ export default function Operations() {
                 />
                 <StatCard
                   title="Runtime médio"
-                  value={Math.round(routeMetrics?.averageOptimizationRuntimeSeconds ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.averageOptimizationRuntimeSeconds ?? 0
+                  )}
                   suffix="s"
                   icon={Activity}
                 />
@@ -1503,13 +1792,17 @@ export default function Operations() {
                 />
                 <StatCard
                   title="Taxa particionada"
-                  value={Math.round(routeMetrics?.partitioning?.partitionedRouteRate ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.partitioning?.partitionedRouteRate ?? 0
+                  )}
                   suffix="%"
                   icon={Gauge}
                 />
                 <StatCard
                   title="Média partições"
-                  value={Math.round(routeMetrics?.partitioning?.averagePartitionCount ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.partitioning?.averagePartitionCount ?? 0
+                  )}
                   icon={Route}
                 />
                 <StatCard
@@ -1519,24 +1812,33 @@ export default function Operations() {
                 />
                 <StatCard
                   title="KM economizados"
-                  value={Math.round(routeMetrics?.commercialImpact?.estimatedKmSaved ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.commercialImpact?.estimatedKmSaved ?? 0
+                  )}
                   icon={MapPinned}
                 />
                 <StatCard
                   title="Tempo economizado"
-                  value={Math.round(routeMetrics?.commercialImpact?.estimatedMinutesSaved ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.commercialImpact?.estimatedMinutesSaved ?? 0
+                  )}
                   suffix="min"
                   icon={Activity}
                 />
                 <StatCard
                   title="Combustível"
-                  value={Math.round(routeMetrics?.commercialImpact?.estimatedFuelLitersSaved ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.commercialImpact?.estimatedFuelLitersSaved ??
+                      0
+                  )}
                   suffix="L"
                   icon={Gauge}
                 />
                 <StatCard
                   title="CO2 evitado"
-                  value={Math.round(routeMetrics?.commercialImpact?.estimatedCo2KgAvoided ?? 0)}
+                  value={Math.round(
+                    routeMetrics?.commercialImpact?.estimatedCo2KgAvoided ?? 0
+                  )}
                   suffix="kg"
                   icon={ShieldCheck}
                 />
@@ -1552,9 +1854,14 @@ export default function Operations() {
                 <div className="mt-3 grid gap-3 sm:grid-cols-5">
                   {confidenceDistributionItems(
                     routeMetrics?.geocodingConfidence?.scoreDistribution
-                  ).map((item) => (
-                    <div key={item.label} className="rounded-md bg-muted/50 p-3">
-                      <p className="text-xs text-muted-foreground">{item.label}</p>
+                  ).map(item => (
+                    <div
+                      key={item.label}
+                      className="rounded-md bg-muted/50 p-3"
+                    >
+                      <p className="text-xs text-muted-foreground">
+                        {item.label}
+                      </p>
                       <p className="text-2xl font-semibold">{item.value}</p>
                     </div>
                   ))}
@@ -1579,7 +1886,9 @@ export default function Operations() {
                         <td className="px-3 py-2 font-medium">
                           {modeLabel(item.mode)}
                         </td>
-                        <td className="px-3 py-2">{item.routeMetricCount ?? 0}</td>
+                        <td className="px-3 py-2">
+                          {item.routeMetricCount ?? 0}
+                        </td>
                         <td className="px-3 py-2">
                           {Math.round(item.averageQualityScore ?? 0)}
                         </td>
@@ -1637,17 +1946,23 @@ export default function Operations() {
                       >
                         {event.severity}
                       </Badge>
-                      <span className="text-sm font-medium text-slate-950">{event.title}</span>
+                      <span className="text-sm font-medium text-slate-950">
+                        {event.title}
+                      </span>
                       <span className="text-xs text-slate-600">
                         {formatDate(event.createdAt)}
                       </span>
                     </div>
                     <p className="mt-1 text-sm text-slate-700">
-                      {event.userName || event.userEmail || "Usuario nao identificado"}
+                      {event.userName ||
+                        event.userEmail ||
+                        "Usuario nao identificado"}
                       {event.routeName ? ` - ${event.routeName}` : ""}
                     </p>
                     {event.message ? (
-                      <p className="mt-1 line-clamp-2 text-sm text-slate-950">{event.message}</p>
+                      <p className="mt-1 line-clamp-2 text-sm text-slate-950">
+                        {event.message}
+                      </p>
                     ) : null}
                     <p className="mt-1 text-xs text-slate-600">
                       {event.source} - {event.type}
@@ -1669,7 +1984,8 @@ export default function Operations() {
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-sm text-muted-foreground">
-                  Remove apenas usuarios de teste com e-mail codex-e2e-*@example.com.
+                  Remove apenas usuarios de teste com e-mail
+                  codex-e2e-*@example.com.
                 </p>
                 <Button
                   type="button"
@@ -1703,16 +2019,25 @@ export default function Operations() {
                   ))
                 ) : data?.recentUsers?.length ? (
                   data.recentUsers.map((user: any) => (
-                    <div key={user.id} className="rounded-lg border border-border/80 p-3">
-                      <p className="text-sm font-medium">{user.name || "Sem nome"}</p>
-                      <p className="text-xs text-muted-foreground">{user.email || "-"}</p>
+                    <div
+                      key={user.id}
+                      className="rounded-lg border border-border/80 p-3"
+                    >
+                      <p className="text-sm font-medium">
+                        {user.name || "Sem nome"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {user.email || "-"}
+                      </p>
                       <p className="mt-1 text-xs text-muted-foreground">
                         Cadastro: {formatDate(user.createdAt)}
                       </p>
                     </div>
                   ))
                 ) : (
-                  <p className="text-sm text-muted-foreground">Sem cadastros recentes.</p>
+                  <p className="text-sm text-muted-foreground">
+                    Sem cadastros recentes.
+                  </p>
                 )}
               </CardContent>
             </Card>
@@ -1728,13 +2053,17 @@ export default function Operations() {
                   ))
                 ) : data?.recentRoutes?.length ? (
                   data.recentRoutes.map((route: any) => (
-                    <div key={route.id} className="rounded-lg border border-border/80 p-3">
+                    <div
+                      key={route.id}
+                      className="rounded-lg border border-border/80 p-3"
+                    >
                       <div className="flex items-center gap-2">
                         <MapPinned className="h-4 w-4 text-primary" />
                         <p className="text-sm font-medium">{route.name}</p>
                       </div>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        {route.userName || route.userEmail || "Usuário"} · {route.status}
+                        {route.userName || route.userEmail || "Usuário"} ·{" "}
+                        {route.status}
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
                         {formatDate(route.createdAt)}
@@ -1742,7 +2071,9 @@ export default function Operations() {
                     </div>
                   ))
                 ) : (
-                  <p className="text-sm text-muted-foreground">Sem rotas recentes.</p>
+                  <p className="text-sm text-muted-foreground">
+                    Sem rotas recentes.
+                  </p>
                 )}
               </CardContent>
             </Card>

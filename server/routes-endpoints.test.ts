@@ -6,7 +6,10 @@ import { ENV } from "./_core/env";
 
 type AuthenticatedUser = NonNullable<TrpcContext["user"]>;
 
-function createAuthContext(userId: number, role: "user" | "admin" = "user"): TrpcContext {
+function createAuthContext(
+  userId: number,
+  role: "user" | "admin" = "user"
+): TrpcContext {
   const user: AuthenticatedUser = {
     id: userId,
     openId: `route-endpoints-user-${userId}`,
@@ -49,42 +52,43 @@ describe("Route endpoints", () => {
     }));
 
   it("promotes a clearly nearer stop before a later distant planned stop during the local sweep", () => {
-    const swept = __routeOptimizationTestHooks.buildLocalCoherenceSweepLocations(
-      {
-        sequence: [0, 1, 2],
-        totalDistance: 0,
-        totalTime: 0,
-        waypoints: [
-          {
-            address: "Rua Distante, 100, Presidente Prudente - SP",
-            latitude: -22.01,
-            longitude: -51.01,
-            sequence: 0,
-          },
-          {
-            address: "Rua Muito Perto, 10, Presidente Prudente - SP",
-            latitude: -22.0005,
-            longitude: -51.0005,
-            sequence: 1,
-          },
-          {
-            address: "Rua Distante 2, 300, Presidente Prudente - SP",
-            latitude: -22.02,
-            longitude: -51.02,
-            sequence: 2,
-          },
-        ],
-      },
-      {
-        startLocation: {
-          address: "Meu local",
-          latitude: -22.0001,
-          longitude: -51.0001,
+    const swept =
+      __routeOptimizationTestHooks.buildLocalCoherenceSweepLocations(
+        {
+          sequence: [0, 1, 2],
+          totalDistance: 0,
+          totalTime: 0,
+          waypoints: [
+            {
+              address: "Rua Distante, 100, Presidente Prudente - SP",
+              latitude: -22.01,
+              longitude: -51.01,
+              sequence: 0,
+            },
+            {
+              address: "Rua Muito Perto, 10, Presidente Prudente - SP",
+              latitude: -22.0005,
+              longitude: -51.0005,
+              sequence: 1,
+            },
+            {
+              address: "Rua Distante 2, 300, Presidente Prudente - SP",
+              latitude: -22.02,
+              longitude: -51.02,
+              sequence: 2,
+            },
+          ],
         },
-      }
-    );
+        {
+          startLocation: {
+            address: "Meu local",
+            latitude: -22.0001,
+            longitude: -51.0001,
+          },
+        }
+      );
 
-    expect(swept?.map((stop) => stop.address)).toEqual([
+    expect(swept?.map(stop => stop.address)).toEqual([
       "Rua Muito Perto, 10, Presidente Prudente - SP",
       "Rua Distante, 100, Presidente Prudente - SP",
       "Rua Distante 2, 300, Presidente Prudente - SP",
@@ -129,7 +133,7 @@ describe("Route endpoints", () => {
           startLocation,
           forceNearest: true,
         })
-        ?.map((stop) => stop.address)
+        ?.map(stop => stop.address)
     ).toEqual([
       "Rua Levemente Mais Perto, Presidente Prudente - SP",
       "Rua Planejada, Presidente Prudente - SP",
@@ -194,9 +198,9 @@ describe("Route endpoints", () => {
       },
     };
 
-    expect(__routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)).toBe(
-      false
-    );
+    expect(
+      __routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)
+    ).toBe(false);
   });
 
   it("rejects a sweep candidate that reduces coherence issues by adding visual crossings", () => {
@@ -258,9 +262,9 @@ describe("Route endpoints", () => {
       },
     };
 
-    expect(__routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)).toBe(
-      false
-    );
+    expect(
+      __routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)
+    ).toBe(false);
   });
 
   it("rejects a sweep candidate that reduces coherence issues by increasing total alerts", () => {
@@ -329,9 +333,9 @@ describe("Route endpoints", () => {
       },
     };
 
-    expect(__routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)).toBe(
-      false
-    );
+    expect(
+      __routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)
+    ).toBe(false);
   });
 
   it("classifies residual nearby skipped stops as strong attention instead of clean optimization", () => {
@@ -456,7 +460,7 @@ describe("Route endpoints", () => {
       ],
     });
 
-    expect(plan.selectedIssues.map((issue) => issue.type)).toEqual([
+    expect(plan.selectedIssues.map(issue => issue.type)).toEqual([
       "premature_region_exit",
       "region_revisited",
       "nearby_stop_skipped",
@@ -551,7 +555,9 @@ describe("Route endpoints", () => {
       metrics.routeMetricCount
     );
     expect(metrics.geocodingConfidence.averageScore).toBeGreaterThanOrEqual(0);
-    expect(metrics.geocodingConfidence.suspiciousStopRate).toBeGreaterThanOrEqual(0);
+    expect(
+      metrics.geocodingConfidence.suspiciousStopRate
+    ).toBeGreaterThanOrEqual(0);
   });
 
   it("exposes geocoding impact analytics for admin dashboards", async () => {
@@ -584,7 +590,9 @@ describe("Route endpoints", () => {
     expect(impact.last30Days.cache.misses).toBeGreaterThanOrEqual(1);
     expect(impact.last30Days.cache.hitRate).toBeGreaterThanOrEqual(0);
     expect(impact.last30Days.providers.length).toBeGreaterThan(0);
-    expect(impact.last30Days.confidenceDistribution.score_81_100).toBeGreaterThanOrEqual(0);
+    expect(
+      impact.last30Days.confidenceDistribution.score_81_100
+    ).toBeGreaterThanOrEqual(0);
   });
 
   it("records manual address corrections when a stop is edited", async () => {
@@ -623,7 +631,9 @@ describe("Route endpoints", () => {
     const report = await db.getGeocodingExecutiveReport();
 
     expect(report.manualCorrections).toBeGreaterThanOrEqual(1);
-    expect(report.monthlyEvolution.manualCorrections.topAddresses.length).toBeGreaterThan(0);
+    expect(
+      report.monthlyEvolution.manualCorrections.topAddresses.length
+    ).toBeGreaterThan(0);
   });
 
   it("tracks operational execution analytics from route events", async () => {
@@ -714,9 +724,98 @@ describe("Route endpoints", () => {
     expect(report.last30Days.completedRoutes).toBeGreaterThanOrEqual(1);
     expect(report.last30Days.abandonedRoutes).toBeGreaterThanOrEqual(1);
     expect(report.last30Days.startBlockedAttempts).toBeGreaterThanOrEqual(1);
-    expect(report.last30Days.startBlockedByReason.invalid_coordinates).toBeGreaterThanOrEqual(1);
+    expect(
+      report.last30Days.startBlockedByReason.invalid_coordinates
+    ).toBeGreaterThanOrEqual(1);
     expect(report.last30Days.startRate).toBeGreaterThan(0);
     expect(report.last30Days.completionRate).toBeGreaterThan(0);
+  });
+
+  it("exposes executive observability signals for admin decisions", async () => {
+    await db.createRouteMetric({
+      userId: 8298,
+      routeId: 8298,
+      qualityScore: 72,
+      optimizationRuntimeMs: 1500,
+      osrmUsed: false,
+      osrmFallback: true,
+      clusterCount: 2,
+      averageClusterRadius: 0.4,
+      maxClusterRadius: 0.9,
+      regionRevisitedCount: 1,
+      prematureRegionExitCount: 1,
+      nearbyStopSkippedCount: 1,
+      routeCrossingCount: 0,
+      issuesDetectedCount: 3,
+      issuesCorrectedCount: 1,
+      issuesBlockedCount: 0,
+      auditStatus: "attention",
+      auditQuality: "attention",
+      auditSource: "test",
+      routeMode: "balanced",
+      localityMode: "strict",
+      executionStatus: "completed",
+      startedAt: new Date(Date.now() - 60_000),
+      completedAt: new Date(),
+      executionDurationMs: 60_000,
+      stopCount: 3,
+      totalDistanceKm: 8,
+      totalTimeMinutes: 18,
+      metadata: {
+        operationalStatus: "attention_strong",
+      },
+    });
+    await db.createOperationalEvent({
+      userId: 8298,
+      routeId: 8298,
+      stopId: 8298,
+      type: "route_stop_delivered",
+      severity: "warning",
+      source: "route.execution",
+      title: "Parada marcada como entregue",
+      metadata: {
+        remoteConfirmation: true,
+        locationIntegrity: "remote_confirmation",
+        distanceFromExpectedStopKm: 1.2,
+      },
+    });
+    await db.createOperationalEvent({
+      userId: 8298,
+      routeId: 8298,
+      stopId: 8298,
+      type: "route_stop_remote_confirmation",
+      severity: "error",
+      source: "route.execution",
+      title: "Entrega marcada longe do local",
+      metadata: {
+        remoteConfirmation: true,
+        distanceFromExpectedStopKm: 1.2,
+      },
+    });
+
+    const report = await db.getExecutiveObservabilityReport();
+
+    expect(report.last30Days.optimizedRoutes).toBeGreaterThanOrEqual(1);
+    expect(report.last30Days.startedRoutes).toBeGreaterThanOrEqual(1);
+    expect(report.last30Days.completedRoutes).toBeGreaterThanOrEqual(1);
+    expect(report.last30Days.osrmFallbackCount).toBeGreaterThanOrEqual(1);
+    expect(report.last30Days.attentionStrongRoutes).toBeGreaterThanOrEqual(1);
+    expect(
+      report.last30Days.remoteDeliveryConfirmations
+    ).toBeGreaterThanOrEqual(1);
+    expect(report.last30Days.averageOptimizationRuntimeMs).toBeGreaterThan(0);
+    expect(report.comparison.signals.map((signal: any) => signal.key)).toEqual(
+      expect.arrayContaining([
+        "completionRate",
+        "osrmFallbackRate",
+        "attentionStrongRate",
+        "remoteDeliveryRate",
+        "averageOptimizationRuntimeMs",
+      ])
+    );
+
+    const dashboard = await db.getAdminOperationalDashboard();
+    expect((dashboard as any).executiveObservability.last30Days).toBeDefined();
   });
 
   it("exposes disaster recovery readiness for admin dashboards", async () => {
@@ -727,7 +826,7 @@ describe("Route endpoints", () => {
 
     expect(readiness.rpoTargetHours).toBe(24);
     expect(readiness.rtoTargetHours).toBe(4);
-    expect(readiness.criticalTables.map((table) => table.table)).toEqual(
+    expect(readiness.criticalTables.map(table => table.table)).toEqual(
       expect.arrayContaining([
         "routes",
         "stops",
@@ -760,7 +859,9 @@ describe("Route endpoints", () => {
 
     const dashboard = await db.getPerformanceBenchmarkDashboard(30);
 
-    const target250 = dashboard.targets.find((target) => target.stopCount === 250);
+    const target250 = dashboard.targets.find(
+      target => target.stopCount === 250
+    );
     expect(dashboard.totalRuns).toBeGreaterThanOrEqual(1);
     expect(dashboard.successRate).toBeGreaterThan(0);
     expect(target250?.latestRuntimeMs).toBeGreaterThan(0);
@@ -784,9 +885,15 @@ describe("Route endpoints", () => {
     const readiness = await caller.admin.multiVehicleReadiness();
 
     expect(readiness.status).toMatch(/READY|PARTIAL|NO-GO/);
-    expect(readiness.items.osrmEnterprise.status).toMatch(/READY|PARTIAL|NO-GO/);
-    expect(readiness.items.workerRedundancy.status).toMatch(/READY|PARTIAL|NO-GO/);
-    expect(readiness.items.disasterRecovery.status).toMatch(/READY|PARTIAL|NO-GO/);
+    expect(readiness.items.osrmEnterprise.status).toMatch(
+      /READY|PARTIAL|NO-GO/
+    );
+    expect(readiness.items.workerRedundancy.status).toMatch(
+      /READY|PARTIAL|NO-GO/
+    );
+    expect(readiness.items.disasterRecovery.status).toMatch(
+      /READY|PARTIAL|NO-GO/
+    );
     expect(readiness.items.benchmark250.evidence.stopCount).toBe(250);
     expect(readiness.items.benchmark500.evidence.stopCount).toBe(500);
     expect(readiness.items.benchmark1000.evidence.stopCount).toBe(1000);
@@ -823,9 +930,11 @@ describe("Route endpoints", () => {
 
     expect(result.route.status).toBe("optimized");
     expect(result.optimization).not.toBeNull();
-    expect(result.optimization?.audit.issues.some((issue) =>
-      issue.type === "low_geocoding_confidence"
-    )).toBe(true);
+    expect(
+      result.optimization?.audit.issues.some(
+        issue => issue.type === "low_geocoding_confidence"
+      )
+    ).toBe(true);
   });
 
   it("rejects optimization when OSRM is required and road metrics are unavailable", async () => {
@@ -889,9 +998,11 @@ describe("Route endpoints", () => {
     expect(result.route.status).toBe("optimized");
     expect(result.optimization?.routingStrategy).toBe("optimized_route");
     expect(result.optimization?.auditPolicy).toBeNull();
-    expect(result.optimization?.audit.issues.some((issue: any) =>
-      issue.type === "osrm_fallback"
-    )).toBe(true);
+    expect(
+      result.optimization?.audit.issues.some(
+        (issue: any) => issue.type === "osrm_fallback"
+      )
+    ).toBe(true);
     expect(result.optimization?.auditSource).toBe("geo-default");
     expect(result.optimization?.metadata?.partitioned).toBe(true);
   });
@@ -978,8 +1089,12 @@ describe("Route endpoints", () => {
 
     const metrics = await db.getRouteMetricsDashboard(30);
     expect(metrics.commercialImpact.estimatedKmSaved).toBeGreaterThanOrEqual(2);
-    expect(metrics.commercialImpact.estimatedMinutesSaved).toBeGreaterThanOrEqual(5);
-    expect(metrics.commercialImpact.estimatedFuelLitersSaved).toBeGreaterThan(0);
+    expect(
+      metrics.commercialImpact.estimatedMinutesSaved
+    ).toBeGreaterThanOrEqual(5);
+    expect(metrics.commercialImpact.estimatedFuelLitersSaved).toBeGreaterThan(
+      0
+    );
     expect(metrics.commercialImpact.estimatedCo2KgAvoided).toBeGreaterThan(0);
   });
 
@@ -1020,9 +1135,13 @@ describe("Route endpoints", () => {
     });
 
     const metrics = await db.getRouteMetricsDashboard(30);
-    expect(metrics.partitioning.partitionedRouteCount).toBeGreaterThanOrEqual(1);
+    expect(metrics.partitioning.partitionedRouteCount).toBeGreaterThanOrEqual(
+      1
+    );
     expect(metrics.partitioning.averagePartitionCount).toBeGreaterThan(0);
-    expect(metrics.partitioning.largestPartitionSize).toBeGreaterThanOrEqual(62);
+    expect(metrics.partitioning.largestPartitionSize).toBeGreaterThanOrEqual(
+      62
+    );
   });
 
   it("keeps route as draft when optimization rejects invalid stops", async () => {
@@ -1082,9 +1201,11 @@ describe("Route endpoints", () => {
     const route = await caller.routes.get({ id: result.route.id });
 
     expect(result.optimization).not.toBeNull();
-    expect(result.optimization?.audit.issues.some((issue) =>
-      issue.type === "generic_address"
-    )).toBe(true);
+    expect(
+      result.optimization?.audit.issues.some(
+        issue => issue.type === "generic_address"
+      )
+    ).toBe(true);
     expect(route?.status).toBe("optimized");
   });
 
@@ -1192,9 +1313,11 @@ describe("Route endpoints", () => {
     const routeAfter = await caller.routes.get({ id: route.id });
     const stopsAfter = await caller.stops.list({ routeId: route.id });
 
-    expect(optimized.audit.issues.some((issue: any) =>
-      issue.type === "duplicate_coordinates"
-    )).toBe(true);
+    expect(
+      optimized.audit.issues.some(
+        (issue: any) => issue.type === "duplicate_coordinates"
+      )
+    ).toBe(true);
     expect(routeAfter?.status).toBe("optimized");
     expect(stopsAfter).toHaveLength(6);
   });
@@ -1273,7 +1396,8 @@ describe("Route endpoints", () => {
     expect(
       result.optimization?.audit.issues.some(
         (issue: any) =>
-          issue.type === "nearby_stop_skipped" || issue.type === "region_revisited"
+          issue.type === "nearby_stop_skipped" ||
+          issue.type === "region_revisited"
       )
     ).toBe(false);
     expect(stops.map((stop: any) => stop.address)).toEqual([
@@ -1334,15 +1458,24 @@ describe("Route endpoints", () => {
     expect(audit.context.structuralAuditOnly).toBe(true);
     expect(audit.context.operationalStatus).toBe("shopee_stop_sequence");
     expect(audit.context.commerciallySatisfactory).toBe(false);
-    expect(audit.issues.some((issue: any) =>
-      ["nearby_stop_skipped", "region_revisited", "premature_region_exit", "bad_preserved_sequence"].includes(issue.type)
-    )).toBe(false);
+    expect(
+      audit.issues.some((issue: any) =>
+        [
+          "nearby_stop_skipped",
+          "region_revisited",
+          "premature_region_exit",
+          "bad_preserved_sequence",
+        ].includes(issue.type)
+      )
+    ).toBe(false);
     expect(stops.map((stop: any) => stop.address)).toEqual([
       "Rua Shopee Stop 1, Presidente Prudente - SP",
       "Rua Shopee Stop 2 longe, Presidente Prudente - SP",
       "Rua Shopee Stop 3 perto, Presidente Prudente - SP",
     ]);
-    expect(stops.map((stop: any) => Number(stop.originalStop))).toEqual([1, 2, 3]);
+    expect(stops.map((stop: any) => Number(stop.originalStop))).toEqual([
+      1, 2, 3,
+    ]);
   });
 
   it("does not block Shopee preserved STOP routes when road metrics are unavailable above fallback limit", async () => {
@@ -1436,7 +1569,9 @@ describe("Route endpoints", () => {
       ],
     });
 
-    const optimizedAgain = await caller.routes.optimize({ id: result.route.id });
+    const optimizedAgain = await caller.routes.optimize({
+      id: result.route.id,
+    });
     const audit = await caller.routes.audit({ id: result.route.id });
 
     expect(optimizedAgain.auditPolicy).toBe("shopee_stop_preserved");
@@ -1490,7 +1625,9 @@ describe("Route endpoints", () => {
 
     expect(result.optimization?.auditPolicy).toBeNull();
     expect(result.optimization?.routingStrategy).toBe("optimized_route");
-    expect(result.optimization?.operationalStatus).not.toBe("shopee_stop_sequence");
+    expect(result.optimization?.operationalStatus).not.toBe(
+      "shopee_stop_sequence"
+    );
     expect(audit.context.auditPolicy).toBeNull();
     expect(audit.context.routingStrategy).toBe("optimized_route");
     expect(audit.context.structuralAuditOnly).toBe(false);
@@ -1532,7 +1669,8 @@ describe("Route endpoints", () => {
           isUnsequencedStop: false,
         },
         {
-          address: "Rua Shopee Stop 3 perto do inicio, Presidente Prudente - SP",
+          address:
+            "Rua Shopee Stop 3 perto do inicio, Presidente Prudente - SP",
           latitude: -22.1207,
           longitude: -51.3789,
           sequence: 2,
@@ -1547,7 +1685,9 @@ describe("Route endpoints", () => {
 
     expect(result.optimization?.auditPolicy).toBeNull();
     expect(result.optimization?.routingStrategy).toBe("optimized_route");
-    expect(stops.map((stop: any) => Number(stop.originalStop))).not.toEqual([1, 2, 3]);
+    expect(stops.map((stop: any) => Number(stop.originalStop))).not.toEqual([
+      1, 2, 3,
+    ]);
     expect(stops.map((stop: any) => stop.address)).toEqual([
       "Rua Shopee Stop 1 inicio, Presidente Prudente - SP",
       "Rua Shopee Stop 3 perto do inicio, Presidente Prudente - SP",
@@ -1593,7 +1733,9 @@ describe("Route endpoints", () => {
       ],
     });
 
-    const optimizedAgain = await caller.routes.optimize({ id: result.route.id });
+    const optimizedAgain = await caller.routes.optimize({
+      id: result.route.id,
+    });
     const stops = await caller.stops.list({ routeId: result.route.id });
 
     expect(optimizedAgain.auditPolicy).toBeNull();
@@ -1705,7 +1847,9 @@ describe("Route endpoints", () => {
       "Rua Inicio, 100, Presidente Prudente - SP"
     );
     expect(Number(updatedRoute?.startLatitude)).toBe(-22.1207);
-    expect(updatedRoute?.endLocation).toBe("Rua Fim, 200, Presidente Prudente - SP");
+    expect(updatedRoute?.endLocation).toBe(
+      "Rua Fim, 200, Presidente Prudente - SP"
+    );
     expect(Number(updatedRoute?.endLongitude)).toBe(-51.3989);
 
     await caller.routes.update({
@@ -1796,14 +1940,18 @@ describe("Route endpoints", () => {
         },
       ],
     });
-    const stopsBeforeDelete = await caller.stops.list({ routeId: result.route.id });
+    const stopsBeforeDelete = await caller.stops.list({
+      routeId: result.route.id,
+    });
 
     await caller.stops.delete({
       routeId: result.route.id,
       stopId: stopsBeforeDelete[1].id,
     });
 
-    const stopsAfterDelete = await caller.stops.list({ routeId: result.route.id });
+    const stopsAfterDelete = await caller.stops.list({
+      routeId: result.route.id,
+    });
     const route = await caller.routes.get({ id: result.route.id });
 
     expect(stopsAfterDelete).toHaveLength(2);
@@ -1846,7 +1994,9 @@ describe("Route endpoints", () => {
         },
       ],
     });
-    const stopsBeforeReoptimize = await caller.stops.list({ routeId: result.route.id });
+    const stopsBeforeReoptimize = await caller.stops.list({
+      routeId: result.route.id,
+    });
     const handledStops = stopsBeforeReoptimize.filter((stop: any) =>
       [
         "Rua Doutor Gurgel, 100, Presidente Prudente - SP",
@@ -1860,10 +2010,14 @@ describe("Route endpoints", () => {
       excludeStopIds: handledStops.map((stop: any) => stop.id),
     });
 
-    const stopsAfterReoptimize = await caller.stops.list({ routeId: result.route.id });
+    const stopsAfterReoptimize = await caller.stops.list({
+      routeId: result.route.id,
+    });
 
     expect(stopsAfterReoptimize).toHaveLength(2);
-    expect(stopsAfterReoptimize.map((stop: any) => stop.address).sort()).toEqual([
+    expect(
+      stopsAfterReoptimize.map((stop: any) => stop.address).sort()
+    ).toEqual([
       "Rua Doutor Gurgel, 140, Presidente Prudente - SP",
       "Rua Doutor Gurgel, 160, Presidente Prudente - SP",
     ]);
@@ -1896,12 +2050,12 @@ describe("Route endpoints", () => {
 
     expect(audit.context.respectInputSequence).toBe(true);
     expect(audit.context.requireStartLocation).toBe(true);
-    expect(audit.issues.some((issue: any) => issue.type === "bad_preserved_sequence")).toBe(
-      true
-    );
-    expect(audit.issues.some((issue: any) => issue.type === "missing_driver_origin")).toBe(
-      true
-    );
+    expect(
+      audit.issues.some((issue: any) => issue.type === "bad_preserved_sequence")
+    ).toBe(true);
+    expect(
+      audit.issues.some((issue: any) => issue.type === "missing_driver_origin")
+    ).toBe(true);
   });
 
   it("does not reuse optimization audit metadata after manual route edits", async () => {
@@ -1943,12 +2097,12 @@ describe("Route endpoints", () => {
     expect(audit.context.staleOptimizationContext).toBe(true);
     expect(audit.context.respectInputSequence).toBeNull();
     expect(audit.context.requireStartLocation).toBe(false);
-    expect(audit.issues.some((issue: any) => issue.type === "bad_preserved_sequence")).toBe(
-      false
-    );
-    expect(audit.issues.some((issue: any) => issue.type === "missing_driver_origin")).toBe(
-      false
-    );
+    expect(
+      audit.issues.some((issue: any) => issue.type === "bad_preserved_sequence")
+    ).toBe(false);
+    expect(
+      audit.issues.some((issue: any) => issue.type === "missing_driver_origin")
+    ).toBe(false);
   });
 
   it("marks an optimized route as draft when a new stop is added", async () => {
@@ -1978,7 +2132,7 @@ describe("Route endpoints", () => {
       routeId: result.route.id,
       stops: [
         {
-      address: "Rua Doutor Jose Foz, 140, Presidente Prudente - SP",
+          address: "Rua Doutor Jose Foz, 140, Presidente Prudente - SP",
           latitude: -22.121,
           longitude: -51.401,
           sequence: 2,
@@ -1993,8 +2147,8 @@ describe("Route endpoints", () => {
     expect(audit.context.staleOptimizationContext).toBe(true);
     expect(audit.context.respectInputSequence).toBeNull();
     expect(audit.context.requireStartLocation).toBe(false);
-    expect(audit.issues.some((issue: any) => issue.type === "bad_preserved_sequence")).toBe(
-      false
-    );
+    expect(
+      audit.issues.some((issue: any) => issue.type === "bad_preserved_sequence")
+    ).toBe(false);
   });
 });
