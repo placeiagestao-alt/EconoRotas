@@ -206,7 +206,11 @@ function normalizeText(value: string) {
     .trim();
 }
 
-function getStatusLabel(status?: string, operationalStatus?: string, operationalLabel?: string) {
+function getStatusLabel(
+  status?: string,
+  operationalStatus?: string,
+  operationalLabel?: string
+) {
   if (operationalLabel) return operationalLabel;
   switch (operationalStatus || status) {
     case "shopee_stop_sequence":
@@ -462,7 +466,7 @@ export default function RouteDetail() {
     },
   });
   const optimizeRouteMutation = trpc.routes.optimize.useMutation({
-    onSuccess: async (result) => {
+    onSuccess: async result => {
       setDeliveryState(DEFAULT_DELIVERY_STATE);
       await Promise.all([
         utils.routes.get.invalidate({ id: routeId }),
@@ -740,9 +744,13 @@ export default function RouteDetail() {
     activeProximityAlert?.stopIndex !== undefined
       ? stops[activeProximityAlert.stopIndex]
       : undefined;
-  const nextStop = stops.find(
+  const nextStopIndex = stops.findIndex(
     (_, index) => !deliveredSet.has(index) && !failedSet.has(index)
   );
+  const nextStop = nextStopIndex >= 0 ? stops[nextStopIndex] : undefined;
+  const nextStopIdentity = nextStop
+    ? getStopIdentityDetails(nextStop, nextStopIndex)
+    : null;
   const progressValue =
     stops.length > 0 ? (handledCount / stops.length) * 100 : 0;
   const handledStopIds = useMemo(
@@ -1014,9 +1022,17 @@ export default function RouteDetail() {
     const query = normalizeText(stopSearch);
     return stops
       .map((stop, index) => ({ stop, index }))
-      .filter(({ stop }) => {
+      .filter(({ stop, index }) => {
         if (!query) return true;
-        return normalizeText(stop.address).includes(query);
+        const identity = getStopIdentityDetails(stop, index);
+        return [
+          stop.address,
+          identity.routeStopLabel,
+          identity.shopeeStopLabel,
+          identity.packageLabel,
+        ]
+          .filter(Boolean)
+          .some(value => normalizeText(String(value)).includes(query));
       });
   }, [stopSearch, stops]);
   const blockingAuditIssues = useMemo(
@@ -1042,7 +1058,8 @@ export default function RouteDetail() {
     | string
     | undefined;
   const routeIsShopeeStopSequence = isShopeeStopSequenceRoute(routeQuery.data);
-  const routeNeedsStrongAttention = routeOperationalStatus === "attention_strong";
+  const routeNeedsStrongAttention =
+    routeOperationalStatus === "attention_strong";
 
   const completeRoute = async () => {
     await updateRouteMutation.mutateAsync({
@@ -2028,7 +2045,9 @@ export default function RouteDetail() {
       }
 
       reportRouteExecutionEvent({
-        type: isStart ? "route_start_location_checkin" : "route_end_location_checkin",
+        type: isStart
+          ? "route_start_location_checkin"
+          : "route_end_location_checkin",
         severity: "info",
         title: isStart
           ? "Check-in de início da rota"
@@ -2180,14 +2199,10 @@ export default function RouteDetail() {
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription>
               <div className="space-y-1">
-                <p className="font-semibold">
-                  Rota com atenção forte na sequência.
-                </p>
+                <p className="font-semibold">Sequência precisa de atenção.</p>
                 <p className="text-sm">
-                  A rota pode ser iniciada, mas ainda existe sinal de saída
-                  prematura de região ou parada próxima deixada para depois.
-                  Se possível, use Reotimizar restantes ou Não gostei da
-                  sequência antes de sair.
+                  Se der tempo, toque em Reotimizar. Se precisar sair agora,
+                  siga a próxima parada destacada.
                 </p>
               </div>
             </AlertDescription>
@@ -2199,9 +2214,8 @@ export default function RouteDetail() {
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription>
               <p className="text-sm">
-                Sequência STOP Shopee preservada. O app não troca a ordem por
-                proximidade; apenas encaixa paradas sem STOP conforme a regra da
-                tabela.
+                Siga os STOP da tabela. Paradas sem STOP aparecem encaixadas no
+                ponto mais próximo.
               </p>
             </AlertDescription>
           </Alert>
@@ -2381,7 +2395,9 @@ export default function RouteDetail() {
                           variant="outline"
                           size="sm"
                           className="gap-2"
-                          onClick={() => void handleRouteLocationCheckin("start")}
+                          onClick={() =>
+                            void handleRouteLocationCheckin("start")
+                          }
                           disabled={
                             isCheckingInStart ||
                             isSavingEndpoints ||
@@ -2481,11 +2497,11 @@ export default function RouteDetail() {
                             <BellRing className="mt-1 h-5 w-5 shrink-0 text-primary" />
                             <div className="min-w-0">
                               <p className="font-semibold">
-                                Alerta de entrega próxima
+                                Avisar parada próxima
                               </p>
                               <p className="text-sm text-muted-foreground">
-                                Avisa se você passar perto de outra parada
-                                pendente, sem alterar a sequência da rota.
+                                Se você passar perto de outra entrega, o app
+                                avisa.
                               </p>
                             </div>
                           </div>
@@ -2545,7 +2561,7 @@ export default function RouteDetail() {
                             {proximityVibrationEnabled ? "ligada" : "desligada"}
                           </Button>
                           <span className="inline-flex items-center text-xs text-muted-foreground">
-                            Raio: {PROXIMITY_ALERT_RADIUS_METERS} m
+                            Até {PROXIMITY_ALERT_RADIUS_METERS} m
                           </span>
                         </div>
                       </div>
@@ -2556,7 +2572,7 @@ export default function RouteDetail() {
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                           <div className="min-w-0 space-y-1">
                             <p className="text-sm font-semibold uppercase">
-                              Entrega próxima detectada
+                              Você está perto desta entrega
                             </p>
                             <p className="text-lg font-bold leading-snug">
                               Parada{" "}
@@ -2595,7 +2611,7 @@ export default function RouteDetail() {
                               setStopSearch("");
                             }}
                           >
-                            Ver parada
+                            Ver detalhes
                           </Button>
                           <Button
                             type="button"
@@ -2604,7 +2620,7 @@ export default function RouteDetail() {
                             onClick={() => openStopInMap(activeProximityStop)}
                           >
                             <Navigation className="mr-2 h-4 w-4" />
-                            Abrir no mapa
+                            Ir no mapa
                           </Button>
                           <Button
                             type="button"
@@ -2636,7 +2652,7 @@ export default function RouteDetail() {
                         <div
                           className={[
                             "flex items-center gap-3",
-                            failedCount > 0 ? "text-amber-200" : "text-accent",
+                            failedCount > 0 ? "text-amber-950" : "text-accent",
                           ].join(" ")}
                         >
                           {failedCount > 0 ? (
@@ -2654,7 +2670,7 @@ export default function RouteDetail() {
                               className={[
                                 "text-sm",
                                 failedCount > 0
-                                  ? "text-amber-100"
+                                  ? "text-amber-900"
                                   : "text-accent/90",
                               ].join(" ")}
                             >
@@ -2678,170 +2694,196 @@ export default function RouteDetail() {
                         )}
                       </div>
                     ) : deliveryState.started && currentStop ? (
-                      <div className="rounded-2xl border border-border/70 bg-white p-5">
-                        <div className="mb-4 space-y-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <p className="text-xs font-semibold uppercase text-muted-foreground">
-                              Destino atual
+                      <div className="rounded-2xl border border-primary/20 bg-white p-4 shadow-sm sm:p-5">
+                        <div className="mb-4 space-y-2">
+                          <p className="text-xs font-semibold uppercase text-muted-foreground">
+                            Próxima ação
+                          </p>
+                          <p className="text-2xl font-bold tracking-tight">
+                            Vá para esta entrega
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            Confira STOP, pacote e endereço antes de marcar o
+                            resultado.
+                          </p>
+                        </div>
+
+                        <div className="mb-4 grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-2xl border border-primary/20 bg-primary p-4 text-primary-foreground shadow-sm">
+                            <p className="text-xs font-semibold uppercase opacity-80">
+                              Parada
                             </p>
-                            <span className="text-sm text-muted-foreground">
-                              Atual
-                            </span>
+                            <p className="mt-1 text-4xl font-black leading-none">
+                              {currentStopIdentity?.routeStopLabel}
+                            </p>
+                            <p className="mt-1 text-xs opacity-85">
+                              de {stops.length}
+                            </p>
                           </div>
-                          <div className="grid gap-3 sm:grid-cols-3">
-                            <div className="rounded-2xl border border-primary/20 bg-primary p-4 text-primary-foreground shadow-sm">
-                              <p className="text-xs font-semibold uppercase opacity-80">
-                                Parada
+                          {currentStopIdentity?.shopeeStopLabel ? (
+                            <div className="rounded-2xl border border-orange-300 bg-orange-500 p-4 text-white shadow-sm">
+                              <p className="text-xs font-semibold uppercase opacity-90">
+                                STOP
                               </p>
                               <p className="mt-1 text-4xl font-black leading-none">
-                                {currentStopIdentity?.routeStopLabel}
-                              </p>
-                              <p className="mt-1 text-xs opacity-85">
-                                de {stops.length}
-                              </p>
-                            </div>
-                            {currentStopIdentity?.shopeeStopLabel ? (
-                              <div className="rounded-2xl border border-orange-300 bg-orange-500 p-4 text-white shadow-sm">
-                                <p className="text-xs font-semibold uppercase opacity-90">
-                                  STOP Shopee
-                                </p>
-                                <p className="mt-1 text-3xl font-black leading-none">
-                                  {currentStopIdentity.shopeeStopLabel.replace(
-                                    "STOP ",
-                                    ""
-                                  )}
-                                </p>
-                                <p className="mt-1 text-xs opacity-90">
-                                  {currentStopIdentity.shopeeStopLabel ===
-                                  "Sem STOP"
-                                    ? "Encaixado por proximidade"
-                                    : "Sequência da tabela"}
-                                </p>
-                              </div>
-                            ) : (
-                              <div className="rounded-2xl border border-border bg-secondary/70 p-4 text-foreground">
-                                <p className="text-xs font-semibold uppercase text-muted-foreground">
-                                  STOP
-                                </p>
-                                <p className="mt-1 text-2xl font-black leading-none">
-                                  Não usado
-                                </p>
-                                <p className="mt-1 text-xs text-muted-foreground">
-                                  Rota sem STOP Shopee
-                                </p>
-                              </div>
-                            )}
-                            <div className="rounded-2xl border border-primary/10 bg-primary/10 p-4 text-primary">
-                              <p className="text-xs font-semibold uppercase">
-                                Pacote
-                              </p>
-                              <p className="mt-1 break-words text-2xl font-black leading-tight">
-                                {currentStopIdentity?.packageLabel?.replace(
-                                  "Pacote: ",
+                                {currentStopIdentity.shopeeStopLabel.replace(
+                                  "STOP ",
                                   ""
-                                ) || "Sem pacote"}
+                                )}
+                              </p>
+                              <p className="mt-1 text-xs opacity-90">
+                                {currentStopIdentity.shopeeStopLabel ===
+                                "Sem STOP"
+                                  ? "Sem STOP na tabela"
+                                  : "Sequência da tabela"}
                               </p>
                             </div>
+                          ) : (
+                            <div className="rounded-2xl border border-border bg-secondary/70 p-4 text-foreground">
+                              <p className="text-xs font-semibold uppercase text-muted-foreground">
+                                STOP
+                              </p>
+                              <p className="mt-1 text-2xl font-black leading-none">
+                                Não usado
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                Rota otimizada
+                              </p>
+                            </div>
+                          )}
+                          <div className="rounded-2xl border border-primary/10 bg-primary/10 p-4 text-primary">
+                            <p className="text-xs font-semibold uppercase">
+                              Pacote
+                            </p>
+                            <p className="mt-1 break-words text-2xl font-black leading-tight">
+                              {currentStopIdentity?.packageLabel?.replace(
+                                "Pacote: ",
+                                ""
+                              ) || "Sem pacote"}
+                            </p>
                           </div>
                         </div>
-                        <div className="space-y-3">
-                          <div className="flex gap-3">
-                            <MapPin className="mt-1 h-5 w-5 shrink-0 text-primary" />
-                            <div>
-                              <p className="text-lg font-semibold">
-                                {currentStop.address}
-                              </p>
-                              <div className="flex flex-wrap gap-2">
-                                {currentStopIdentity?.shopeeStopLabel && (
-                                  <p className="inline-flex max-w-full items-center rounded-lg bg-amber-100 px-2.5 py-1 text-base font-bold text-amber-800">
-                                    <span className="truncate">
-                                      {currentStopIdentity.shopeeStopLabel}
-                                    </span>
-                                  </p>
-                                )}
-                                {currentStopIdentity?.packageLabel && (
-                                  <p className="inline-flex max-w-full items-center rounded-lg bg-primary/10 px-2.5 py-1 text-base font-bold text-primary">
-                                    <span className="truncate">
-                                      {currentStopIdentity.packageLabel}
-                                    </span>
-                                  </p>
-                                )}
+
+                        <div className="space-y-4">
+                          <div className="rounded-xl border border-border/70 bg-secondary/40 p-4">
+                            <div className="flex gap-3">
+                              <MapPin className="mt-1 h-5 w-5 shrink-0 text-primary" />
+                              <div className="min-w-0">
+                                <p className="text-lg font-semibold leading-snug">
+                                  {currentStop.address}
+                                </p>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                  Toque em Ir no mapa para navegar até a parada.
+                                </p>
                               </div>
-                              <p className="text-sm text-muted-foreground">
-                                {currentStop.latitude.toFixed(6)},{" "}
-                                {currentStop.longitude.toFixed(6)}
-                              </p>
                             </div>
                           </div>
-                          <div className="flex flex-col gap-2 sm:flex-row">
+
+                          <div className="grid gap-2 sm:grid-cols-2">
                             <Button
                               type="button"
-                              className="gap-2"
+                              className="h-12 justify-center gap-2 text-base"
+                              onClick={() => {
+                                setShowRouteMap(false);
+                                openStopInMap(currentStop);
+                              }}
+                            >
+                              <Navigation className="h-5 w-5" />
+                              Ir no mapa
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="h-12 justify-center gap-2 border-emerald-600 text-base text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
                               onClick={handleDelivered}
                               disabled={updateRouteMutation.isPending}
                             >
-                              <CheckCircle2 className="h-4 w-4" />
+                              <CheckCircle2 className="h-5 w-5" />
                               Entregue
                             </Button>
                             <Button
                               type="button"
                               variant="destructive"
-                              className="gap-2"
+                              className="h-12 justify-center gap-2 text-base"
                               onClick={handleNotDelivered}
                               disabled={updateRouteMutation.isPending}
                             >
-                              <XCircle className="h-4 w-4" />
-                              Não Entregue
+                              <XCircle className="h-5 w-5" />
+                              Não entregue
                             </Button>
                             <Button
                               type="button"
                               variant="outline"
-                              className="gap-2"
+                              className="h-12 justify-center gap-2 text-base"
                               onClick={() => void handleUndoLastAction()}
                               disabled={
                                 updateRouteMutation.isPending ||
                                 !deliveryState.lastAction
                               }
                             >
-                              <RotateCcw className="h-4 w-4" />
-                              Reverter
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              className="w-full gap-2"
-                              onClick={() => {
-                                setShowRouteMap(false);
-                                openStopInMap(currentStop);
-                              }}
-                            >
-                              <Navigation className="h-4 w-4" />
-                              Abrir no mapa
+                              <RotateCcw className="h-5 w-5" />
+                              Desfazer
                             </Button>
                           </div>
                         </div>
                       </div>
                     ) : (
                       <div className="rounded-2xl border border-border/70 bg-secondary/55 p-5">
-                        <div className="flex items-center gap-3">
-                          <Clock className="h-5 w-5 text-muted-foreground" />
-                          <div>
-                            <p className="font-medium">
-                              Rota pronta para iniciar.
-                            </p>
-                            <p className="text-sm text-muted-foreground">
-                              Clique em Iniciar rota para abrir a primeira
-                              parada.
-                            </p>
+                        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex min-w-0 gap-3">
+                            <Clock className="mt-1 h-5 w-5 shrink-0 text-muted-foreground" />
+                            <div className="min-w-0">
+                              <p className="font-medium">Pronto para sair</p>
+                              {nextStop ? (
+                                <div className="mt-2 space-y-2">
+                                  <p className="text-sm text-muted-foreground">
+                                    Primeira parada
+                                  </p>
+                                  <p className="text-lg font-semibold leading-snug">
+                                    {nextStop.address}
+                                  </p>
+                                  <div className="flex flex-wrap gap-2">
+                                    <Badge variant="secondary">
+                                      Parada{" "}
+                                      {nextStopIdentity?.routeStopLabel ??
+                                        nextStopIndex + 1}
+                                    </Badge>
+                                    {nextStopIdentity?.shopeeStopLabel ? (
+                                      <Badge className="bg-orange-500 text-white hover:bg-orange-500">
+                                        {nextStopIdentity.shopeeStopLabel}
+                                      </Badge>
+                                    ) : null}
+                                    {nextStopIdentity?.packageLabel ? (
+                                      <Badge variant="outline">
+                                        {nextStopIdentity.packageLabel}
+                                      </Badge>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="text-sm text-muted-foreground">
+                                  Todas as paradas já foram tratadas.
+                                </p>
+                              )}
+                            </div>
                           </div>
+                          <Button
+                            type="button"
+                            className="h-12 shrink-0 gap-2 text-base"
+                            onClick={handleStartRoute}
+                            disabled={
+                              stops.length === 0 ||
+                              isComplete ||
+                              isLocatingForReoptimization ||
+                              auditQuery.isLoading ||
+                              hasStructuralAuditIssues
+                            }
+                          >
+                            <Play className="h-5 w-5" />
+                            Iniciar rota
+                          </Button>
                         </div>
                       </div>
-                    )}
-
-                    {!isComplete && nextStop && !deliveryState.started && (
-                      <p className="text-sm text-muted-foreground">
-                        Primeira parada: {nextStop.address}
-                      </p>
                     )}
                   </CardContent>
                 </Card>
@@ -2856,8 +2898,8 @@ export default function RouteDetail() {
                     <Input
                       value={stopSearch}
                       onChange={event => setStopSearch(event.target.value)}
-                      placeholder="Filtrar por endereço da parada"
-                      aria-label="Filtrar paradas por endereço"
+                      placeholder="Buscar endereço, STOP, pacote ou parada"
+                      aria-label="Buscar paradas por endereço, STOP, pacote ou número"
                     />
                     {stopSearch.trim() && (
                       <p className="text-xs text-muted-foreground">
