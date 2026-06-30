@@ -15,7 +15,10 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getLoginUrl } from "@/const";
 import { saveAuthSessionToken } from "@/lib/authSession";
-import { readDeliveryProgress, readLastRouteProgress } from "@/lib/routeProgress";
+import {
+  readDeliveryProgress,
+  readLastRouteProgress,
+} from "@/lib/routeProgress";
 import { trpc } from "@/lib/trpc";
 import {
   ArrowRight,
@@ -23,11 +26,11 @@ import {
   Calendar,
   CheckCircle2,
   ClipboardList,
-  Clock,
   Download,
   FileCheck2,
-  Fuel,
+  Headphones,
   History,
+  Info,
   MapPin,
   MessageCircle,
   MessageSquare,
@@ -36,7 +39,9 @@ import {
   Play,
   Route,
   ShieldCheck,
+  Smartphone,
   TrendingUp,
+  Users,
   WandSparkles,
   Zap,
 } from "lucide-react";
@@ -51,12 +56,14 @@ const GOOGLE_LOGIN_CONFIGURED =
   ((Boolean(import.meta.env.VITE_OAUTH_PORTAL_URL?.trim()) &&
     Boolean(import.meta.env.VITE_APP_ID?.trim())) ||
     Boolean(import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim()));
+const SUPPORT_WHATSAPP_URL =
+  "https://wa.me/5518996531491?text=Ola%2C%20preciso%20de%20suporte%20no%20EconoRota.";
 
 const trustItems = [
-  { icon: ShieldCheck, label: "LGPD" },
-  { icon: MessageCircle, label: "WhatsApp" },
-  { icon: FileCheck2, label: "Política" },
-  { icon: CheckCircle2, label: "Termos" },
+  { icon: ShieldCheck, label: "Dados protegidos" },
+  { icon: MessageCircle, label: "WhatsApp ativo" },
+  { icon: FileCheck2, label: "Política clara" },
+  { icon: CheckCircle2, label: "Termos públicos" },
 ];
 
 const steps = [
@@ -77,9 +84,48 @@ const steps = [
   },
 ];
 
-type AuthSuccessPayload = {
-  sessionToken?: string | null;
-} | null | undefined;
+const proofItems = [
+  {
+    icon: Route,
+    value: "Rotas",
+    label: "otimizadas e acompanhadas no painel operacional.",
+  },
+  {
+    icon: Package,
+    value: "STOP",
+    label: "pacote e parada destacados para reduzir erro na rua.",
+  },
+  {
+    icon: MapPin,
+    value: "GPS",
+    label: "usado para sinalizar entregas marcadas longe do ponto.",
+  },
+];
+
+const aboutItems = [
+  {
+    icon: Users,
+    title: "Feito para entrega real",
+    text: "O EconoRota nasceu para motoristas e operações de marketplace que precisam sair rápido, conferir pacote e manter a sequência compreensível.",
+  },
+  {
+    icon: BarChart3,
+    title: "Painel que cobra a verdade",
+    text: "A operação registra rotas iniciadas, concluídas, abandonadas, uso de rota alternativa e alertas fortes para o admin saber se melhorou ou piorou.",
+  },
+  {
+    icon: Headphones,
+    title: "Suporte antes do cadastro",
+    text: "Dúvidas sobre tabela, PWA, Android ou STOP podem ir direto para o WhatsApp de suporte, sem depender de tentativa e erro.",
+  },
+];
+
+type AuthSuccessPayload =
+  | {
+      sessionToken?: string | null;
+    }
+  | null
+  | undefined;
 
 function normalizeAuthError(errorMessage: string) {
   const message = errorMessage.toLowerCase();
@@ -131,7 +177,7 @@ export default function Home() {
   const [email, setEmail] = useState(() =>
     typeof window === "undefined"
       ? ""
-      : window.localStorage.getItem(REMEMBERED_EMAIL_KEY) ?? ""
+      : (window.localStorage.getItem(REMEMBERED_EMAIL_KEY) ?? "")
   );
   const [password, setPassword] = useState("");
   const [rememberDevice, setRememberDevice] = useState(true);
@@ -148,7 +194,9 @@ export default function Home() {
   const routeSummary = useMemo(() => {
     const routes = routesQuery.data ?? [];
     const totalRoutes = routes.length;
-    const completedRoutes = routes.filter((route: any) => route.status === "completed").length;
+    const completedRoutes = routes.filter(
+      (route: any) => route.status === "completed"
+    ).length;
     const totalDistance = routes.reduce(
       (acc: number, route: any) => acc + Number(route.totalDistance || 0),
       0
@@ -169,7 +217,11 @@ export default function Home() {
     const route = (routesQuery.data ?? []).find(
       (item: any) => item.id === lastRouteProgress.routeId
     );
-    if (!route || route.status === "completed" || route.status === "cancelled") {
+    if (
+      !route ||
+      route.status === "completed" ||
+      route.status === "cancelled"
+    ) {
       return null;
     }
 
@@ -191,7 +243,8 @@ export default function Home() {
   useEffect(() => {
     if (!isAuthenticated) return;
 
-    const refreshLastRoute = () => setLastRouteProgress(readLastRouteProgress());
+    const refreshLastRoute = () =>
+      setLastRouteProgress(readLastRouteProgress());
     refreshLastRoute();
     window.addEventListener("focus", refreshLastRoute);
     document.addEventListener("visibilitychange", refreshLastRoute);
@@ -207,7 +260,10 @@ export default function Home() {
     setPassword("");
     saveAuthSessionToken(data?.sessionToken);
     if (rememberDevice && typeof window !== "undefined") {
-      window.localStorage.setItem(REMEMBERED_EMAIL_KEY, email.trim().toLowerCase());
+      window.localStorage.setItem(
+        REMEMBERED_EMAIL_KEY,
+        email.trim().toLowerCase()
+      );
     } else if (typeof window !== "undefined") {
       window.localStorage.removeItem(REMEMBERED_EMAIL_KEY);
     }
@@ -215,16 +271,16 @@ export default function Home() {
   };
 
   const loginMutation = trpc.auth.login.useMutation({
-    onSuccess: (data) => afterAuthSuccess(data),
-    onError: (error) => setAuthError(normalizeAuthError(error.message)),
+    onSuccess: data => afterAuthSuccess(data),
+    onError: error => setAuthError(normalizeAuthError(error.message)),
   });
   const registerMutation = trpc.auth.register.useMutation({
-    onSuccess: (data) => afterAuthSuccess(data),
-    onError: (error) => setAuthError(normalizeAuthError(error.message)),
+    onSuccess: data => afterAuthSuccess(data),
+    onError: error => setAuthError(normalizeAuthError(error.message)),
   });
   const resetPasswordMutation = trpc.auth.requestPasswordReset.useMutation({
-    onSuccess: (data) => setResetMessage(data.message),
-    onError: (error) => setAuthError(normalizeAuthError(error.message)),
+    onSuccess: data => setResetMessage(data.message),
+    onError: error => setAuthError(normalizeAuthError(error.message)),
   });
   const authPending =
     loginMutation.isPending ||
@@ -271,28 +327,40 @@ export default function Home() {
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-[#fff7ed] px-4 py-5 text-slate-950 sm:px-6 lg:px-8">
+      <div className="min-h-screen bg-[#f8fafc] px-4 py-5 text-slate-950 sm:px-6 lg:px-8">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
-          <header className="flex flex-col gap-4 rounded-[28px] border border-orange-100 bg-white/92 p-4 shadow-[0_16px_42px_rgb(15_23_42_/_8%)] backdrop-blur dark:border-slate-800 dark:bg-card sm:flex-row sm:items-center sm:justify-between">
+          <header className="flex flex-col gap-4 rounded-[28px] border border-slate-200 bg-white/92 p-4 shadow-[0_16px_42px_rgb(15_23_42_/_8%)] backdrop-blur dark:border-slate-800 dark:bg-card lg:flex-row lg:items-center lg:justify-between">
             <BrandLogo variant="full" className="h-16 w-56 justify-start" />
-            <div className="flex flex-wrap gap-2 text-sm font-normal text-slate-600 dark:text-slate-300">
-              {trustItems.map((item) => (
-                <span
-                  key={item.label}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-orange-100 bg-orange-50 px-3 py-2 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
-                >
-                  <item.icon className="h-3.5 w-3.5 text-[#ff6d00]" />
-                  {item.label}
-                </span>
-              ))}
+            <div className="flex flex-col gap-3 lg:items-end">
+              <div className="flex flex-wrap gap-2 text-sm font-normal text-slate-600 dark:text-slate-300">
+                {trustItems.map(item => (
+                  <span
+                    key={item.label}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+                  >
+                    <item.icon className="h-3.5 w-3.5 text-emerald-600" />
+                    {item.label}
+                  </span>
+                ))}
+              </div>
+              <Button
+                asChild
+                variant="outline"
+                className="h-10 justify-center gap-2 border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-50"
+              >
+                <a href={SUPPORT_WHATSAPP_URL} target="_blank" rel="noreferrer">
+                  <MessageCircle className="h-4 w-4" />
+                  Falar com suporte
+                </a>
+              </Button>
             </div>
           </header>
 
           <main className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr] lg:items-start">
-            <section className="overflow-hidden rounded-[32px] border border-orange-100 bg-white shadow-[0_24px_60px_rgb(15_23_42_/_10%)] dark:border-slate-800 dark:bg-card">
+            <section className="overflow-hidden rounded-[32px] border border-slate-200 bg-white shadow-[0_24px_60px_rgb(15_23_42_/_10%)] dark:border-slate-800 dark:bg-card">
               <div className="space-y-6 p-5 sm:p-7">
                 <div className="space-y-4">
-                  <div className="inline-flex items-center gap-2 rounded-full border border-orange-200 bg-orange-50 px-3 py-2 text-sm font-semibold text-[#9a3412] dark:border-orange-900 dark:bg-orange-950/40 dark:text-orange-200">
+                  <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200">
                     <ShieldCheck className="h-4 w-4" />
                     Instalação recomendada: PWA
                   </div>
@@ -305,10 +373,37 @@ export default function Home() {
                       otimizar por setores. O número do pacote fica visível na
                       parada para reduzir erro na rua.
                     </p>
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <Button
+                        asChild
+                        className="h-12 justify-center gap-2 bg-[#ff6d00] text-base font-bold text-white hover:bg-[#f97316]"
+                      >
+                        <a href="#cadastro">Começar agora</a>
+                      </Button>
+                      <Button
+                        asChild
+                        variant="outline"
+                        className="h-12 justify-center gap-2 border-emerald-200 text-base font-semibold text-emerald-700 hover:bg-emerald-50"
+                      >
+                        <a href="#quem-somos">
+                          <Info className="h-4 w-4" />
+                          Quem está por trás
+                        </a>
+                      </Button>
+                    </div>
                   </div>
                 </div>
 
-                <div className="rounded-[28px] border border-orange-100 bg-[#fff7ed] p-4 dark:border-slate-800 dark:bg-slate-950">
+                <figure className="overflow-hidden rounded-[28px] border border-slate-200 bg-slate-950 shadow-[0_16px_34px_rgb(15_23_42_/_16%)]">
+                  <img
+                    src="/og-image.png"
+                    alt="EconoRota com roteirização inteligente e dados reais"
+                    className="h-auto w-full"
+                    loading="eager"
+                  />
+                </figure>
+
+                <div className="rounded-[28px] border border-emerald-100 bg-emerald-50 p-4 dark:border-slate-800 dark:bg-slate-950">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
                     <PwaInstallButton
                       className="h-14 min-w-64 gap-2 rounded-2xl bg-[#ff6d00] px-6 text-base font-extrabold text-white shadow-[0_14px_30px_rgb(255_109_0_/_28%)] hover:bg-[#f97316] hover:brightness-100"
@@ -343,7 +438,7 @@ export default function Home() {
                         asChild
                         variant="outline"
                         size="sm"
-                        className="rounded-xl border-orange-200 bg-white text-[#9a3412] hover:bg-orange-50"
+                        className="rounded-xl border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-50"
                       >
                         <Link href="/baixar-aplicativo">Ver APK</Link>
                       </Button>
@@ -351,35 +446,37 @@ export default function Home() {
                   )}
                 </div>
 
-                <div className="rounded-[28px] bg-slate-950 p-5 text-white shadow-[0_16px_36px_rgb(15_23_42_/_18%)]">
-                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
+                <div className="rounded-[28px] border border-slate-800 bg-slate-950 p-5 text-white shadow-[0_16px_36px_rgb(15_23_42_/_18%)]">
+                  <div className="flex flex-col gap-4">
+                    <div className="max-w-2xl">
                       <p className="text-sm font-semibold uppercase tracking-[0.14em] text-orange-200">
                         Prova operacional
                       </p>
-                      <p className="mt-2 text-[32px] font-extrabold leading-tight tracking-normal">
-                        28 km e 1h20 a menos por turno
+                      <p className="mt-2 text-[28px] font-extrabold leading-tight tracking-normal">
+                        O painel mostra execução real, não só a rota planejada.
+                      </p>
+                      <p className="mt-3 text-sm font-normal leading-6 text-slate-300">
+                        O admin acompanha rotas iniciadas, concluídas,
+                        abandonadas, uso de rota alternativa e entregas marcadas
+                        longe do GPS para entender se a operação melhorou ou
+                        piorou.
                       </p>
                     </div>
-                    <div className="grid grid-cols-3 gap-2 text-center">
-                      <div className="rounded-2xl bg-white/10 p-3">
-                        <Fuel className="mx-auto mb-2 h-5 w-5 text-orange-200" />
-                        <p className="text-xl font-semibold">28 km</p>
-                      </div>
-                      <div className="rounded-2xl bg-white/10 p-3">
-                        <Clock className="mx-auto mb-2 h-5 w-5 text-orange-200" />
-                        <p className="text-xl font-semibold">1h20</p>
-                      </div>
-                      <div className="rounded-2xl bg-white/10 p-3">
-                        <Package className="mx-auto mb-2 h-5 w-5 text-orange-200" />
-                        <p className="text-xl font-semibold">150</p>
-                      </div>
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      {proofItems.map(item => (
+                        <div
+                          key={item.value}
+                          className="rounded-2xl bg-white/10 p-3"
+                        >
+                          <item.icon className="mb-3 h-5 w-5 text-orange-200" />
+                          <p className="text-xl font-semibold">{item.value}</p>
+                          <p className="mt-1 text-sm leading-5 text-slate-300">
+                            {item.label}
+                          </p>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                  <p className="mt-3 text-sm font-normal leading-6 text-slate-300">
-                    Estimativa de referência. O ganho real varia conforme cidade,
-                    tabela, trânsito e modo de sequência escolhido.
-                  </p>
                 </div>
 
                 <div className="grid gap-3 sm:grid-cols-3">
@@ -409,7 +506,10 @@ export default function Home() {
               </div>
             </section>
 
-            <Card className="rounded-[32px] border-orange-100 bg-white shadow-[0_24px_60px_rgb(15_23_42_/_10%)] dark:border-slate-800 dark:bg-card">
+            <Card
+              id="cadastro"
+              className="rounded-[32px] border-orange-100 bg-white shadow-[0_24px_60px_rgb(15_23_42_/_10%)] dark:border-slate-800 dark:bg-card"
+            >
               <CardHeader>
                 <CardTitle className="text-xl font-bold">
                   {authMode === "login" ? "Entrar" : "Criar conta"}
@@ -435,7 +535,8 @@ export default function Home() {
                   </Button>
                 ) : (
                   <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                    Login Google aguardando configuracao OAuth no Vercel.
+                    Login com Google em ativação. Use e-mail e senha por
+                    enquanto.
                   </div>
                 )}
                 <form className="space-y-4" onSubmit={handleAuthSubmit}>
@@ -448,7 +549,7 @@ export default function Home() {
                           name="name"
                           autoComplete="name"
                           value={name}
-                          onChange={(event) => setName(event.target.value)}
+                          onChange={event => setName(event.target.value)}
                           disabled={authPending}
                           required
                         />
@@ -460,7 +561,7 @@ export default function Home() {
                           name="phone"
                           autoComplete="tel"
                           value={phone}
-                          onChange={(event) => setPhone(event.target.value)}
+                          onChange={event => setPhone(event.target.value)}
                           disabled={authPending}
                           required
                         />
@@ -472,7 +573,7 @@ export default function Home() {
                           name="vehicleType"
                           placeholder="Moto, carro, van..."
                           value={vehicleType}
-                          onChange={(event) => setVehicleType(event.target.value)}
+                          onChange={event => setVehicleType(event.target.value)}
                           disabled={authPending}
                           required
                         />
@@ -484,7 +585,7 @@ export default function Home() {
                           name="city"
                           autoComplete="address-level2"
                           value={city}
-                          onChange={(event) => setCity(event.target.value)}
+                          onChange={event => setCity(event.target.value)}
                           disabled={authPending}
                           required
                         />
@@ -496,7 +597,7 @@ export default function Home() {
                           name="stateUf"
                           autoComplete="address-level1"
                           value={stateUf}
-                          onChange={(event) => setStateUf(event.target.value)}
+                          onChange={event => setStateUf(event.target.value)}
                           disabled={authPending}
                           required
                         />
@@ -507,7 +608,7 @@ export default function Home() {
                           id="companyName"
                           name="companyName"
                           value={companyName}
-                          onChange={(event) => setCompanyName(event.target.value)}
+                          onChange={event => setCompanyName(event.target.value)}
                           disabled={authPending}
                           placeholder="Opcional"
                         />
@@ -523,7 +624,7 @@ export default function Home() {
                       type="email"
                       autoComplete="email"
                       value={email}
-                      onChange={(event) => setEmail(event.target.value)}
+                      onChange={event => setEmail(event.target.value)}
                       disabled={authPending}
                       required
                     />
@@ -535,9 +636,13 @@ export default function Home() {
                       id="password"
                       name="password"
                       type="password"
-                      autoComplete={authMode === "login" ? "current-password" : "new-password"}
+                      autoComplete={
+                        authMode === "login"
+                          ? "current-password"
+                          : "new-password"
+                      }
                       value={password}
-                      onChange={(event) => setPassword(event.target.value)}
+                      onChange={event => setPassword(event.target.value)}
                       disabled={authPending}
                       minLength={8}
                       required
@@ -549,7 +654,9 @@ export default function Home() {
                       <input
                         type="checkbox"
                         checked={rememberDevice}
-                        onChange={(event) => setRememberDevice(event.target.checked)}
+                        onChange={event =>
+                          setRememberDevice(event.target.checked)
+                        }
                         className="mt-1 h-4 w-4 accent-[#ff6d00]"
                       />
                       <span>
@@ -580,7 +687,7 @@ export default function Home() {
                       <input
                         type="checkbox"
                         checked={acceptTerms}
-                        onChange={(event) => setAcceptTerms(event.target.checked)}
+                        onChange={event => setAcceptTerms(event.target.checked)}
                         className="mt-1 h-4 w-4 accent-[#ff6d00]"
                         required
                       />
@@ -591,7 +698,9 @@ export default function Home() {
                     </label>
                   )}
 
-                  {authError && <p className="text-sm text-red-600">{authError}</p>}
+                  {authError && (
+                    <p className="text-sm text-red-600">{authError}</p>
+                  )}
                   {resetMessage && (
                     <p className="text-sm text-[#9a3412]">{resetMessage}</p>
                   )}
@@ -605,8 +714,8 @@ export default function Home() {
                     {authPending
                       ? "Carregando..."
                       : authMode === "login"
-                      ? "Entrar"
-                      : "Criar conta"}
+                        ? "Entrar"
+                        : "Criar conta"}
                   </Button>
 
                   <Button
@@ -619,30 +728,133 @@ export default function Home() {
                       setAuthMode(authMode === "login" ? "register" : "login");
                     }}
                   >
-                    {authMode === "login" ? "Criar uma nova conta" : "Ja tenho conta"}
+                    {authMode === "login"
+                      ? "Criar uma nova conta"
+                      : "Já tenho conta"}
                   </Button>
 
                   <nav
                     aria-label="Links publicos do EconoRota"
                     className="grid gap-2 rounded-2xl border border-orange-100 bg-orange-50/80 p-3 text-sm sm:grid-cols-2 dark:border-slate-800 dark:bg-slate-900"
                   >
-                    <Link className="font-medium text-[#9a3412] dark:text-orange-200" href="/spx-shopee">
+                    <Link
+                      className="font-medium text-[#9a3412] dark:text-orange-200"
+                      href="/spx-shopee"
+                    >
                       SPX/Shopee completo
                     </Link>
-                    <Link className="font-medium text-[#9a3412] dark:text-orange-200" href="/baixar-aplicativo">
+                    <Link
+                      className="font-medium text-[#9a3412] dark:text-orange-200"
+                      href="/baixar-aplicativo"
+                    >
                       Instalar no celular
                     </Link>
-                    <Link className="font-medium text-[#9a3412] dark:text-orange-200" href="/privacidade">
+                    <Link
+                      className="font-medium text-[#9a3412] dark:text-orange-200"
+                      href="/privacidade"
+                    >
                       Privacidade
                     </Link>
-                    <Link className="font-medium text-[#9a3412] dark:text-orange-200" href="/suporte">
+                    <Link
+                      className="font-medium text-[#9a3412] dark:text-orange-200"
+                      href="/suporte"
+                    >
                       Suporte
                     </Link>
+                    <a
+                      className="font-medium text-emerald-700 dark:text-emerald-200"
+                      href="#quem-somos"
+                    >
+                      Quem somos
+                    </a>
+                    <a
+                      className="font-medium text-emerald-700 dark:text-emerald-200"
+                      href={SUPPORT_WHATSAPP_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      WhatsApp
+                    </a>
                   </nav>
                 </form>
               </CardContent>
             </Card>
           </main>
+
+          <section
+            id="quem-somos"
+            className="grid gap-5 rounded-[32px] border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgb(15_23_42_/_8%)] sm:p-6 lg:grid-cols-[0.85fr_1.15fr] dark:border-slate-800 dark:bg-card"
+          >
+            <div className="space-y-3">
+              <p className="text-sm font-semibold uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-300">
+                Quem somos
+              </p>
+              <h2 className="text-2xl font-extrabold tracking-normal text-slate-950 dark:text-white">
+                Um produto focado no motorista e na operação.
+              </h2>
+              <p className="text-sm leading-6 text-slate-600 dark:text-slate-300">
+                O EconoRota organiza rotas de entrega com regras reais de rua:
+                sequência STOP quando o motorista escolhe seguir a tabela,
+                otimização quando faz sentido e leitura simples no celular.
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              {aboutItems.map(item => (
+                <div
+                  key={item.title}
+                  className="rounded-[24px] border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950"
+                >
+                  <item.icon className="mb-3 h-6 w-6 text-emerald-600" />
+                  <h3 className="text-base font-bold text-slate-950 dark:text-white">
+                    {item.title}
+                  </h3>
+                  <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">
+                    {item.text}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section
+            id="suporte-whatsapp"
+            className="grid gap-4 rounded-[32px] border border-emerald-200 bg-emerald-50 p-5 sm:p-6 lg:grid-cols-[1fr_auto] lg:items-center dark:border-emerald-900 dark:bg-emerald-950/30"
+          >
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white text-emerald-700 shadow-sm dark:bg-slate-950 dark:text-emerald-300">
+                <Headphones className="h-6 w-6" />
+              </div>
+              <div>
+                <h2 className="text-2xl font-extrabold tracking-normal text-slate-950 dark:text-white">
+                  Suporte visível antes da rota.
+                </h2>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-300">
+                  Dúvidas sobre tabela, PWA, Android, STOP ou pacote podem ir
+                  direto para o canal de atendimento. Isso reduz tentativa e
+                  erro antes do motorista sair para a rua.
+                </p>
+                <div className="mt-4 grid gap-2 text-sm font-semibold text-slate-700 sm:grid-cols-2 dark:text-slate-200">
+                  <span className="inline-flex items-center gap-2 rounded-2xl bg-white px-3 py-2 dark:bg-slate-950">
+                    <Smartphone className="h-4 w-4 text-emerald-600" />
+                    PWA, Android e instalação
+                  </span>
+                  <span className="inline-flex items-center gap-2 rounded-2xl bg-white px-3 py-2 dark:bg-slate-950">
+                    <Package className="h-4 w-4 text-emerald-600" />
+                    Tabela, STOP e pacote
+                  </span>
+                </div>
+              </div>
+            </div>
+            <Button
+              asChild
+              className="h-12 justify-center gap-2 bg-emerald-700 px-5 text-white hover:bg-emerald-800"
+            >
+              <a href={SUPPORT_WHATSAPP_URL} target="_blank" rel="noreferrer">
+                <MessageCircle className="h-4 w-4" />
+                Chamar no WhatsApp
+              </a>
+            </Button>
+          </section>
         </div>
       </div>
     );
@@ -654,7 +866,7 @@ export default function Home() {
         <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
             <h1 className="text-[32px] font-extrabold tracking-normal text-slate-900 dark:text-white">
-              Ola, {user?.name || "Motorista"}
+              Olá, {user?.name || "Motorista"}
             </h1>
             <p className="mt-2 text-slate-600 dark:text-slate-300">
               Aqui esta o resumo das suas rotas e entregas de hoje.
@@ -722,13 +934,17 @@ export default function Home() {
                     <p className="text-xs uppercase tracking-wide text-emerald-100">
                       Rotas
                     </p>
-                    <p className="text-3xl font-bold">{routeSummary.totalRoutes}</p>
+                    <p className="text-3xl font-bold">
+                      {routeSummary.totalRoutes}
+                    </p>
                   </div>
                   <div>
                     <p className="text-xs uppercase tracking-wide text-emerald-100">
-                      Eficiencia
+                      Eficiência
                     </p>
-                    <p className="text-3xl font-bold">{routeSummary.efficiency}%</p>
+                    <p className="text-3xl font-bold">
+                      {routeSummary.efficiency}%
+                    </p>
                   </div>
                 </>
               )}
@@ -830,12 +1046,14 @@ export default function Home() {
               icon: Calendar,
               color: "text-emerald-600",
             },
-          ].map((item) => (
+          ].map(item => (
             <Link key={item.href} href={item.href}>
               <Card className="group cursor-pointer border-border/80 bg-white dark:bg-card">
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
-                    <CardTitle className="text-xl font-bold">{item.title}</CardTitle>
+                    <CardTitle className="text-xl font-bold">
+                      {item.title}
+                    </CardTitle>
                     <item.icon
                       className={`h-5 w-5 transition-transform duration-200 group-hover:scale-110 ${item.color}`}
                     />
