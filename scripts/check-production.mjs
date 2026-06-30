@@ -126,6 +126,9 @@ function requiresManagedDatabase() {
 
 const failures = [];
 const warnings = [];
+const vercelEnvironment = process.env.VERCEL_ENV;
+const enforceProductionReadiness =
+  !vercelEnvironment || vercelEnvironment === "production";
 
 for (const item of required) {
   const value = process.env[item.name];
@@ -147,6 +150,15 @@ if (warnings.length > 0) {
 }
 
 if (failures.length > 0) {
+  if (!enforceProductionReadiness) {
+    console.log(
+      `Check de produção em modo informativo para VERCEL_ENV=${vercelEnvironment}.`
+    );
+    console.log("Pendências exigidas antes de promover para produção:");
+    for (const failure of failures) console.log(`- ${failure}`);
+    process.exit(0);
+  }
+
   console.error("Ambiente ainda não está pronto para produção:");
   for (const failure of failures) console.error(`- ${failure}`);
   process.exit(1);
