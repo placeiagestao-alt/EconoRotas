@@ -842,6 +842,54 @@ describe("Route endpoints", () => {
     expect(Array.isArray(readiness.alerts)).toBe(true);
   });
 
+  it("clears backup failure status when newer backup evidence exists", async () => {
+    ENV.backupLastCompletedAt = "";
+    ENV.backupStatus = "";
+    ENV.restoreTestLastPassedAt = "";
+    ENV.restoreTestPassed = false;
+
+    await db.createOperationalEvent({
+      userId: null,
+      routeId: null,
+      stopId: null,
+      type: "backup_failed",
+      severity: "fatal",
+      source: "test.disasterRecovery",
+      title: "Falha antiga de backup",
+      message: "Falha anterior preservada para auditoria.",
+    });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await db.createOperationalEvent({
+      userId: null,
+      routeId: null,
+      stopId: null,
+      type: "backup_completed",
+      severity: "info",
+      source: "test.disasterRecovery",
+      title: "Backup aprovado",
+      message: "Backup mais recente aprovado.",
+    });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await db.createOperationalEvent({
+      userId: null,
+      routeId: null,
+      stopId: null,
+      type: "restore_test_passed",
+      severity: "info",
+      source: "test.disasterRecovery",
+      title: "Restore aprovado",
+      message: "Restore mais recente aprovado.",
+    });
+
+    const readiness = await db.getDisasterReadinessDashboard();
+
+    expect(readiness.backupStatus).toBe("completed");
+    expect(readiness.alerts.some(alert => alert.type === "backup_failed")).toBe(
+      false
+    );
+    expect(readiness.restoreTestPassed).toBe(true);
+  });
+
   it("persists performance benchmark history for admin dashboards", async () => {
     await db.createPerformanceBenchmark({
       scenario: "test-suite",

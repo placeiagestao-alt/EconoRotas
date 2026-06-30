@@ -20,6 +20,8 @@
     "check:production": "node scripts/check-production.mjs",
     "check:optimization-infra": "node --use-system-ca --import tsx scripts/check-optimization-infra.ts",
     "check:multi-vehicle-readiness": "node --use-system-ca --import tsx scripts/check-multi-vehicle-readiness.ts",
+    "check:disaster-recovery": "node --use-system-ca --import tsx scripts/run-disaster-recovery-drill.ts --check-config",
+    "drill:disaster-recovery": "node --use-system-ca --import tsx scripts/run-disaster-recovery-drill.ts",
     "benchmark:go-live-500": "node --use-system-ca --import tsx scripts/benchmark-osrm-enterprise.ts 500",
     "format": "prettier --write .",
     "test": "vitest run",

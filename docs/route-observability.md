@@ -150,6 +150,18 @@ Com `OSRM_REQUIRED=true`:
 
 Runbook de infraestrutura: `ops/osrm/README.md`.
 
+## Disaster Recovery
+
+O painel administrativo usa `operationalEvents` para decidir se o Disaster
+Recovery esta comprovado. Evidencia aceita:
+
+- `backup_completed`: backup logico concluido.
+- `restore_test_passed`: backup restaurado e validado em banco descartavel.
+- `backup_failed` ou `restore_test_failed`: falhas preservadas para auditoria.
+
+Falhas antigas nao prendem o status quando existe sucesso mais recente. O
+runbook operacional esta em `ops/disaster-recovery/README.md`.
+
 ## Particionamento de rotas grandes
 
 Para rotas acima de 120 paradas, o backend particiona a rota antes de pedir

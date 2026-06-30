@@ -2759,8 +2759,9 @@ async function getDisasterReadinessDashboard() {
   const envBackupAt = parseOptionalDate(ENV.backupLastCompletedAt);
   const eventBackupAt = parseOptionalDate(lastBackupEvent?.createdAt);
   const lastBackupAt = envBackupAt ?? eventBackupAt;
+  const backupFailedAt = parseOptionalDate(backupFailedEvent?.createdAt);
   const backupAgeHours = dateAgeHours(lastBackupAt);
-  const backupStatus = (ENV.backupStatus || (backupFailedEvent ? "failed" : "unknown")).trim().toLowerCase();
+  const backupStatus = (ENV.backupStatus || (backupFailedAt && (!lastBackupAt || backupFailedAt >= lastBackupAt) ? "failed" : lastBackupAt ? "completed" : "unknown")).trim().toLowerCase();
   const envRestoreAt = parseOptionalDate(ENV.restoreTestLastPassedAt);
   const eventRestoreAt = parseOptionalDate(restorePassedEvent?.createdAt);
   const restoreTestAt = envRestoreAt ?? eventRestoreAt;
@@ -2807,7 +2808,7 @@ async function getDisasterReadinessDashboard() {
       message: "A ultima evidencia de backup indica falha.",
       metadata: {
         backupStatus,
-        backupFailedAt: backupFailedEvent?.createdAt ?? null
+        backupFailedAt: backupFailedAt?.toISOString() ?? null
       }
     });
   }
