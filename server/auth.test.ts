@@ -124,6 +124,18 @@ describe("Authentication", () => {
       }
     });
 
+    it("blocks protected procedures for users pending manual review", async () => {
+      const { ctx } = createAuthContext({
+        ...createAuthContext().ctx.user!,
+        accountStatus: "pending_review",
+      } as AuthenticatedUser);
+      const caller = appRouter.createCaller(ctx);
+
+      await expect(caller.routes.list()).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+    });
+
     it("analytics.stats requires authentication", async () => {
       const { ctx } = createAuthContext(null);
       const caller = appRouter.createCaller(ctx);

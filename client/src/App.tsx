@@ -1,7 +1,9 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { AccountStatusNotice } from "@/components/AccountStatusNotice";
 import { DashboardLayoutSkeleton } from "@/components/DashboardLayoutSkeleton";
+import { isApprovedAccountStatus } from "@shared/accountAccess";
 import NotFound from "@/pages/NotFound";
 import { lazy, Suspense, useEffect, type ComponentType } from "react";
 import { Route, Switch, useLocation } from "wouter";
@@ -88,6 +90,12 @@ function ProtectedRoute({
   if (loading) return <DashboardLayoutSkeleton />;
   if (!isAuthenticated) return <DashboardLayoutSkeleton />;
   if (adminOnly && user?.role !== "admin") return <DashboardLayoutSkeleton />;
+  if (
+    user?.role !== "admin" &&
+    !isApprovedAccountStatus((user as any)?.accountStatus)
+  ) {
+    return <AccountStatusNotice />;
+  }
 
   return <Component />;
 }

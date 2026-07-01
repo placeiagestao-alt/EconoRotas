@@ -66,6 +66,7 @@ import {
   isOptimizationQueueConfigured,
 } from "./optimizationQueue";
 import { getMultiVehicleReadinessDashboard } from "./multiVehicleReadiness";
+import { sendAccessReviewEmail } from "./email";
 
 const IMILE_PROVIDER = "imile_rider_delivery";
 const BLOCKING_AUDIT_ISSUE_TYPES = new Set([
@@ -2501,11 +2502,15 @@ const credentialsSchema = z.object({
 });
 const registrationSchema = credentialsSchema.extend({
   name: z.string().min(2, "Informe seu nome."),
-  phone: z.string().min(8, "Informe um telefone valido.").max(32),
+  phone: z.string().min(10, "Informe um WhatsApp valido.").max(32),
   companyName: z.string().max(255).optional(),
   city: z.string().min(2, "Informe sua cidade.").max(128),
   state: z.string().min(2, "Informe o estado.").max(64),
   vehicleType: z.string().min(2, "Informe o tipo de veiculo.").max(64),
+  userType: z.string().min(2, "Informe o tipo de usuario.").max(64),
+  marketplace: z.string().min(2, "Informe o marketplace principal.").max(64),
+  averageStopsPerDay: z.number().int().min(1).max(2000),
+  turnstileToken: z.string().max(4096).optional(),
   acceptTerms: z.boolean().refine(value => value === true, {
     message: "Aceite os termos para criar a conta.",
   }),
@@ -2538,6 +2543,31 @@ const operationalEventSchema = z.object({
   userAgent: z.string().max(700).optional(),
   appVersion: z.string().max(64).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+});
+const accessStatusFilterSchema = z.enum([
+  "pending_review",
+  "approved",
+  "waitlist",
+  "blocked",
+  "suspended",
+  "all",
+]);
+const accessReviewActionSchema = z.enum([
+  "approved",
+  "waitlist",
+  "blocked",
+  "suspended",
+]);
+const betaAccessSettingsSchema = z.object({
+  maxApprovedUsers: z.number().int().min(1).max(100000),
+  allowNewRegistrations: z.boolean(),
+  automaticApproval: z.boolean(),
+  sendNewUsersToWaitlist: z.boolean(),
+  maintenanceMode: z.boolean(),
+  routesPerUserPerDay: z.number().int().min(1).max(10000),
+  stopsPerRouteLimit: z.number().int().min(2).max(5000),
+  importsPerHourLimit: z.number().int().min(1).max(10000),
+  maxFileSizeMb: z.number().int().min(1).max(500),
 });
 const routeCreateSchema = z.object({
   name: z.string().min(1),
@@ -2592,6 +2622,72 @@ const stopUpdateSchema = z.object({
   geocodingMethod: geocodingMethodSchema.optional(),
   geocodingSuspect: z.boolean().optional(),
 });
+
+const MAX_REGISTRATIONS_PER_IP_24H = 3;
+
+function normalizeWhatsApp(value: string) {
+  return value.replace(/[^\d+]/g, "").trim();
+}
+
+function assertValidWhatsApp(value: string) {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length < 10 || digits.length > 15) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Informe um WhatsApp valido com DDD.",
+    });
+  }
+}
+
+function getRequestIp(ctx: any) {
+  const forwardedFor = ctx.req?.headers?.["x-forwarded-for"];
+  const raw = Array.isArray(forwardedFor)
+    ? forwardedFor[0]
+    : forwardedFor?.split(",")[0];
+  return (
+    raw?.trim() ||
+    ctx.req?.ip ||
+    ctx.req?.socket?.remoteAddress ||
+    ""
+  ).slice(0, 64);
+}
+
+function getRequestUserAgent(ctx: any) {
+  const value = ctx.req?.headers?.["user-agent"];
+  const raw = Array.isArray(value) ? value[0] : value;
+  return (raw || "").slice(0, 700);
+}
+
+async function verifyTurnstileIfConfigured(token: string | undefined, ip: string) {
+  const secret = process.env.TURNSTILE_SECRET_KEY?.trim();
+  if (!secret) return;
+  if (!token) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Confirme a verificacao de seguranca para criar a conta.",
+    });
+  }
+
+  const response = await fetch(
+    "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        secret,
+        response: token,
+        ...(ip ? { remoteip: ip } : {}),
+      }),
+    }
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success !== true) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Nao foi possivel validar a verificacao de seguranca.",
+    });
+  }
+}
 
 function sanitizeUser<T extends User | null | undefined>(user: T) {
   if (!user) return null;
@@ -2656,8 +2752,8 @@ async function recordRouteAuditEvent(
   });
 }
 
-function routeStopLimitMessage(stopCount: number) {
-  return `Esta rota tem ${stopCount} paradas e excede o limite comercial atual de testes de ${ENV.maxRouteStops} paradas por rota. Volumes maiores serão liberados gradualmente conforme a evolução da infraestrutura. Divida a tabela em rotas menores.`;
+function routeStopLimitMessage(stopCount: number, limit: number) {
+  return `Esta rota tem ${stopCount} paradas e excede o limite comercial atual de testes de ${limit} paradas por rota. Volumes maiores serao liberados gradualmente conforme a evolucao da infraestrutura. Divida a tabela em rotas menores.`;
 }
 
 async function assertRouteStopLimit(
@@ -2666,25 +2762,76 @@ async function assertRouteStopLimit(
   source: string,
   routeId?: number
 ) {
-  if (stopCount <= ENV.maxRouteStops) return;
+  const settings = await db.getBetaAccessSettings();
+  const maxStops = settings.stopsPerRouteLimit || ENV.maxRouteStops;
+  if (stopCount <= maxStops) return;
 
   await recordOperationalEvent(userId, {
     type: "route_stop_limit_exceeded",
     severity: "warning",
     source,
-    title: `Limite de ${ENV.maxRouteStops} paradas excedido`,
+    title: `Limite de ${maxStops} paradas excedido`,
     routeId,
-    message: routeStopLimitMessage(stopCount),
+    message: routeStopLimitMessage(stopCount, maxStops),
     metadata: {
       stopCount,
-      maxRouteStops: ENV.maxRouteStops,
+      maxRouteStops: maxStops,
     },
   });
 
   throw new TRPCError({
     code: "BAD_REQUEST",
-    message: routeStopLimitMessage(stopCount),
+    message: routeStopLimitMessage(stopCount, maxStops),
   });
+}
+
+async function assertUserRouteCreationLimit(userId: number, source: string) {
+  const settings = await db.getBetaAccessSettings();
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+  const routesToday = await db.countUserRoutesSince(userId, dayStart);
+
+  if (routesToday >= settings.routesPerUserPerDay) {
+    await recordOperationalEvent(userId, {
+      type: "user_route_daily_limit_exceeded",
+      severity: "warning",
+      source,
+      title: "Limite diario de rotas atingido",
+      message: `Limite atual: ${settings.routesPerUserPerDay} rota(s) por dia.`,
+      metadata: {
+        routesToday,
+        routesPerUserPerDay: settings.routesPerUserPerDay,
+      },
+    });
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `Limite diario de ${settings.routesPerUserPerDay} rota(s) atingido para este usuario.`,
+    });
+  }
+}
+
+async function assertUserImportHourlyLimit(userId: number, source: string) {
+  const settings = await db.getBetaAccessSettings();
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  const importsLastHour = await db.countUserRoutesSince(userId, oneHourAgo);
+
+  if (importsLastHour >= settings.importsPerHourLimit) {
+    await recordOperationalEvent(userId, {
+      type: "user_import_hourly_limit_exceeded",
+      severity: "warning",
+      source,
+      title: "Limite de importacoes por hora atingido",
+      message: `Limite atual: ${settings.importsPerHourLimit} importacao(oes) por hora.`,
+      metadata: {
+        importsLastHour,
+        importsPerHourLimit: settings.importsPerHourLimit,
+      },
+    });
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `Limite de ${settings.importsPerHourLimit} importacao(oes) por hora atingido.`,
+    });
+  }
 }
 
 async function setPasswordSession(
@@ -2722,6 +2869,17 @@ export const appRouter = router({
       }
 
       return sanitizeUser(opts.ctx.user);
+    }),
+    betaLimits: publicProcedure.query(async () => {
+      const settings = await db.getBetaAccessSettings();
+      return {
+        allowNewRegistrations: settings.allowNewRegistrations,
+        maintenanceMode: settings.maintenanceMode,
+        routesPerUserPerDay: settings.routesPerUserPerDay,
+        stopsPerRouteLimit: settings.stopsPerRouteLimit,
+        importsPerHourLimit: settings.importsPerHourLimit,
+        maxFileSizeMb: settings.maxFileSizeMb,
+      };
     }),
     login: publicProcedure.input(credentialsSchema)
       .mutation(async ({ ctx, input }) => {
@@ -2764,6 +2922,34 @@ export const appRouter = router({
     register: publicProcedure.input(registrationSchema)
       .mutation(async ({ ctx, input }) => {
         const email = normalizeEmail(input.email);
+        const requestIp = getRequestIp(ctx);
+        const requestUserAgent = getRequestUserAgent(ctx);
+        const phone = normalizeWhatsApp(input.phone);
+        assertValidWhatsApp(phone);
+        await verifyTurnstileIfConfigured(input.turnstileToken, requestIp);
+
+        const settings = await db.getBetaAccessSettings();
+        if (!settings.allowNewRegistrations) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message:
+              "Novos cadastros estao pausados no momento. Fale com o suporte para entrar na lista de interesse.",
+          });
+        }
+
+        if (requestIp) {
+          const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+          const recentRegistrations =
+            await db.countUsersRegisteredFromIpSince(requestIp, since);
+          if (recentRegistrations >= MAX_REGISTRATIONS_PER_IP_24H) {
+            throw new TRPCError({
+              code: "TOO_MANY_REQUESTS",
+              message:
+                "Muitos cadastros foram enviados desta conexao. Tente novamente mais tarde ou fale com o suporte.",
+            });
+          }
+        }
+
         const existingUser = await db.getUserByEmail(email);
 
         if (existingUser) {
@@ -2774,6 +2960,17 @@ export const appRouter = router({
         }
 
         const role = isAdminEmail(email, ENV.adminEmails) ? "admin" : "user";
+        const approvedUsers = await db.countApprovedUsers();
+        const capacityAvailable = approvedUsers < settings.maxApprovedUsers;
+        const accountStatus =
+          role === "admin"
+            ? "approved"
+            : settings.automaticApproval && capacityAvailable
+              ? "approved"
+              : settings.sendNewUsersToWaitlist || !capacityAvailable
+                ? "waitlist"
+                : "pending_review";
+        const reviewedAt = new Date();
         const passwordHash = await hashPassword(input.password);
         const openId = buildPasswordOpenId(email);
         const user = await db.createPasswordUser({
@@ -2782,12 +2979,20 @@ export const appRouter = router({
           email,
           passwordHash,
           role,
-          phone: input.phone.trim(),
+          phone,
           companyName: input.companyName?.trim() || null,
           city: input.city.trim(),
           state: input.state.trim(),
           vehicleType: input.vehicleType.trim(),
+          userType: input.userType.trim(),
+          marketplace: input.marketplace.trim(),
+          averageStopsPerDay: input.averageStopsPerDay,
           acceptedTermsAt: new Date(),
+          accountStatus,
+          registrationIp: requestIp || null,
+          registrationUserAgent: requestUserAgent || null,
+          approvedAt: accountStatus === "approved" ? reviewedAt : null,
+          waitlistedAt: accountStatus === "waitlist" ? reviewedAt : null,
         });
 
         if (!user) {
@@ -2805,18 +3010,33 @@ export const appRouter = router({
         );
         await recordOperationalEvent(user.id, {
           type: "user_registered",
-          severity: "info",
+          severity: accountStatus === "approved" ? "info" : "warning",
           source: "auth.register",
           title: "Novo cadastro",
           message: user.email ?? undefined,
           metadata: {
             role,
+            accountStatus,
             city: input.city.trim(),
             state: input.state.trim(),
             vehicleType: input.vehicleType.trim(),
+            userType: input.userType.trim(),
+            marketplace: input.marketplace.trim(),
+            averageStopsPerDay: input.averageStopsPerDay,
             companyName: input.companyName?.trim() || null,
+            capacity: {
+              approvedUsers,
+              maxApprovedUsers: settings.maxApprovedUsers,
+            },
           },
         });
+
+        if (accountStatus === "approved") {
+          await sendAccessReviewEmail(user, "access_approved");
+        } else if (accountStatus === "waitlist") {
+          await sendAccessReviewEmail(user, "access_waitlist");
+        }
+
         return {
           ...sanitizeUser(user),
         };
@@ -2956,6 +3176,98 @@ export const appRouter = router({
       limit: z.number().min(1).max(100).default(30),
     }))
       .query(({ input }) => db.getAdminDashboardEvents(input.page, input.limit)),
+    accessRequests: adminProcedure.input(z.object({
+      status: accessStatusFilterSchema.default("pending_review"),
+      search: z.string().max(120).optional(),
+      page: z.number().min(1).default(1),
+      limit: z.number().min(1).max(100).default(50),
+    }))
+      .query(({ input }) => db.getAccessRequestsDashboard(input)),
+    accessRequestDetails: adminProcedure.input(z.object({
+      userId: z.number().int().positive(),
+    }))
+      .query(async ({ input }) => {
+        const details = await db.getAccessRequestDetails(input.userId);
+        if (!details) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Usuario nao encontrado.",
+          });
+        }
+        return details;
+      }),
+    reviewAccessRequest: adminProcedure.input(z.object({
+      userId: z.number().int().positive(),
+      action: accessReviewActionSchema,
+      note: z.string().max(2000).optional(),
+    }))
+      .mutation(async ({ ctx, input }) => {
+        if (input.userId === ctx.user.id && input.action !== "approved") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Nao altere seu proprio acesso administrativo.",
+          });
+        }
+
+        if (input.action === "approved") {
+          const [settings, approvedUsers, target] = await Promise.all([
+            db.getBetaAccessSettings(),
+            db.countApprovedUsers(),
+            db.getUserById(input.userId),
+          ]);
+          if (
+            target &&
+            (target as any).accountStatus !== "approved" &&
+            approvedUsers >= settings.maxApprovedUsers
+          ) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message:
+                "Capacidade maxima de usuarios aprovados atingida. Ajuste a Capacidade do Beta antes de aprovar.",
+            });
+          }
+        }
+
+        const result = await db.reviewUserAccess({
+          userId: input.userId,
+          adminUserId: ctx.user.id,
+          action: input.action,
+          note: input.note ?? null,
+        });
+
+        if (!result) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Usuario nao encontrado.",
+          });
+        }
+
+        if (input.action === "approved") {
+          await sendAccessReviewEmail(result.user as User, "access_approved");
+        } else if (input.action === "waitlist") {
+          await sendAccessReviewEmail(result.user as User, "access_waitlist");
+        }
+
+        await recordOperationalEvent(result.user.id, {
+          type: "admin_user_access_reviewed",
+          severity: "info",
+          source: "admin.accessRequests",
+          title: "Status de acesso alterado",
+          message: result.user.email ?? undefined,
+          metadata: {
+            action: input.action,
+            reviewedBy: ctx.user.id,
+            accountStatus: result.user.accountStatus,
+          },
+        });
+
+        return result;
+      }),
+    betaAccessSettings: adminProcedure.query(() => db.getBetaAccessSettings()),
+    updateBetaAccessSettings: adminProcedure.input(betaAccessSettingsSchema)
+      .mutation(({ ctx, input }) =>
+        db.updateBetaAccessSettings(ctx.user.id, input)
+      ),
     cleanupE2eUsers: adminProcedure.mutation(async ({ ctx }) => {
       const result = await db.cleanupE2eTestUsers();
       await recordOperationalEvent(ctx.user.id, {
@@ -3093,6 +3405,7 @@ export const appRouter = router({
       }),
     create: protectedProcedure.input(routeCreateSchema)
       .mutation(async ({ ctx, input }) => {
+        await assertUserRouteCreationLimit(ctx.user.id, "routes.create");
         const route = await db.createRoute(ctx.user.id, input);
         if (route) {
           await recordOperationalEvent(ctx.user.id, {
@@ -3113,6 +3426,14 @@ export const appRouter = router({
     }))
       .mutation(async ({ ctx, input }) => {
         const { stops, respectInputSequence, ...routeInput } = input;
+        await assertUserRouteCreationLimit(
+          ctx.user.id,
+          "routes.createAndOptimize"
+        );
+        await assertUserImportHourlyLimit(
+          ctx.user.id,
+          "routes.createAndOptimize"
+        );
         await assertRouteStopLimit(
           ctx.user.id,
           stops.length,

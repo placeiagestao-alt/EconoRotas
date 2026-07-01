@@ -8,23 +8,84 @@ Objetivo: hospedar OSRM proprio para remover dependencia do `router.project-osrm
    - 4 vCPU minimo, 8 vCPU recomendado
    - 16 GB RAM runtime, 32 GB RAM recomendado para preprocessamento
    - 80 GB disco minimo
-2. Apontar DNS:
+2. Liberar portas publicas:
+
+   - `22/tcp` para instalacao via SSH.
+   - `80/tcp` e `443/tcp` para Nginx/Certbot.
+   - nao exponha `5000/tcp`; o OSRM fica atras do proxy.
+
+Validar antes do deploy:
+
+```powershell
+pnpm run osrm:preflight
+```
+
+Se `readyForOsrmDeploy=false`, corrija os `blockers` antes de rodar a
+instalacao. No ambiente local validado em 2026-06-30, o DNS estava correto para
+`econorotas.duckdns.org -> 187.73.199.64`, mas o computador estava atras de NAT
+em `192.168.5.10`, gateway `192.168.5.2`, roteador ZTE F8040, sem UPnP e com
+`22/80/443` fechadas. Nesse cenario, criar redirecionamento de portas no
+roteador/firewall e obrigatorio.
+
+3. Apontar DNS:
 
 `osrm.econorotas.com` -> IP publico do servidor.
 
-3. Copiar esta pasta para o servidor e executar:
+Para usar DuckDNS temporariamente:
+
+`econorotas.duckdns.org` -> IP publico do servidor.
+
+4. Do Windows, executar o deploy automatizado:
+
+```powershell
+pnpm run osrm:deploy-server
+```
+
+Ou com parametros explicitos:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy-osrm-server.ps1 `
+  -ServerHost econorotas.duckdns.org `
+  -Domain econorotas.duckdns.org `
+  -LetsEncryptEmail admin@econorotas.com
+```
+
+Esse script envia os arquivos de `infra/osrm`, instala Docker/Nginx/Certbot,
+processa o mapa do Brasil e valida `route` e `table` no endpoint HTTPS.
+
+5. Ativar Vercel somente depois do OSRM responder:
+
+```powershell
+pnpm run osrm:activate-vercel
+```
+
+Esse segundo script valida o endpoint, configura:
+
+```env
+OSRM_ENABLED=true
+OSRM_BASE_URL=https://econorotas.duckdns.org
+OSRM_REQUEST_TIMEOUT_MS=8000
+OSRM_HEALTH_TIMEOUT_MS=3000
+OSRM_MAX_TABLE_NODES=100
+OSRM_REQUIRED=true
+OSRM_REQUIRED_MIN_STOPS=101
+```
+
+e publica novo deploy de producao.
+
+## Provisionamento Manual
+
+Copiar esta pasta para o servidor e executar:
 
 ```bash
 sudo OSRM_DOMAIN=osrm.econorotas.com LETSENCRYPT_EMAIL=admin@econorotas.com bash install-ubuntu.sh
 ```
 
-4. Processar mapa:
+Processar mapa:
 
 ```bash
 sudo bash /opt/econorota-osrm/prepare-brazil-map.sh
 ```
-
-## Provisionamento Manual
 
 Baixar mapa do Brasil:
 

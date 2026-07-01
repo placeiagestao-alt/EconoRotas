@@ -1,4 +1,5 @@
 import DashboardLayout from "@/components/DashboardLayout";
+import { AccessRequestsPanel } from "@/components/admin/AccessRequestsPanel";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -453,6 +454,8 @@ export default function Operations() {
             />
           </div>
         )}
+
+        <AccessRequestsPanel />
 
         {!dashboardQuery.isLoading && executiveObservability ? (
           <Card>

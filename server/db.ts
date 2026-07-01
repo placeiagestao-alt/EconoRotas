@@ -24,7 +24,14 @@ import {
   geocodeCache,
   addressCorrections,
   locationCommercialCache,
+  adminUserReviews,
+  emailLogs,
+  betaAccessSettings,
 } from "../drizzle/schema";
+import {
+  ACCOUNT_STATUSES,
+  type AccountStatus,
+} from "../shared/accountAccess";
 import { ENV } from "./_core/env";
 import {
   calculateGeocodingConfidence,
@@ -76,6 +83,9 @@ const memory = {
   geocodeCache: [] as any[],
   addressCorrections: [] as any[],
   locationCommercialCache: [] as any[],
+  adminUserReviews: [] as any[],
+  emailLogs: [] as any[],
+  betaAccessSettings: [] as any[],
   ids: {
     users: 1,
     routes: 1,
@@ -91,6 +101,9 @@ const memory = {
     geocodeCache: 1,
     addressCorrections: 1,
     locationCommercialCache: 1,
+    adminUserReviews: 1,
+    emailLogs: 1,
+    betaAccessSettings: 1,
   },
 };
 
@@ -170,6 +183,13 @@ function hydrateMemory(data: any) {
   memory.locationCommercialCache = Array.isArray(data.locationCommercialCache)
     ? data.locationCommercialCache
     : [];
+  memory.adminUserReviews = Array.isArray(data.adminUserReviews)
+    ? data.adminUserReviews
+    : [];
+  memory.emailLogs = Array.isArray(data.emailLogs) ? data.emailLogs : [];
+  memory.betaAccessSettings = Array.isArray(data.betaAccessSettings)
+    ? data.betaAccessSettings
+    : [];
   memory.ids = {
     users: Number(data.ids?.users) || 1,
     routes: Number(data.ids?.routes) || 1,
@@ -185,6 +205,9 @@ function hydrateMemory(data: any) {
     geocodeCache: Number(data.ids?.geocodeCache) || 1,
     addressCorrections: Number(data.ids?.addressCorrections) || 1,
     locationCommercialCache: Number(data.ids?.locationCommercialCache) || 1,
+    adminUserReviews: Number(data.ids?.adminUserReviews) || 1,
+    emailLogs: Number(data.ids?.emailLogs) || 1,
+    betaAccessSettings: Number(data.ids?.betaAccessSettings) || 1,
   };
 }
 
@@ -712,6 +735,18 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["users", "email"],
   ["users", "role"],
   ["users", "phone"],
+  ["users", "accountStatus"],
+  ["users", "userType"],
+  ["users", "marketplace"],
+  ["users", "averageStopsPerDay"],
+  ["users", "registrationIp"],
+  ["users", "registrationUserAgent"],
+  ["users", "approvedAt"],
+  ["users", "approvedBy"],
+  ["users", "waitlistedAt"],
+  ["users", "reviewedBy"],
+  ["users", "blockedAt"],
+  ["users", "suspendedAt"],
   ["routes", "id"],
   ["routes", "userId"],
   ["stops", "routeId"],
@@ -804,6 +839,23 @@ const REQUIRED_SCHEMA_COLUMNS = [
   ["address_corrections", "original_address"],
   ["address_corrections", "corrected_address"],
   ["address_corrections", "user_id"],
+  ["admin_user_reviews", "user_id"],
+  ["admin_user_reviews", "admin_user_id"],
+  ["admin_user_reviews", "previous_status"],
+  ["admin_user_reviews", "new_status"],
+  ["admin_user_reviews", "action"],
+  ["email_logs", "user_id"],
+  ["email_logs", "template_name"],
+  ["email_logs", "status"],
+  ["beta_access_settings", "max_approved_users"],
+  ["beta_access_settings", "allow_new_registrations"],
+  ["beta_access_settings", "automatic_approval"],
+  ["beta_access_settings", "send_new_users_to_waitlist"],
+  ["beta_access_settings", "maintenance_mode"],
+  ["beta_access_settings", "routes_per_user_per_day"],
+  ["beta_access_settings", "stops_per_route_limit"],
+  ["beta_access_settings", "imports_per_hour_limit"],
+  ["beta_access_settings", "max_file_size_mb"],
 ] as const;
 
 async function readDatabaseSchemaHealth() {
@@ -998,8 +1050,26 @@ export async function upsertUser(user: InsertUser): Promise<void> {
         city: user.city ?? existing?.city ?? null,
         state: user.state ?? existing?.state ?? null,
         vehicleType: user.vehicleType ?? existing?.vehicleType ?? null,
+        userType: user.userType ?? existing?.userType ?? null,
+        marketplace: user.marketplace ?? existing?.marketplace ?? null,
+        averageStopsPerDay:
+          user.averageStopsPerDay ?? existing?.averageStopsPerDay ?? null,
         acceptedTermsAt:
           user.acceptedTermsAt ?? existing?.acceptedTermsAt ?? null,
+        accountStatus:
+          user.accountStatus ??
+          existing?.accountStatus ??
+          (user.role === "admin" ? "approved" : "pending_review"),
+        registrationIp: user.registrationIp ?? existing?.registrationIp ?? null,
+        registrationUserAgent:
+          user.registrationUserAgent ?? existing?.registrationUserAgent ?? null,
+        approvedAt: user.approvedAt ?? existing?.approvedAt ?? null,
+        approvedBy: user.approvedBy ?? existing?.approvedBy ?? null,
+        waitlistedAt: user.waitlistedAt ?? existing?.waitlistedAt ?? null,
+        reviewedBy: user.reviewedBy ?? existing?.reviewedBy ?? null,
+        blockedAt: user.blockedAt ?? existing?.blockedAt ?? null,
+        suspendedAt: user.suspendedAt ?? existing?.suspendedAt ?? null,
+        internalNotes: user.internalNotes ?? existing?.internalNotes ?? null,
         passwordHash: user.passwordHash ?? existing?.passwordHash ?? null,
         loginMethod: user.loginMethod ?? existing?.loginMethod ?? null,
         role: user.role ?? existing?.role ?? "user",
@@ -1037,6 +1107,11 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       "city",
       "state",
       "vehicleType",
+      "userType",
+      "marketplace",
+      "registrationIp",
+      "registrationUserAgent",
+      "internalNotes",
       "passwordHash",
       "loginMethod",
     ] as const;
@@ -1059,6 +1134,41 @@ export async function upsertUser(user: InsertUser): Promise<void> {
     if (user.acceptedTermsAt !== undefined) {
       values.acceptedTermsAt = user.acceptedTermsAt;
       updateSet.acceptedTermsAt = user.acceptedTermsAt;
+    }
+    if (user.averageStopsPerDay !== undefined) {
+      values.averageStopsPerDay = user.averageStopsPerDay;
+      updateSet.averageStopsPerDay = user.averageStopsPerDay;
+    }
+    if (user.accountStatus !== undefined) {
+      values.accountStatus = user.accountStatus;
+      updateSet.accountStatus = user.accountStatus;
+    } else if (user.role !== undefined) {
+      values.accountStatus =
+        user.role === "admin" ? "approved" : "pending_review";
+    }
+    if (user.approvedAt !== undefined) {
+      values.approvedAt = user.approvedAt;
+      updateSet.approvedAt = user.approvedAt;
+    }
+    if (user.approvedBy !== undefined) {
+      values.approvedBy = user.approvedBy;
+      updateSet.approvedBy = user.approvedBy;
+    }
+    if (user.waitlistedAt !== undefined) {
+      values.waitlistedAt = user.waitlistedAt;
+      updateSet.waitlistedAt = user.waitlistedAt;
+    }
+    if (user.reviewedBy !== undefined) {
+      values.reviewedBy = user.reviewedBy;
+      updateSet.reviewedBy = user.reviewedBy;
+    }
+    if (user.blockedAt !== undefined) {
+      values.blockedAt = user.blockedAt;
+      updateSet.blockedAt = user.blockedAt;
+    }
+    if (user.suspendedAt !== undefined) {
+      values.suspendedAt = user.suspendedAt;
+      updateSet.suspendedAt = user.suspendedAt;
     }
     if (user.role !== undefined) {
       values.role = user.role;
@@ -1222,7 +1332,17 @@ export async function createPasswordUser(user: {
   city?: string | null;
   state?: string | null;
   vehicleType?: string | null;
+  userType?: string | null;
+  marketplace?: string | null;
+  averageStopsPerDay?: number | null;
   acceptedTermsAt?: Date | null;
+  accountStatus?: AccountStatus;
+  registrationIp?: string | null;
+  registrationUserAgent?: string | null;
+  approvedAt?: Date | null;
+  approvedBy?: number | null;
+  waitlistedAt?: Date | null;
+  reviewedBy?: number | null;
 }) {
   const now = new Date();
   const values: InsertUser = {
@@ -1234,7 +1354,19 @@ export async function createPasswordUser(user: {
     city: user.city ?? null,
     state: user.state ?? null,
     vehicleType: user.vehicleType ?? null,
+    userType: user.userType ?? null,
+    marketplace: user.marketplace ?? null,
+    averageStopsPerDay: user.averageStopsPerDay ?? null,
     acceptedTermsAt: user.acceptedTermsAt ?? null,
+    accountStatus:
+      user.accountStatus ??
+      (user.role === "admin" ? "approved" : "pending_review"),
+    registrationIp: user.registrationIp ?? null,
+    registrationUserAgent: user.registrationUserAgent ?? null,
+    approvedAt: user.approvedAt ?? null,
+    approvedBy: user.approvedBy ?? null,
+    waitlistedAt: user.waitlistedAt ?? null,
+    reviewedBy: user.reviewedBy ?? null,
     passwordHash: user.passwordHash,
     loginMethod: "password",
     role: user.role ?? "user",
@@ -1302,6 +1434,648 @@ export async function updateUserProfile(
 
   await db.update(users).set(values).where(eq(users.id, userId));
   return getUserById(userId);
+}
+
+const BETA_ACCESS_SETTINGS_ID = 1;
+const DEFAULT_BETA_ACCESS_SETTINGS = {
+  id: BETA_ACCESS_SETTINGS_ID,
+  maxApprovedUsers: 50,
+  allowNewRegistrations: true,
+  automaticApproval: false,
+  sendNewUsersToWaitlist: false,
+  maintenanceMode: false,
+  routesPerUserPerDay: 10,
+  stopsPerRouteLimit: 200,
+  importsPerHourLimit: 5,
+  maxFileSizeMb: 5,
+  updatedBy: null as number | null,
+  createdAt: new Date(0),
+  updatedAt: new Date(0),
+};
+
+export type AccessReviewAction = "approved" | "waitlist" | "blocked" | "suspended";
+export type AccessRequestStatusFilter = AccountStatus | "all";
+
+function normalizeAccountStatus(value: unknown): AccountStatus {
+  return ACCOUNT_STATUSES.includes(value as AccountStatus)
+    ? (value as AccountStatus)
+    : "approved";
+}
+
+function normalizeDateValue(value: unknown) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function normalizeBooleanValue(value: unknown, fallback: boolean) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") return value === "1" || value === "true";
+  return fallback;
+}
+
+function normalizePositiveInt(value: unknown, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
+}
+
+function normalizeBetaAccessSettings(row: any = DEFAULT_BETA_ACCESS_SETTINGS) {
+  return {
+    id: Number(row.id ?? BETA_ACCESS_SETTINGS_ID),
+    maxApprovedUsers: normalizePositiveInt(
+      row.maxApprovedUsers ?? row.max_approved_users,
+      DEFAULT_BETA_ACCESS_SETTINGS.maxApprovedUsers
+    ),
+    allowNewRegistrations: normalizeBooleanValue(
+      row.allowNewRegistrations ?? row.allow_new_registrations,
+      DEFAULT_BETA_ACCESS_SETTINGS.allowNewRegistrations
+    ),
+    automaticApproval: normalizeBooleanValue(
+      row.automaticApproval ?? row.automatic_approval,
+      DEFAULT_BETA_ACCESS_SETTINGS.automaticApproval
+    ),
+    sendNewUsersToWaitlist: normalizeBooleanValue(
+      row.sendNewUsersToWaitlist ?? row.send_new_users_to_waitlist,
+      DEFAULT_BETA_ACCESS_SETTINGS.sendNewUsersToWaitlist
+    ),
+    maintenanceMode: normalizeBooleanValue(
+      row.maintenanceMode ?? row.maintenance_mode,
+      DEFAULT_BETA_ACCESS_SETTINGS.maintenanceMode
+    ),
+    routesPerUserPerDay: normalizePositiveInt(
+      row.routesPerUserPerDay ?? row.routes_per_user_per_day,
+      DEFAULT_BETA_ACCESS_SETTINGS.routesPerUserPerDay
+    ),
+    stopsPerRouteLimit: normalizePositiveInt(
+      row.stopsPerRouteLimit ?? row.stops_per_route_limit,
+      DEFAULT_BETA_ACCESS_SETTINGS.stopsPerRouteLimit
+    ),
+    importsPerHourLimit: normalizePositiveInt(
+      row.importsPerHourLimit ?? row.imports_per_hour_limit,
+      DEFAULT_BETA_ACCESS_SETTINGS.importsPerHourLimit
+    ),
+    maxFileSizeMb: normalizePositiveInt(
+      row.maxFileSizeMb ?? row.max_file_size_mb,
+      DEFAULT_BETA_ACCESS_SETTINGS.maxFileSizeMb
+    ),
+    updatedBy: row.updatedBy ?? row.updated_by ?? null,
+    createdAt: normalizeDateValue(row.createdAt ?? row.created_at),
+    updatedAt: normalizeDateValue(row.updatedAt ?? row.updated_at),
+  };
+}
+
+function getDefaultBetaAccessSettings() {
+  return normalizeBetaAccessSettings({
+    ...DEFAULT_BETA_ACCESS_SETTINGS,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+}
+
+export async function getBetaAccessSettings() {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.betaAccessSettings[0];
+      if (existing) return normalizeBetaAccessSettings(existing);
+
+      const settings = getDefaultBetaAccessSettings();
+      memory.betaAccessSettings = [settings];
+      await persistFallbackDb();
+      return settings;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const result = await db
+    .select()
+    .from(betaAccessSettings)
+    .where(eq(betaAccessSettings.id, BETA_ACCESS_SETTINGS_ID))
+    .limit(1);
+
+  if (result[0]) return normalizeBetaAccessSettings(result[0]);
+
+  const defaults = getDefaultBetaAccessSettings();
+  await db.insert(betaAccessSettings).values({
+    id: BETA_ACCESS_SETTINGS_ID,
+    maxApprovedUsers: defaults.maxApprovedUsers,
+    allowNewRegistrations: defaults.allowNewRegistrations,
+    automaticApproval: defaults.automaticApproval,
+    sendNewUsersToWaitlist: defaults.sendNewUsersToWaitlist,
+    maintenanceMode: defaults.maintenanceMode,
+    routesPerUserPerDay: defaults.routesPerUserPerDay,
+    stopsPerRouteLimit: defaults.stopsPerRouteLimit,
+    importsPerHourLimit: defaults.importsPerHourLimit,
+    maxFileSizeMb: defaults.maxFileSizeMb,
+    updatedBy: null,
+  });
+  return defaults;
+}
+
+export async function updateBetaAccessSettings(
+  adminUserId: number,
+  input: {
+    maxApprovedUsers: number;
+    allowNewRegistrations: boolean;
+    automaticApproval: boolean;
+    sendNewUsersToWaitlist: boolean;
+    maintenanceMode: boolean;
+    routesPerUserPerDay: number;
+    stopsPerRouteLimit: number;
+    importsPerHourLimit: number;
+    maxFileSizeMb: number;
+  }
+) {
+  const now = new Date();
+  const values = {
+    maxApprovedUsers: normalizePositiveInt(input.maxApprovedUsers, 50),
+    allowNewRegistrations: Boolean(input.allowNewRegistrations),
+    automaticApproval: Boolean(input.automaticApproval),
+    sendNewUsersToWaitlist: Boolean(input.sendNewUsersToWaitlist),
+    maintenanceMode: Boolean(input.maintenanceMode),
+    routesPerUserPerDay: normalizePositiveInt(input.routesPerUserPerDay, 10),
+    stopsPerRouteLimit: normalizePositiveInt(input.stopsPerRouteLimit, 200),
+    importsPerHourLimit: normalizePositiveInt(input.importsPerHourLimit, 5),
+    maxFileSizeMb: normalizePositiveInt(input.maxFileSizeMb, 5),
+    updatedBy: adminUserId,
+    updatedAt: now,
+  };
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.betaAccessSettings[0];
+      memory.betaAccessSettings = [
+        {
+          ...(existing ?? getDefaultBetaAccessSettings()),
+          ...values,
+          id: BETA_ACCESS_SETTINGS_ID,
+          createdAt: existing?.createdAt ?? now,
+        },
+      ];
+      await persistFallbackDb();
+      return normalizeBetaAccessSettings(memory.betaAccessSettings[0]);
+    }
+    requireConfiguredDatabase();
+  }
+
+  await db.insert(betaAccessSettings).values({
+    id: BETA_ACCESS_SETTINGS_ID,
+    ...values,
+    createdAt: now,
+  }).onDuplicateKeyUpdate({
+    set: values,
+  });
+
+  return getBetaAccessSettings();
+}
+
+export async function countApprovedUsers() {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.users.filter(
+        user => normalizeAccountStatus(user.accountStatus) === "approved"
+      ).length;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const result = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(users)
+    .where(eq(users.accountStatus, "approved"));
+  return Number(result[0]?.count || 0);
+}
+
+export async function countUsersRegisteredFromIpSince(ip: string, since: Date) {
+  const normalizedIp = ip.trim();
+  if (!normalizedIp) return 0;
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.users.filter(
+        user =>
+          user.registrationIp === normalizedIp &&
+          new Date(user.createdAt).getTime() >= since.getTime()
+      ).length;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const result = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(users)
+    .where(
+      and(
+        eq(users.registrationIp, normalizedIp),
+        gte(users.createdAt, since)
+      )
+    );
+  return Number(result[0]?.count || 0);
+}
+
+export async function countUserRoutesSince(userId: number, since: Date) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.routes.filter(
+        route =>
+          route.userId === userId &&
+          new Date(route.createdAt).getTime() >= since.getTime()
+      ).length;
+    }
+    requireConfiguredDatabase();
+  }
+
+  const result = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(routes)
+    .where(and(eq(routes.userId, userId), gte(routes.createdAt, since)));
+  return Number(result[0]?.count || 0);
+}
+
+function buildAccessSummary(rows: any[], settings: Awaited<ReturnType<typeof getBetaAccessSettings>>) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const approvedUsers = rows.filter(
+    row => normalizeAccountStatus(row.accountStatus) === "approved"
+  );
+
+  return {
+    pendingTotal: rows.filter(
+      row => normalizeAccountStatus(row.accountStatus) === "pending_review"
+    ).length,
+    approvedToday: rows.filter(
+      row =>
+        normalizeAccountStatus(row.accountStatus) === "approved" &&
+        row.approvedAt &&
+        new Date(row.approvedAt).getTime() >= today.getTime()
+    ).length,
+    waitlistTotal: rows.filter(
+      row => normalizeAccountStatus(row.accountStatus) === "waitlist"
+    ).length,
+    blockedTotal: rows.filter(
+      row => normalizeAccountStatus(row.accountStatus) === "blocked"
+    ).length,
+    suspendedTotal: rows.filter(
+      row => normalizeAccountStatus(row.accountStatus) === "suspended"
+    ).length,
+    approvedUsers: approvedUsers.length,
+    maxApprovedUsers: settings.maxApprovedUsers,
+  };
+}
+
+function safeAccessUser(row: any) {
+  const { passwordHash: _passwordHash, ...safe } = row;
+  return {
+    ...safe,
+    accountStatus: normalizeAccountStatus(row.accountStatus),
+  };
+}
+
+export async function getAccessRequestsDashboard(input: {
+  status?: AccessRequestStatusFilter;
+  search?: string;
+  page?: number;
+  limit?: number;
+} = {}) {
+  const settings = await getBetaAccessSettings();
+  const status = input.status ?? "pending_review";
+  const safePage = Math.max(1, Number(input.page || 1));
+  const safeLimit = Math.min(100, Math.max(1, Number(input.limit || 30)));
+  const offset = (safePage - 1) * safeLimit;
+  const search = input.search?.trim().toLowerCase() ?? "";
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const allRows = [...memory.users].map(safeAccessUser);
+      const filtered = allRows.filter(user => {
+        const matchesStatus =
+          status === "all" || normalizeAccountStatus(user.accountStatus) === status;
+        const searchable = [
+          user.name,
+          user.email,
+          user.phone,
+          user.city,
+          user.state,
+          user.userType,
+          user.marketplace,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return matchesStatus && (!search || searchable.includes(search));
+      });
+
+      return {
+        page: safePage,
+        limit: safeLimit,
+        hasMore: filtered.length > offset + safeLimit,
+        total: filtered.length,
+        summary: buildAccessSummary(allRows, settings),
+        settings,
+        users: sortByDateDesc(filtered, "createdAt").slice(offset, offset + safeLimit),
+      };
+    }
+    requireConfiguredDatabase();
+  }
+
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (status !== "all") {
+    where.push("u.accountStatus = ?");
+    params.push(status);
+  }
+  if (search) {
+    where.push("(LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(u.email, '')) LIKE ? OR LOWER(COALESCE(u.phone, '')) LIKE ? OR LOWER(COALESCE(u.city, '')) LIKE ? OR LOWER(COALESCE(u.state, '')) LIKE ?)");
+    const like = `%${search}%`;
+    params.push(like, like, like, like, like);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  const [countRows, rows, summaryRows] = await Promise.all([
+    _pool!.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS total FROM users u ${whereSql}`,
+      params
+    ).then(([result]) => result),
+    _pool!.query<RowDataPacket[]>(
+      `
+        SELECT
+          u.id,
+          u.openId,
+          u.name,
+          u.email,
+          u.phone,
+          u.companyName,
+          u.city,
+          u.state,
+          u.vehicleType,
+          u.userType,
+          u.marketplace,
+          u.averageStopsPerDay,
+          u.accountStatus,
+          u.registrationIp,
+          u.registrationUserAgent,
+          u.approvedAt,
+          u.approvedBy,
+          u.waitlistedAt,
+          u.reviewedBy,
+          u.blockedAt,
+          u.suspendedAt,
+          u.internalNotes,
+          u.role,
+          u.createdAt,
+          u.updatedAt,
+          u.lastSignedIn
+        FROM users u
+        ${whereSql}
+        ORDER BY u.createdAt DESC
+        LIMIT ?
+        OFFSET ?
+      `,
+      [...params, safeLimit + 1, offset]
+    ).then(([result]) => result),
+    _pool!.query<RowDataPacket[]>(
+      `
+        SELECT
+          accountStatus,
+          COUNT(*) AS total,
+          SUM(CASE WHEN accountStatus = 'approved' AND approvedAt >= CURRENT_DATE() THEN 1 ELSE 0 END) AS approvedToday
+        FROM users
+        GROUP BY accountStatus
+      `
+    ).then(([result]) => result),
+  ]);
+
+  const summaryInput = summaryRows.flatMap(row => {
+    const total = Number(row.total || 0);
+    return Array.from({ length: total }, () => ({
+      accountStatus: row.accountStatus,
+      approvedAt:
+        row.accountStatus === "approved" && Number(row.approvedToday || 0) > 0
+          ? new Date()
+          : null,
+    }));
+  });
+  const approvedToday = summaryRows.reduce(
+    (sum, row) => sum + Number(row.approvedToday || 0),
+    0
+  );
+  const summary = {
+    ...buildAccessSummary(summaryInput, settings),
+    approvedToday,
+  };
+
+  return {
+    page: safePage,
+    limit: safeLimit,
+    total: Number(countRows[0]?.total || 0),
+    hasMore: rows.length > safeLimit,
+    summary,
+    settings,
+    users: rows.slice(0, safeLimit).map(safeAccessUser),
+  };
+}
+
+export async function getAccessRequestDetails(userId: number) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const user = memory.users.find(item => Number(item.id) === userId);
+      if (!user) return null;
+      const reviews = sortByDateDesc(
+        memory.adminUserReviews
+          .filter(review => Number(review.userId) === userId)
+          .map(review => ({
+            ...review,
+            adminName:
+              memory.users.find(item => item.id === review.adminUserId)?.name ??
+              null,
+            adminEmail:
+              memory.users.find(item => item.id === review.adminUserId)?.email ??
+              null,
+          })),
+        "createdAt"
+      );
+      const emails = sortByDateDesc(
+        memory.emailLogs.filter(log => Number(log.userId) === userId),
+        "createdAt"
+      );
+      return {
+        user: safeAccessUser(user),
+        reviews,
+        emailLogs: emails,
+      };
+    }
+    requireConfiguredDatabase();
+  }
+
+  const [userRows, reviewRows, emailRows] = await Promise.all([
+    db.select().from(users).where(eq(users.id, userId)).limit(1),
+    _pool!.query<RowDataPacket[]>(
+      `
+        SELECT
+          r.id,
+          r.user_id AS userId,
+          r.admin_user_id AS adminUserId,
+          r.previous_status AS previousStatus,
+          r.new_status AS newStatus,
+          r.action,
+          r.note,
+          r.created_at AS createdAt,
+          a.name AS adminName,
+          a.email AS adminEmail
+        FROM admin_user_reviews r
+        LEFT JOIN users a ON a.id = r.admin_user_id
+        WHERE r.user_id = ?
+        ORDER BY r.created_at DESC
+      `,
+      [userId]
+    ).then(([rows]) => rows),
+    _pool!.query<RowDataPacket[]>(
+      `
+        SELECT
+          id,
+          user_id AS userId,
+          email,
+          template_name AS templateName,
+          status,
+          error,
+          created_at AS createdAt
+        FROM email_logs
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 20
+      `,
+      [userId]
+    ).then(([rows]) => rows),
+  ]);
+
+  if (!userRows[0]) return null;
+  return {
+    user: safeAccessUser(userRows[0]),
+    reviews: reviewRows,
+    emailLogs: emailRows,
+  };
+}
+
+function reviewActionToStatus(action: AccessReviewAction): AccountStatus {
+  if (action === "approved") return "approved";
+  if (action === "waitlist") return "waitlist";
+  if (action === "blocked") return "blocked";
+  return "suspended";
+}
+
+export async function reviewUserAccess(input: {
+  userId: number;
+  adminUserId: number;
+  action: AccessReviewAction;
+  note?: string | null;
+}) {
+  const target = await getUserById(input.userId);
+  if (!target) return null;
+
+  const previousStatus = normalizeAccountStatus((target as any).accountStatus);
+  const newStatus = reviewActionToStatus(input.action);
+  const now = new Date();
+  const note = input.note?.trim() || null;
+  const updateValues: Record<string, unknown> = {
+    accountStatus: newStatus,
+    reviewedBy: input.adminUserId,
+    updatedAt: now,
+  };
+
+  if (note) updateValues.internalNotes = note;
+  if (newStatus === "approved") {
+    updateValues.approvedAt = now;
+    updateValues.approvedBy = input.adminUserId;
+  }
+  if (newStatus === "waitlist") {
+    updateValues.waitlistedAt = now;
+  }
+  if (newStatus === "blocked") {
+    updateValues.blockedAt = now;
+  }
+  if (newStatus === "suspended") {
+    updateValues.suspendedAt = now;
+  }
+
+  const reviewValues = {
+    userId: input.userId,
+    adminUserId: input.adminUserId,
+    previousStatus,
+    newStatus,
+    action: input.action,
+    note,
+    createdAt: now,
+  };
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.users.find(item => Number(item.id) === input.userId);
+      if (!existing) return null;
+      Object.assign(existing, updateValues);
+      const review = {
+        id: memory.ids.adminUserReviews++,
+        ...reviewValues,
+      };
+      memory.adminUserReviews.push(review);
+      await persistFallbackDb();
+      return {
+        user: safeAccessUser(existing),
+        review,
+      };
+    }
+    requireConfiguredDatabase();
+  }
+
+  await db.update(users).set(updateValues as any).where(eq(users.id, input.userId));
+  await db.insert(adminUserReviews).values(reviewValues as any);
+  return {
+    user: safeAccessUser((await getUserById(input.userId)) ?? target),
+    review: reviewValues,
+  };
+}
+
+export async function createEmailLog(input: {
+  userId?: number | null;
+  email: string;
+  templateName: string;
+  status: "sent" | "skipped" | "failed";
+  error?: string | null;
+}) {
+  const now = new Date();
+  const values = {
+    userId: input.userId ?? null,
+    email: input.email,
+    templateName: input.templateName,
+    status: input.status,
+    error: input.error ?? null,
+    createdAt: now,
+  };
+
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const created = {
+        id: memory.ids.emailLogs++,
+        ...values,
+      };
+      memory.emailLogs.push(created);
+      await persistFallbackDb();
+      return created;
+    }
+    requireConfiguredDatabase();
+  }
+
+  await db.insert(emailLogs).values(values);
+  return values;
 }
 
 // ==================== USER INTEGRATIONS ====================

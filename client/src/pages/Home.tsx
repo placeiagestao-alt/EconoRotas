@@ -1,4 +1,5 @@
 import { useAuth } from "@/_core/hooks/useAuth";
+import { AccountStatusNotice } from "@/components/AccountStatusNotice";
 import { BrandLogo } from "@/components/BrandLogo";
 import DashboardLayout from "@/components/DashboardLayout";
 import { PwaInstallButton } from "@/components/PwaInstallButton";
@@ -12,6 +13,13 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getLoginUrl } from "@/const";
 import { saveAuthSessionToken } from "@/lib/authSession";
@@ -20,6 +28,7 @@ import {
   readLastRouteProgress,
 } from "@/lib/routeProgress";
 import { trpc } from "@/lib/trpc";
+import { isApprovedAccountStatus } from "@shared/accountAccess";
 import {
   ArrowRight,
   BarChart3,
@@ -120,6 +129,21 @@ const aboutItems = [
   },
 ];
 
+const userTypeOptions = [
+  { value: "motorista_autonomo", label: "Motorista autonomo" },
+  { value: "entregador_marketplace", label: "Entregador marketplace" },
+  { value: "operacao_entregas", label: "Operacao de entregas" },
+  { value: "empresa_transportes", label: "Empresa de transportes" },
+];
+
+const marketplaceOptions = [
+  { value: "shopee_spx", label: "Shopee/SPX" },
+  { value: "mercado_livre", label: "Mercado Livre" },
+  { value: "imile", label: "iMile" },
+  { value: "amazon", label: "Amazon" },
+  { value: "outro", label: "Outro" },
+];
+
 type AuthSuccessPayload =
   | {
       sessionToken?: string | null;
@@ -173,6 +197,9 @@ export default function Home() {
   const [city, setCity] = useState("");
   const [stateUf, setStateUf] = useState("");
   const [vehicleType, setVehicleType] = useState("");
+  const [userType, setUserType] = useState("");
+  const [marketplace, setMarketplace] = useState("");
+  const [averageStopsPerDay, setAverageStopsPerDay] = useState("50");
   const [acceptTerms, setAcceptTerms] = useState(false);
   const [email, setEmail] = useState(() =>
     typeof window === "undefined"
@@ -188,7 +215,10 @@ export default function Home() {
   );
 
   const routesQuery = trpc.routes.list.useQuery(undefined, {
-    enabled: isAuthenticated,
+    enabled:
+      isAuthenticated &&
+      (user?.role === "admin" ||
+        isApprovedAccountStatus((user as any)?.accountStatus)),
   });
 
   const routeSummary = useMemo(() => {
@@ -302,6 +332,9 @@ export default function Home() {
           city,
           state: stateUf,
           vehicleType,
+          userType,
+          marketplace,
+          averageStopsPerDay: Math.max(1, Number(averageStopsPerDay || 0)),
           acceptTerms,
         });
         return;
@@ -579,6 +612,63 @@ export default function Home() {
                         />
                       </div>
                       <div className="space-y-2">
+                        <Label htmlFor="userType">Tipo de usuario</Label>
+                        <Select
+                          value={userType}
+                          onValueChange={setUserType}
+                          disabled={authPending}
+                        >
+                          <SelectTrigger id="userType">
+                            <SelectValue placeholder="Selecione" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {userTypeOptions.map(option => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="marketplace">Marketplace principal</Label>
+                        <Select
+                          value={marketplace}
+                          onValueChange={setMarketplace}
+                          disabled={authPending}
+                        >
+                          <SelectTrigger id="marketplace">
+                            <SelectValue placeholder="Selecione" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {marketplaceOptions.map(option => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="averageStopsPerDay">
+                          Media de paradas por dia
+                        </Label>
+                        <Input
+                          id="averageStopsPerDay"
+                          name="averageStopsPerDay"
+                          type="number"
+                          inputMode="numeric"
+                          min={1}
+                          max={2000}
+                          value={averageStopsPerDay}
+                          onChange={event =>
+                            setAverageStopsPerDay(event.target.value)
+                          }
+                          disabled={authPending}
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
                         <Label htmlFor="city">Cidade</Label>
                         <Input
                           id="city"
@@ -692,8 +782,9 @@ export default function Home() {
                         required
                       />
                       <span>
-                        Confirmo que os dados informados sao corretos e aceito o
-                        uso operacional do EconoRota.
+                        Confirmo que os dados informados sao corretos e aceito
+                        os termos de uso e a politica de privacidade do
+                        EconoRota.
                       </span>
                     </label>
                   )}
@@ -858,6 +949,13 @@ export default function Home() {
         </div>
       </div>
     );
+  }
+
+  if (
+    user?.role !== "admin" &&
+    !isApprovedAccountStatus((user as any)?.accountStatus)
+  ) {
+    return <AccountStatusNotice />;
   }
 
   return (

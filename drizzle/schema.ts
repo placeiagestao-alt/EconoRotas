@@ -21,7 +21,26 @@ export const users = mysqlTable("users", {
   city: varchar("city", { length: 128 }),
   state: varchar("state", { length: 64 }),
   vehicleType: varchar("vehicleType", { length: 64 }),
+  userType: varchar("userType", { length: 64 }),
+  marketplace: varchar("marketplace", { length: 64 }),
+  averageStopsPerDay: int("averageStopsPerDay"),
   acceptedTermsAt: timestamp("acceptedTermsAt"),
+  accountStatus: mysqlEnum("accountStatus", [
+    "pending_review",
+    "approved",
+    "waitlist",
+    "blocked",
+    "suspended",
+  ]).default("approved").notNull(),
+  registrationIp: varchar("registrationIp", { length: 64 }),
+  registrationUserAgent: varchar("registrationUserAgent", { length: 700 }),
+  approvedAt: timestamp("approvedAt"),
+  approvedBy: int("approvedBy"),
+  waitlistedAt: timestamp("waitlistedAt"),
+  reviewedBy: int("reviewedBy"),
+  blockedAt: timestamp("blockedAt"),
+  suspendedAt: timestamp("suspendedAt"),
+  internalNotes: text("internalNotes"),
   passwordHash: text("passwordHash"),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
@@ -30,10 +49,86 @@ export const users = mysqlTable("users", {
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
 }, (table) => ({
   createdAtIdx: index("users_createdAt_idx").on(table.createdAt),
+  accountStatusIdx: index("users_accountStatus_idx").on(table.accountStatus),
+  registrationIpCreatedAtIdx: index("users_registrationIp_createdAt_idx").on(table.registrationIp, table.createdAt),
 }));
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
+
+export const adminUserReviews = mysqlTable("admin_user_reviews", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("user_id").notNull(),
+  adminUserId: int("admin_user_id"),
+  previousStatus: mysqlEnum("previous_status", [
+    "pending_review",
+    "approved",
+    "waitlist",
+    "blocked",
+    "suspended",
+  ]).notNull(),
+  newStatus: mysqlEnum("new_status", [
+    "pending_review",
+    "approved",
+    "waitlist",
+    "blocked",
+    "suspended",
+  ]).notNull(),
+  action: mysqlEnum("action", [
+    "approved",
+    "waitlist",
+    "blocked",
+    "suspended",
+  ]).notNull(),
+  note: text("note"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("cascade"),
+  adminUserIdFk: foreignKey({ columns: [table.adminUserId], foreignColumns: [users.id] }).onDelete("set null"),
+  userCreatedAtIdx: index("admin_user_reviews_user_created_at_idx").on(table.userId, table.createdAt),
+  adminUserCreatedAtIdx: index("admin_user_reviews_admin_created_at_idx").on(table.adminUserId, table.createdAt),
+}));
+
+export type AdminUserReview = typeof adminUserReviews.$inferSelect;
+export type InsertAdminUserReview = typeof adminUserReviews.$inferInsert;
+
+export const emailLogs = mysqlTable("email_logs", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("user_id"),
+  email: varchar("email", { length: 320 }).notNull(),
+  templateName: varchar("template_name", { length: 128 }).notNull(),
+  status: mysqlEnum("status", ["sent", "skipped", "failed"]).default("skipped").notNull(),
+  error: text("error"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("set null"),
+  userCreatedAtIdx: index("email_logs_user_created_at_idx").on(table.userId, table.createdAt),
+  templateCreatedAtIdx: index("email_logs_template_created_at_idx").on(table.templateName, table.createdAt),
+}));
+
+export type EmailLog = typeof emailLogs.$inferSelect;
+export type InsertEmailLog = typeof emailLogs.$inferInsert;
+
+export const betaAccessSettings = mysqlTable("beta_access_settings", {
+  id: int("id").primaryKey(),
+  maxApprovedUsers: int("max_approved_users").default(50).notNull(),
+  allowNewRegistrations: boolean("allow_new_registrations").default(true).notNull(),
+  automaticApproval: boolean("automatic_approval").default(false).notNull(),
+  sendNewUsersToWaitlist: boolean("send_new_users_to_waitlist").default(false).notNull(),
+  maintenanceMode: boolean("maintenance_mode").default(false).notNull(),
+  routesPerUserPerDay: int("routes_per_user_per_day").default(10).notNull(),
+  stopsPerRouteLimit: int("stops_per_route_limit").default(200).notNull(),
+  importsPerHourLimit: int("imports_per_hour_limit").default(5).notNull(),
+  maxFileSizeMb: int("max_file_size_mb").default(5).notNull(),
+  updatedBy: int("updated_by"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => ({
+  updatedByFk: foreignKey({ columns: [table.updatedBy], foreignColumns: [users.id] }).onDelete("set null"),
+}));
+
+export type BetaAccessSettings = typeof betaAccessSettings.$inferSelect;
+export type InsertBetaAccessSettings = typeof betaAccessSettings.$inferInsert;
 
 /**
  * Routes table - stores main route information
@@ -530,6 +625,9 @@ export const usersRelations = relations(users, ({ many }) => ({
   routeMetrics: many(routeMetrics),
   addressCorrections: many(addressCorrections),
   optimizationJobs: many(optimizationJobs),
+  accessReviews: many(adminUserReviews, { relationName: "reviewedUser" }),
+  adminAccessReviews: many(adminUserReviews, { relationName: "reviewingAdmin" }),
+  emailLogs: many(emailLogs),
 }));
 
 export const routesRelations = relations(routes, ({ one, many }) => ({
@@ -586,4 +684,28 @@ export const addressCorrectionsRelations = relations(addressCorrections, ({ one 
 export const optimizationJobsRelations = relations(optimizationJobs, ({ one }) => ({
   user: one(users, { fields: [optimizationJobs.userId], references: [users.id] }),
   route: one(routes, { fields: [optimizationJobs.routeId], references: [routes.id] }),
+}));
+
+export const adminUserReviewsRelations = relations(adminUserReviews, ({ one }) => ({
+  user: one(users, {
+    fields: [adminUserReviews.userId],
+    references: [users.id],
+    relationName: "reviewedUser",
+  }),
+  adminUser: one(users, {
+    fields: [adminUserReviews.adminUserId],
+    references: [users.id],
+    relationName: "reviewingAdmin",
+  }),
+}));
+
+export const emailLogsRelations = relations(emailLogs, ({ one }) => ({
+  user: one(users, { fields: [emailLogs.userId], references: [users.id] }),
+}));
+
+export const betaAccessSettingsRelations = relations(betaAccessSettings, ({ one }) => ({
+  updatedByUser: one(users, {
+    fields: [betaAccessSettings.updatedBy],
+    references: [users.id],
+  }),
 }));

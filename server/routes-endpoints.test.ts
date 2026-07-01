@@ -503,7 +503,7 @@ describe("Route endpoints", () => {
       caller.routes.createAndOptimize({
         name: "Rota acima do limite",
         mode: "balanced",
-        stops: makeStops(161),
+        stops: makeStops(201),
       })
     ).rejects.toThrow("limite comercial");
   });
@@ -518,7 +518,7 @@ describe("Route endpoints", () => {
     await expect(
       caller.stops.create({
         routeId: route.id,
-        stops: makeStops(161),
+        stops: makeStops(201),
       })
     ).rejects.toThrow("limite comercial");
   });

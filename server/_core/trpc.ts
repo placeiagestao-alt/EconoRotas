@@ -4,6 +4,8 @@ import superjson from "superjson";
 import type { TrpcContext } from "./context";
 import { ENV } from "./env";
 import { isAdminEmail } from "./adminAccess";
+import { isApprovedAccountStatus } from "../../shared/accountAccess";
+import * as db from "../db";
 
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
@@ -17,6 +19,26 @@ const requireUser = t.middleware(async opts => {
 
   if (!ctx.user) {
     throw new TRPCError({ code: "UNAUTHORIZED", message: UNAUTHED_ERR_MSG });
+  }
+
+  const isAdmin =
+    ctx.user.role === "admin" && isAdminEmail(ctx.user.email, ENV.adminEmails);
+
+  if (!isAdmin) {
+    const settings = await db.getBetaAccessSettings();
+    if (settings.maintenanceMode) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "O EconoRota esta em manutencao no momento.",
+      });
+    }
+
+    if (!isApprovedAccountStatus((ctx.user as any).accountStatus)) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "Seu cadastro ainda nao foi aprovado para acessar o app.",
+      });
+    }
   }
 
   return next({

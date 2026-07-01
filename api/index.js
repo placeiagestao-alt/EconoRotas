@@ -11,7 +11,7 @@ var __export = (target, all) => {
 // drizzle/schema.ts
 import { decimal, int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, json, foreignKey, uniqueIndex, index } from "drizzle-orm/mysql-core";
 import { relations } from "drizzle-orm";
-var users, routes, stops, locationCommercialCache, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, routeMetrics, osrmMatrixCache, optimizationJobs, performanceBenchmarks, adminDashboardMetrics, geocodeCache, addressCorrections, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations, routeMetricsRelations, addressCorrectionsRelations, optimizationJobsRelations;
+var users, adminUserReviews, emailLogs, betaAccessSettings, routes, stops, locationCommercialCache, routeSchedules, routeHistory, chatHistory, userIntegrations, operationalEvents, routeMetrics, osrmMatrixCache, optimizationJobs, performanceBenchmarks, adminDashboardMetrics, geocodeCache, addressCorrections, usersRelations, routesRelations, stopsRelations, routeSchedulesRelations, routeHistoryRelations, chatHistoryRelations, userIntegrationsRelations, operationalEventsRelations, routeMetricsRelations, addressCorrectionsRelations, optimizationJobsRelations, adminUserReviewsRelations, emailLogsRelations, betaAccessSettingsRelations;
 var init_schema = __esm({
   "drizzle/schema.ts"() {
     "use strict";
@@ -30,7 +30,26 @@ var init_schema = __esm({
       city: varchar("city", { length: 128 }),
       state: varchar("state", { length: 64 }),
       vehicleType: varchar("vehicleType", { length: 64 }),
+      userType: varchar("userType", { length: 64 }),
+      marketplace: varchar("marketplace", { length: 64 }),
+      averageStopsPerDay: int("averageStopsPerDay"),
       acceptedTermsAt: timestamp("acceptedTermsAt"),
+      accountStatus: mysqlEnum("accountStatus", [
+        "pending_review",
+        "approved",
+        "waitlist",
+        "blocked",
+        "suspended"
+      ]).default("approved").notNull(),
+      registrationIp: varchar("registrationIp", { length: 64 }),
+      registrationUserAgent: varchar("registrationUserAgent", { length: 700 }),
+      approvedAt: timestamp("approvedAt"),
+      approvedBy: int("approvedBy"),
+      waitlistedAt: timestamp("waitlistedAt"),
+      reviewedBy: int("reviewedBy"),
+      blockedAt: timestamp("blockedAt"),
+      suspendedAt: timestamp("suspendedAt"),
+      internalNotes: text("internalNotes"),
       passwordHash: text("passwordHash"),
       loginMethod: varchar("loginMethod", { length: 64 }),
       role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
@@ -38,7 +57,71 @@ var init_schema = __esm({
       updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
       lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull()
     }, (table) => ({
-      createdAtIdx: index("users_createdAt_idx").on(table.createdAt)
+      createdAtIdx: index("users_createdAt_idx").on(table.createdAt),
+      accountStatusIdx: index("users_accountStatus_idx").on(table.accountStatus),
+      registrationIpCreatedAtIdx: index("users_registrationIp_createdAt_idx").on(table.registrationIp, table.createdAt)
+    }));
+    adminUserReviews = mysqlTable("admin_user_reviews", {
+      id: int("id").autoincrement().primaryKey(),
+      userId: int("user_id").notNull(),
+      adminUserId: int("admin_user_id"),
+      previousStatus: mysqlEnum("previous_status", [
+        "pending_review",
+        "approved",
+        "waitlist",
+        "blocked",
+        "suspended"
+      ]).notNull(),
+      newStatus: mysqlEnum("new_status", [
+        "pending_review",
+        "approved",
+        "waitlist",
+        "blocked",
+        "suspended"
+      ]).notNull(),
+      action: mysqlEnum("action", [
+        "approved",
+        "waitlist",
+        "blocked",
+        "suspended"
+      ]).notNull(),
+      note: text("note"),
+      createdAt: timestamp("created_at").defaultNow().notNull()
+    }, (table) => ({
+      userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("cascade"),
+      adminUserIdFk: foreignKey({ columns: [table.adminUserId], foreignColumns: [users.id] }).onDelete("set null"),
+      userCreatedAtIdx: index("admin_user_reviews_user_created_at_idx").on(table.userId, table.createdAt),
+      adminUserCreatedAtIdx: index("admin_user_reviews_admin_created_at_idx").on(table.adminUserId, table.createdAt)
+    }));
+    emailLogs = mysqlTable("email_logs", {
+      id: int("id").autoincrement().primaryKey(),
+      userId: int("user_id"),
+      email: varchar("email", { length: 320 }).notNull(),
+      templateName: varchar("template_name", { length: 128 }).notNull(),
+      status: mysqlEnum("status", ["sent", "skipped", "failed"]).default("skipped").notNull(),
+      error: text("error"),
+      createdAt: timestamp("created_at").defaultNow().notNull()
+    }, (table) => ({
+      userIdFk: foreignKey({ columns: [table.userId], foreignColumns: [users.id] }).onDelete("set null"),
+      userCreatedAtIdx: index("email_logs_user_created_at_idx").on(table.userId, table.createdAt),
+      templateCreatedAtIdx: index("email_logs_template_created_at_idx").on(table.templateName, table.createdAt)
+    }));
+    betaAccessSettings = mysqlTable("beta_access_settings", {
+      id: int("id").primaryKey(),
+      maxApprovedUsers: int("max_approved_users").default(50).notNull(),
+      allowNewRegistrations: boolean("allow_new_registrations").default(true).notNull(),
+      automaticApproval: boolean("automatic_approval").default(false).notNull(),
+      sendNewUsersToWaitlist: boolean("send_new_users_to_waitlist").default(false).notNull(),
+      maintenanceMode: boolean("maintenance_mode").default(false).notNull(),
+      routesPerUserPerDay: int("routes_per_user_per_day").default(10).notNull(),
+      stopsPerRouteLimit: int("stops_per_route_limit").default(200).notNull(),
+      importsPerHourLimit: int("imports_per_hour_limit").default(5).notNull(),
+      maxFileSizeMb: int("max_file_size_mb").default(5).notNull(),
+      updatedBy: int("updated_by"),
+      createdAt: timestamp("created_at").defaultNow().notNull(),
+      updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull()
+    }, (table) => ({
+      updatedByFk: foreignKey({ columns: [table.updatedBy], foreignColumns: [users.id] }).onDelete("set null")
     }));
     routes = mysqlTable("routes", {
       id: int("id").autoincrement().primaryKey(),
@@ -439,7 +522,10 @@ var init_schema = __esm({
       operationalEvents: many(operationalEvents),
       routeMetrics: many(routeMetrics),
       addressCorrections: many(addressCorrections),
-      optimizationJobs: many(optimizationJobs)
+      optimizationJobs: many(optimizationJobs),
+      accessReviews: many(adminUserReviews, { relationName: "reviewedUser" }),
+      adminAccessReviews: many(adminUserReviews, { relationName: "reviewingAdmin" }),
+      emailLogs: many(emailLogs)
     }));
     routesRelations = relations(routes, ({ one, many }) => ({
       user: one(users, { fields: [routes.userId], references: [users.id] }),
@@ -487,6 +573,46 @@ var init_schema = __esm({
       user: one(users, { fields: [optimizationJobs.userId], references: [users.id] }),
       route: one(routes, { fields: [optimizationJobs.routeId], references: [routes.id] })
     }));
+    adminUserReviewsRelations = relations(adminUserReviews, ({ one }) => ({
+      user: one(users, {
+        fields: [adminUserReviews.userId],
+        references: [users.id],
+        relationName: "reviewedUser"
+      }),
+      adminUser: one(users, {
+        fields: [adminUserReviews.adminUserId],
+        references: [users.id],
+        relationName: "reviewingAdmin"
+      })
+    }));
+    emailLogsRelations = relations(emailLogs, ({ one }) => ({
+      user: one(users, { fields: [emailLogs.userId], references: [users.id] })
+    }));
+    betaAccessSettingsRelations = relations(betaAccessSettings, ({ one }) => ({
+      updatedByUser: one(users, {
+        fields: [betaAccessSettings.updatedBy],
+        references: [users.id]
+      })
+    }));
+  }
+});
+
+// shared/accountAccess.ts
+function isApprovedAccountStatus(status) {
+  return !status || status === ACTIVE_ACCOUNT_STATUS;
+}
+var ACCOUNT_STATUSES, ACTIVE_ACCOUNT_STATUS;
+var init_accountAccess = __esm({
+  "shared/accountAccess.ts"() {
+    "use strict";
+    ACCOUNT_STATUSES = [
+      "pending_review",
+      "approved",
+      "waitlist",
+      "blocked",
+      "suspended"
+    ];
+    ACTIVE_ACCOUNT_STATUS = "approved";
   }
 });
 
@@ -859,6 +985,9 @@ function hydrateMemory(data) {
   memory.geocodeCache = Array.isArray(data.geocodeCache) ? data.geocodeCache : [];
   memory.addressCorrections = Array.isArray(data.addressCorrections) ? data.addressCorrections : [];
   memory.locationCommercialCache = Array.isArray(data.locationCommercialCache) ? data.locationCommercialCache : [];
+  memory.adminUserReviews = Array.isArray(data.adminUserReviews) ? data.adminUserReviews : [];
+  memory.emailLogs = Array.isArray(data.emailLogs) ? data.emailLogs : [];
+  memory.betaAccessSettings = Array.isArray(data.betaAccessSettings) ? data.betaAccessSettings : [];
   memory.ids = {
     users: Number(data.ids?.users) || 1,
     routes: Number(data.ids?.routes) || 1,
@@ -873,7 +1002,10 @@ function hydrateMemory(data) {
     performanceBenchmarks: Number(data.ids?.performanceBenchmarks) || 1,
     geocodeCache: Number(data.ids?.geocodeCache) || 1,
     addressCorrections: Number(data.ids?.addressCorrections) || 1,
-    locationCommercialCache: Number(data.ids?.locationCommercialCache) || 1
+    locationCommercialCache: Number(data.ids?.locationCommercialCache) || 1,
+    adminUserReviews: Number(data.ids?.adminUserReviews) || 1,
+    emailLogs: Number(data.ids?.emailLogs) || 1,
+    betaAccessSettings: Number(data.ids?.betaAccessSettings) || 1
   };
 }
 function loadLocalDb() {
@@ -1397,7 +1529,20 @@ async function upsertUser(user) {
         city: user.city ?? existing?.city ?? null,
         state: user.state ?? existing?.state ?? null,
         vehicleType: user.vehicleType ?? existing?.vehicleType ?? null,
+        userType: user.userType ?? existing?.userType ?? null,
+        marketplace: user.marketplace ?? existing?.marketplace ?? null,
+        averageStopsPerDay: user.averageStopsPerDay ?? existing?.averageStopsPerDay ?? null,
         acceptedTermsAt: user.acceptedTermsAt ?? existing?.acceptedTermsAt ?? null,
+        accountStatus: user.accountStatus ?? existing?.accountStatus ?? (user.role === "admin" ? "approved" : "pending_review"),
+        registrationIp: user.registrationIp ?? existing?.registrationIp ?? null,
+        registrationUserAgent: user.registrationUserAgent ?? existing?.registrationUserAgent ?? null,
+        approvedAt: user.approvedAt ?? existing?.approvedAt ?? null,
+        approvedBy: user.approvedBy ?? existing?.approvedBy ?? null,
+        waitlistedAt: user.waitlistedAt ?? existing?.waitlistedAt ?? null,
+        reviewedBy: user.reviewedBy ?? existing?.reviewedBy ?? null,
+        blockedAt: user.blockedAt ?? existing?.blockedAt ?? null,
+        suspendedAt: user.suspendedAt ?? existing?.suspendedAt ?? null,
+        internalNotes: user.internalNotes ?? existing?.internalNotes ?? null,
         passwordHash: user.passwordHash ?? existing?.passwordHash ?? null,
         loginMethod: user.loginMethod ?? existing?.loginMethod ?? null,
         role: user.role ?? existing?.role ?? "user",
@@ -1431,6 +1576,11 @@ async function upsertUser(user) {
       "city",
       "state",
       "vehicleType",
+      "userType",
+      "marketplace",
+      "registrationIp",
+      "registrationUserAgent",
+      "internalNotes",
       "passwordHash",
       "loginMethod"
     ];
@@ -1449,6 +1599,40 @@ async function upsertUser(user) {
     if (user.acceptedTermsAt !== void 0) {
       values.acceptedTermsAt = user.acceptedTermsAt;
       updateSet.acceptedTermsAt = user.acceptedTermsAt;
+    }
+    if (user.averageStopsPerDay !== void 0) {
+      values.averageStopsPerDay = user.averageStopsPerDay;
+      updateSet.averageStopsPerDay = user.averageStopsPerDay;
+    }
+    if (user.accountStatus !== void 0) {
+      values.accountStatus = user.accountStatus;
+      updateSet.accountStatus = user.accountStatus;
+    } else if (user.role !== void 0) {
+      values.accountStatus = user.role === "admin" ? "approved" : "pending_review";
+    }
+    if (user.approvedAt !== void 0) {
+      values.approvedAt = user.approvedAt;
+      updateSet.approvedAt = user.approvedAt;
+    }
+    if (user.approvedBy !== void 0) {
+      values.approvedBy = user.approvedBy;
+      updateSet.approvedBy = user.approvedBy;
+    }
+    if (user.waitlistedAt !== void 0) {
+      values.waitlistedAt = user.waitlistedAt;
+      updateSet.waitlistedAt = user.waitlistedAt;
+    }
+    if (user.reviewedBy !== void 0) {
+      values.reviewedBy = user.reviewedBy;
+      updateSet.reviewedBy = user.reviewedBy;
+    }
+    if (user.blockedAt !== void 0) {
+      values.blockedAt = user.blockedAt;
+      updateSet.blockedAt = user.blockedAt;
+    }
+    if (user.suspendedAt !== void 0) {
+      values.suspendedAt = user.suspendedAt;
+      updateSet.suspendedAt = user.suspendedAt;
     }
     if (user.role !== void 0) {
       values.role = user.role;
@@ -1555,7 +1739,17 @@ async function createPasswordUser(user) {
     city: user.city ?? null,
     state: user.state ?? null,
     vehicleType: user.vehicleType ?? null,
+    userType: user.userType ?? null,
+    marketplace: user.marketplace ?? null,
+    averageStopsPerDay: user.averageStopsPerDay ?? null,
     acceptedTermsAt: user.acceptedTermsAt ?? null,
+    accountStatus: user.accountStatus ?? (user.role === "admin" ? "approved" : "pending_review"),
+    registrationIp: user.registrationIp ?? null,
+    registrationUserAgent: user.registrationUserAgent ?? null,
+    approvedAt: user.approvedAt ?? null,
+    approvedBy: user.approvedBy ?? null,
+    waitlistedAt: user.waitlistedAt ?? null,
+    reviewedBy: user.reviewedBy ?? null,
     passwordHash: user.passwordHash,
     loginMethod: "password",
     role: user.role ?? "user",
@@ -1607,6 +1801,519 @@ async function updateUserProfile(userId, profile) {
   }
   await db.update(users).set(values).where(eq(users.id, userId));
   return getUserById(userId);
+}
+function normalizeAccountStatus(value) {
+  return ACCOUNT_STATUSES.includes(value) ? value : "approved";
+}
+function normalizeDateValue(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+function normalizeBooleanValue(value, fallback) {
+  if (value === void 0 || value === null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") return value === "1" || value === "true";
+  return fallback;
+}
+function normalizePositiveInt(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
+}
+function normalizeBetaAccessSettings(row = DEFAULT_BETA_ACCESS_SETTINGS) {
+  return {
+    id: Number(row.id ?? BETA_ACCESS_SETTINGS_ID),
+    maxApprovedUsers: normalizePositiveInt(
+      row.maxApprovedUsers ?? row.max_approved_users,
+      DEFAULT_BETA_ACCESS_SETTINGS.maxApprovedUsers
+    ),
+    allowNewRegistrations: normalizeBooleanValue(
+      row.allowNewRegistrations ?? row.allow_new_registrations,
+      DEFAULT_BETA_ACCESS_SETTINGS.allowNewRegistrations
+    ),
+    automaticApproval: normalizeBooleanValue(
+      row.automaticApproval ?? row.automatic_approval,
+      DEFAULT_BETA_ACCESS_SETTINGS.automaticApproval
+    ),
+    sendNewUsersToWaitlist: normalizeBooleanValue(
+      row.sendNewUsersToWaitlist ?? row.send_new_users_to_waitlist,
+      DEFAULT_BETA_ACCESS_SETTINGS.sendNewUsersToWaitlist
+    ),
+    maintenanceMode: normalizeBooleanValue(
+      row.maintenanceMode ?? row.maintenance_mode,
+      DEFAULT_BETA_ACCESS_SETTINGS.maintenanceMode
+    ),
+    routesPerUserPerDay: normalizePositiveInt(
+      row.routesPerUserPerDay ?? row.routes_per_user_per_day,
+      DEFAULT_BETA_ACCESS_SETTINGS.routesPerUserPerDay
+    ),
+    stopsPerRouteLimit: normalizePositiveInt(
+      row.stopsPerRouteLimit ?? row.stops_per_route_limit,
+      DEFAULT_BETA_ACCESS_SETTINGS.stopsPerRouteLimit
+    ),
+    importsPerHourLimit: normalizePositiveInt(
+      row.importsPerHourLimit ?? row.imports_per_hour_limit,
+      DEFAULT_BETA_ACCESS_SETTINGS.importsPerHourLimit
+    ),
+    maxFileSizeMb: normalizePositiveInt(
+      row.maxFileSizeMb ?? row.max_file_size_mb,
+      DEFAULT_BETA_ACCESS_SETTINGS.maxFileSizeMb
+    ),
+    updatedBy: row.updatedBy ?? row.updated_by ?? null,
+    createdAt: normalizeDateValue(row.createdAt ?? row.created_at),
+    updatedAt: normalizeDateValue(row.updatedAt ?? row.updated_at)
+  };
+}
+function getDefaultBetaAccessSettings() {
+  return normalizeBetaAccessSettings({
+    ...DEFAULT_BETA_ACCESS_SETTINGS,
+    createdAt: /* @__PURE__ */ new Date(),
+    updatedAt: /* @__PURE__ */ new Date()
+  });
+}
+async function getBetaAccessSettings() {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.betaAccessSettings[0];
+      if (existing) return normalizeBetaAccessSettings(existing);
+      const settings = getDefaultBetaAccessSettings();
+      memory.betaAccessSettings = [settings];
+      await persistFallbackDb();
+      return settings;
+    }
+    requireConfiguredDatabase();
+  }
+  const result = await db.select().from(betaAccessSettings).where(eq(betaAccessSettings.id, BETA_ACCESS_SETTINGS_ID)).limit(1);
+  if (result[0]) return normalizeBetaAccessSettings(result[0]);
+  const defaults = getDefaultBetaAccessSettings();
+  await db.insert(betaAccessSettings).values({
+    id: BETA_ACCESS_SETTINGS_ID,
+    maxApprovedUsers: defaults.maxApprovedUsers,
+    allowNewRegistrations: defaults.allowNewRegistrations,
+    automaticApproval: defaults.automaticApproval,
+    sendNewUsersToWaitlist: defaults.sendNewUsersToWaitlist,
+    maintenanceMode: defaults.maintenanceMode,
+    routesPerUserPerDay: defaults.routesPerUserPerDay,
+    stopsPerRouteLimit: defaults.stopsPerRouteLimit,
+    importsPerHourLimit: defaults.importsPerHourLimit,
+    maxFileSizeMb: defaults.maxFileSizeMb,
+    updatedBy: null
+  });
+  return defaults;
+}
+async function updateBetaAccessSettings(adminUserId, input) {
+  const now = /* @__PURE__ */ new Date();
+  const values = {
+    maxApprovedUsers: normalizePositiveInt(input.maxApprovedUsers, 50),
+    allowNewRegistrations: Boolean(input.allowNewRegistrations),
+    automaticApproval: Boolean(input.automaticApproval),
+    sendNewUsersToWaitlist: Boolean(input.sendNewUsersToWaitlist),
+    maintenanceMode: Boolean(input.maintenanceMode),
+    routesPerUserPerDay: normalizePositiveInt(input.routesPerUserPerDay, 10),
+    stopsPerRouteLimit: normalizePositiveInt(input.stopsPerRouteLimit, 200),
+    importsPerHourLimit: normalizePositiveInt(input.importsPerHourLimit, 5),
+    maxFileSizeMb: normalizePositiveInt(input.maxFileSizeMb, 5),
+    updatedBy: adminUserId,
+    updatedAt: now
+  };
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.betaAccessSettings[0];
+      memory.betaAccessSettings = [
+        {
+          ...existing ?? getDefaultBetaAccessSettings(),
+          ...values,
+          id: BETA_ACCESS_SETTINGS_ID,
+          createdAt: existing?.createdAt ?? now
+        }
+      ];
+      await persistFallbackDb();
+      return normalizeBetaAccessSettings(memory.betaAccessSettings[0]);
+    }
+    requireConfiguredDatabase();
+  }
+  await db.insert(betaAccessSettings).values({
+    id: BETA_ACCESS_SETTINGS_ID,
+    ...values,
+    createdAt: now
+  }).onDuplicateKeyUpdate({
+    set: values
+  });
+  return getBetaAccessSettings();
+}
+async function countApprovedUsers() {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.users.filter(
+        (user) => normalizeAccountStatus(user.accountStatus) === "approved"
+      ).length;
+    }
+    requireConfiguredDatabase();
+  }
+  const result = await db.select({ count: sql`COUNT(*)` }).from(users).where(eq(users.accountStatus, "approved"));
+  return Number(result[0]?.count || 0);
+}
+async function countUsersRegisteredFromIpSince(ip, since) {
+  const normalizedIp = ip.trim();
+  if (!normalizedIp) return 0;
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.users.filter(
+        (user) => user.registrationIp === normalizedIp && new Date(user.createdAt).getTime() >= since.getTime()
+      ).length;
+    }
+    requireConfiguredDatabase();
+  }
+  const result = await db.select({ count: sql`COUNT(*)` }).from(users).where(
+    and(
+      eq(users.registrationIp, normalizedIp),
+      gte(users.createdAt, since)
+    )
+  );
+  return Number(result[0]?.count || 0);
+}
+async function countUserRoutesSince(userId, since) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      return memory.routes.filter(
+        (route) => route.userId === userId && new Date(route.createdAt).getTime() >= since.getTime()
+      ).length;
+    }
+    requireConfiguredDatabase();
+  }
+  const result = await db.select({ count: sql`COUNT(*)` }).from(routes).where(and(eq(routes.userId, userId), gte(routes.createdAt, since)));
+  return Number(result[0]?.count || 0);
+}
+function buildAccessSummary(rows, settings) {
+  const today = /* @__PURE__ */ new Date();
+  today.setHours(0, 0, 0, 0);
+  const approvedUsers = rows.filter(
+    (row) => normalizeAccountStatus(row.accountStatus) === "approved"
+  );
+  return {
+    pendingTotal: rows.filter(
+      (row) => normalizeAccountStatus(row.accountStatus) === "pending_review"
+    ).length,
+    approvedToday: rows.filter(
+      (row) => normalizeAccountStatus(row.accountStatus) === "approved" && row.approvedAt && new Date(row.approvedAt).getTime() >= today.getTime()
+    ).length,
+    waitlistTotal: rows.filter(
+      (row) => normalizeAccountStatus(row.accountStatus) === "waitlist"
+    ).length,
+    blockedTotal: rows.filter(
+      (row) => normalizeAccountStatus(row.accountStatus) === "blocked"
+    ).length,
+    suspendedTotal: rows.filter(
+      (row) => normalizeAccountStatus(row.accountStatus) === "suspended"
+    ).length,
+    approvedUsers: approvedUsers.length,
+    maxApprovedUsers: settings.maxApprovedUsers
+  };
+}
+function safeAccessUser(row) {
+  const { passwordHash: _passwordHash, ...safe } = row;
+  return {
+    ...safe,
+    accountStatus: normalizeAccountStatus(row.accountStatus)
+  };
+}
+async function getAccessRequestsDashboard(input = {}) {
+  const settings = await getBetaAccessSettings();
+  const status = input.status ?? "pending_review";
+  const safePage = Math.max(1, Number(input.page || 1));
+  const safeLimit = Math.min(100, Math.max(1, Number(input.limit || 30)));
+  const offset = (safePage - 1) * safeLimit;
+  const search = input.search?.trim().toLowerCase() ?? "";
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const allRows = [...memory.users].map(safeAccessUser);
+      const filtered = allRows.filter((user) => {
+        const matchesStatus = status === "all" || normalizeAccountStatus(user.accountStatus) === status;
+        const searchable = [
+          user.name,
+          user.email,
+          user.phone,
+          user.city,
+          user.state,
+          user.userType,
+          user.marketplace
+        ].filter(Boolean).join(" ").toLowerCase();
+        return matchesStatus && (!search || searchable.includes(search));
+      });
+      return {
+        page: safePage,
+        limit: safeLimit,
+        hasMore: filtered.length > offset + safeLimit,
+        total: filtered.length,
+        summary: buildAccessSummary(allRows, settings),
+        settings,
+        users: sortByDateDesc(filtered, "createdAt").slice(offset, offset + safeLimit)
+      };
+    }
+    requireConfiguredDatabase();
+  }
+  const where = [];
+  const params = [];
+  if (status !== "all") {
+    where.push("u.accountStatus = ?");
+    params.push(status);
+  }
+  if (search) {
+    where.push("(LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(u.email, '')) LIKE ? OR LOWER(COALESCE(u.phone, '')) LIKE ? OR LOWER(COALESCE(u.city, '')) LIKE ? OR LOWER(COALESCE(u.state, '')) LIKE ?)");
+    const like = `%${search}%`;
+    params.push(like, like, like, like, like);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const [countRows, rows, summaryRows] = await Promise.all([
+    _pool.query(
+      `SELECT COUNT(*) AS total FROM users u ${whereSql}`,
+      params
+    ).then(([result]) => result),
+    _pool.query(
+      `
+        SELECT
+          u.id,
+          u.openId,
+          u.name,
+          u.email,
+          u.phone,
+          u.companyName,
+          u.city,
+          u.state,
+          u.vehicleType,
+          u.userType,
+          u.marketplace,
+          u.averageStopsPerDay,
+          u.accountStatus,
+          u.registrationIp,
+          u.registrationUserAgent,
+          u.approvedAt,
+          u.approvedBy,
+          u.waitlistedAt,
+          u.reviewedBy,
+          u.blockedAt,
+          u.suspendedAt,
+          u.internalNotes,
+          u.role,
+          u.createdAt,
+          u.updatedAt,
+          u.lastSignedIn
+        FROM users u
+        ${whereSql}
+        ORDER BY u.createdAt DESC
+        LIMIT ?
+        OFFSET ?
+      `,
+      [...params, safeLimit + 1, offset]
+    ).then(([result]) => result),
+    _pool.query(
+      `
+        SELECT
+          accountStatus,
+          COUNT(*) AS total,
+          SUM(CASE WHEN accountStatus = 'approved' AND approvedAt >= CURRENT_DATE() THEN 1 ELSE 0 END) AS approvedToday
+        FROM users
+        GROUP BY accountStatus
+      `
+    ).then(([result]) => result)
+  ]);
+  const summaryInput = summaryRows.flatMap((row) => {
+    const total = Number(row.total || 0);
+    return Array.from({ length: total }, () => ({
+      accountStatus: row.accountStatus,
+      approvedAt: row.accountStatus === "approved" && Number(row.approvedToday || 0) > 0 ? /* @__PURE__ */ new Date() : null
+    }));
+  });
+  const approvedToday = summaryRows.reduce(
+    (sum, row) => sum + Number(row.approvedToday || 0),
+    0
+  );
+  const summary = {
+    ...buildAccessSummary(summaryInput, settings),
+    approvedToday
+  };
+  return {
+    page: safePage,
+    limit: safeLimit,
+    total: Number(countRows[0]?.total || 0),
+    hasMore: rows.length > safeLimit,
+    summary,
+    settings,
+    users: rows.slice(0, safeLimit).map(safeAccessUser)
+  };
+}
+async function getAccessRequestDetails(userId) {
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const user = memory.users.find((item) => Number(item.id) === userId);
+      if (!user) return null;
+      const reviews = sortByDateDesc(
+        memory.adminUserReviews.filter((review) => Number(review.userId) === userId).map((review) => ({
+          ...review,
+          adminName: memory.users.find((item) => item.id === review.adminUserId)?.name ?? null,
+          adminEmail: memory.users.find((item) => item.id === review.adminUserId)?.email ?? null
+        })),
+        "createdAt"
+      );
+      const emails = sortByDateDesc(
+        memory.emailLogs.filter((log) => Number(log.userId) === userId),
+        "createdAt"
+      );
+      return {
+        user: safeAccessUser(user),
+        reviews,
+        emailLogs: emails
+      };
+    }
+    requireConfiguredDatabase();
+  }
+  const [userRows, reviewRows, emailRows] = await Promise.all([
+    db.select().from(users).where(eq(users.id, userId)).limit(1),
+    _pool.query(
+      `
+        SELECT
+          r.id,
+          r.user_id AS userId,
+          r.admin_user_id AS adminUserId,
+          r.previous_status AS previousStatus,
+          r.new_status AS newStatus,
+          r.action,
+          r.note,
+          r.created_at AS createdAt,
+          a.name AS adminName,
+          a.email AS adminEmail
+        FROM admin_user_reviews r
+        LEFT JOIN users a ON a.id = r.admin_user_id
+        WHERE r.user_id = ?
+        ORDER BY r.created_at DESC
+      `,
+      [userId]
+    ).then(([rows]) => rows),
+    _pool.query(
+      `
+        SELECT
+          id,
+          user_id AS userId,
+          email,
+          template_name AS templateName,
+          status,
+          error,
+          created_at AS createdAt
+        FROM email_logs
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 20
+      `,
+      [userId]
+    ).then(([rows]) => rows)
+  ]);
+  if (!userRows[0]) return null;
+  return {
+    user: safeAccessUser(userRows[0]),
+    reviews: reviewRows,
+    emailLogs: emailRows
+  };
+}
+function reviewActionToStatus(action) {
+  if (action === "approved") return "approved";
+  if (action === "waitlist") return "waitlist";
+  if (action === "blocked") return "blocked";
+  return "suspended";
+}
+async function reviewUserAccess(input) {
+  const target = await getUserById(input.userId);
+  if (!target) return null;
+  const previousStatus = normalizeAccountStatus(target.accountStatus);
+  const newStatus = reviewActionToStatus(input.action);
+  const now = /* @__PURE__ */ new Date();
+  const note = input.note?.trim() || null;
+  const updateValues = {
+    accountStatus: newStatus,
+    reviewedBy: input.adminUserId,
+    updatedAt: now
+  };
+  if (note) updateValues.internalNotes = note;
+  if (newStatus === "approved") {
+    updateValues.approvedAt = now;
+    updateValues.approvedBy = input.adminUserId;
+  }
+  if (newStatus === "waitlist") {
+    updateValues.waitlistedAt = now;
+  }
+  if (newStatus === "blocked") {
+    updateValues.blockedAt = now;
+  }
+  if (newStatus === "suspended") {
+    updateValues.suspendedAt = now;
+  }
+  const reviewValues = {
+    userId: input.userId,
+    adminUserId: input.adminUserId,
+    previousStatus,
+    newStatus,
+    action: input.action,
+    note,
+    createdAt: now
+  };
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const existing = memory.users.find((item) => Number(item.id) === input.userId);
+      if (!existing) return null;
+      Object.assign(existing, updateValues);
+      const review = {
+        id: memory.ids.adminUserReviews++,
+        ...reviewValues
+      };
+      memory.adminUserReviews.push(review);
+      await persistFallbackDb();
+      return {
+        user: safeAccessUser(existing),
+        review
+      };
+    }
+    requireConfiguredDatabase();
+  }
+  await db.update(users).set(updateValues).where(eq(users.id, input.userId));
+  await db.insert(adminUserReviews).values(reviewValues);
+  return {
+    user: safeAccessUser(await getUserById(input.userId) ?? target),
+    review: reviewValues
+  };
+}
+async function createEmailLog(input) {
+  const now = /* @__PURE__ */ new Date();
+  const values = {
+    userId: input.userId ?? null,
+    email: input.email,
+    templateName: input.templateName,
+    status: input.status,
+    error: input.error ?? null,
+    createdAt: now
+  };
+  const db = await getDb();
+  if (!db) {
+    if (await shouldUseMemoryDb()) {
+      const created = {
+        id: memory.ids.emailLogs++,
+        ...values
+      };
+      memory.emailLogs.push(created);
+      await persistFallbackDb();
+      return created;
+    }
+    requireConfiguredDatabase();
+  }
+  await db.insert(emailLogs).values(values);
+  return values;
 }
 async function getUserIntegration(userId, provider) {
   const db = await getDb();
@@ -5074,11 +5781,12 @@ async function getRouteStatsOverTime(userId, days = 30) {
     and(eq(routeHistory.userId, userId), sql`executedDate >= ${startDate}`)
   ).groupBy(sql`DATE(executedDate)`).orderBy(asc(sql`DATE(executedDate)`));
 }
-var _db, _pool, _dbConnectPromise, _lastDbConnectAttempt, _lastDbConnectionError, _schemaHealthCache, DB_CONNECT_RETRY_MS, DB_SCHEMA_HEALTH_CACHE_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, FALLBACK_DB_KEY, FALLBACK_KV_PREFIX, localDbLoaded, remoteDbLoaded, remoteDbLoadPromise, lastRemoteFallbackError, memory, REQUIRED_SCHEMA_COLUMNS, QUEUE_INTEGRITY_EVENT_TYPES, DISASTER_CRITICAL_TABLES, DISASTER_EVENT_TYPES, PERFORMANCE_BENCHMARK_TARGETS, EXECUTIVE_OBSERVABILITY_EVENT_TYPES;
+var _db, _pool, _dbConnectPromise, _lastDbConnectAttempt, _lastDbConnectionError, _schemaHealthCache, DB_CONNECT_RETRY_MS, DB_SCHEMA_HEALTH_CACHE_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, FALLBACK_DB_KEY, FALLBACK_KV_PREFIX, localDbLoaded, remoteDbLoaded, remoteDbLoadPromise, lastRemoteFallbackError, memory, REQUIRED_SCHEMA_COLUMNS, BETA_ACCESS_SETTINGS_ID, DEFAULT_BETA_ACCESS_SETTINGS, QUEUE_INTEGRITY_EVENT_TYPES, DISASTER_CRITICAL_TABLES, DISASTER_EVENT_TYPES, PERFORMANCE_BENCHMARK_TARGETS, EXECUTIVE_OBSERVABILITY_EVENT_TYPES;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
     init_schema();
+    init_accountAccess();
     init_env();
     init_geocodingConfidence();
     init_stopMetadata();
@@ -5113,6 +5821,9 @@ var init_db = __esm({
       geocodeCache: [],
       addressCorrections: [],
       locationCommercialCache: [],
+      adminUserReviews: [],
+      emailLogs: [],
+      betaAccessSettings: [],
       ids: {
         users: 1,
         routes: 1,
@@ -5127,7 +5838,10 @@ var init_db = __esm({
         performanceBenchmarks: 1,
         geocodeCache: 1,
         addressCorrections: 1,
-        locationCommercialCache: 1
+        locationCommercialCache: 1,
+        adminUserReviews: 1,
+        emailLogs: 1,
+        betaAccessSettings: 1
       }
     };
     REQUIRED_SCHEMA_COLUMNS = [
@@ -5136,6 +5850,18 @@ var init_db = __esm({
       ["users", "email"],
       ["users", "role"],
       ["users", "phone"],
+      ["users", "accountStatus"],
+      ["users", "userType"],
+      ["users", "marketplace"],
+      ["users", "averageStopsPerDay"],
+      ["users", "registrationIp"],
+      ["users", "registrationUserAgent"],
+      ["users", "approvedAt"],
+      ["users", "approvedBy"],
+      ["users", "waitlistedAt"],
+      ["users", "reviewedBy"],
+      ["users", "blockedAt"],
+      ["users", "suspendedAt"],
       ["routes", "id"],
       ["routes", "userId"],
       ["stops", "routeId"],
@@ -5227,8 +5953,41 @@ var init_db = __esm({
       ["address_corrections", "address_hash"],
       ["address_corrections", "original_address"],
       ["address_corrections", "corrected_address"],
-      ["address_corrections", "user_id"]
+      ["address_corrections", "user_id"],
+      ["admin_user_reviews", "user_id"],
+      ["admin_user_reviews", "admin_user_id"],
+      ["admin_user_reviews", "previous_status"],
+      ["admin_user_reviews", "new_status"],
+      ["admin_user_reviews", "action"],
+      ["email_logs", "user_id"],
+      ["email_logs", "template_name"],
+      ["email_logs", "status"],
+      ["beta_access_settings", "max_approved_users"],
+      ["beta_access_settings", "allow_new_registrations"],
+      ["beta_access_settings", "automatic_approval"],
+      ["beta_access_settings", "send_new_users_to_waitlist"],
+      ["beta_access_settings", "maintenance_mode"],
+      ["beta_access_settings", "routes_per_user_per_day"],
+      ["beta_access_settings", "stops_per_route_limit"],
+      ["beta_access_settings", "imports_per_hour_limit"],
+      ["beta_access_settings", "max_file_size_mb"]
     ];
+    BETA_ACCESS_SETTINGS_ID = 1;
+    DEFAULT_BETA_ACCESS_SETTINGS = {
+      id: BETA_ACCESS_SETTINGS_ID,
+      maxApprovedUsers: 50,
+      allowNewRegistrations: true,
+      automaticApproval: false,
+      sendNewUsersToWaitlist: false,
+      maintenanceMode: false,
+      routesPerUserPerDay: 10,
+      stopsPerRouteLimit: 200,
+      importsPerHourLimit: 5,
+      maxFileSizeMb: 5,
+      updatedBy: null,
+      createdAt: /* @__PURE__ */ new Date(0),
+      updatedAt: /* @__PURE__ */ new Date(0)
+    };
     QUEUE_INTEGRITY_EVENT_TYPES = [
       "duplicate_job_detected",
       "worker_crash_recovered",
@@ -6767,6 +7526,8 @@ async function notifyOwner(payload) {
 init_env();
 import { initTRPC, TRPCError as TRPCError2 } from "@trpc/server";
 import superjson from "superjson";
+init_accountAccess();
+init_db();
 var t = initTRPC.context().create({
   transformer: superjson
 });
@@ -6776,6 +7537,22 @@ var requireUser = t.middleware(async (opts) => {
   const { ctx, next } = opts;
   if (!ctx.user) {
     throw new TRPCError2({ code: "UNAUTHORIZED", message: UNAUTHED_ERR_MSG });
+  }
+  const isAdmin = ctx.user.role === "admin" && isAdminEmail(ctx.user.email, ENV.adminEmails);
+  if (!isAdmin) {
+    const settings = await getBetaAccessSettings();
+    if (settings.maintenanceMode) {
+      throw new TRPCError2({
+        code: "FORBIDDEN",
+        message: "O EconoRota esta em manutencao no momento."
+      });
+    }
+    if (!isApprovedAccountStatus(ctx.user.accountStatus)) {
+      throw new TRPCError2({
+        code: "FORBIDDEN",
+        message: "Seu cadastro ainda nao foi aprovado para acessar o app."
+      });
+    }
   }
   return next({
     ctx: {
@@ -10073,6 +10850,134 @@ async function getMultiVehicleReadinessDashboard() {
   };
 }
 
+// server/email.ts
+init_db();
+var APPROVAL_TEMPLATE = {
+  subject: "Seu acesso ao EconoRotas foi aprovado",
+  body: (name) => `Ola, ${name}.
+
+Parabens! Seu acesso ao EconoRotas foi aprovado.
+
+Agora voce ja pode entrar na plataforma, importar suas entregas e organizar suas rotas com mais controle e praticidade.
+
+Estamos liberando os acessos por etapas para garantir estabilidade, suporte e uma boa experiencia para todos os usuarios.
+
+Acesse sua conta pelo portal oficial do EconoRotas e comece a usar.
+
+Bem-vindo ao EconoRotas.
+
+Equipe EconoRotas`
+};
+var WAITLIST_TEMPLATE = {
+  subject: "Voce entrou na lista de espera do EconoRotas",
+  body: (name) => `Ola, ${name}.
+
+Recebemos seu cadastro no EconoRotas.
+
+Neste momento, estamos liberando o acesso aos poucos para garantir estabilidade, suporte e uma boa experiencia durante a fase de testes.
+
+Por isso, seu cadastro entrou na nossa lista de espera para novos testadores.
+
+Assim que uma nova etapa de liberacao estiver disponivel, voce podera ser chamado para testar o EconoRotas.
+
+Obrigado pelo interesse.
+
+Equipe EconoRotas`
+};
+function getAccessTemplate(templateName) {
+  return templateName === "access_approved" ? APPROVAL_TEMPLATE : WAITLIST_TEMPLATE;
+}
+function getEmailFrom() {
+  return process.env.EMAIL_FROM?.trim() || process.env.RESEND_FROM_EMAIL?.trim() || "EconoRotas <no-reply@econorotas.com>";
+}
+async function sendEmailMessage(input) {
+  const resendApiKey = process.env.RESEND_API_KEY?.trim();
+  const webhookUrl = process.env.EMAIL_WEBHOOK_URL?.trim();
+  if (resendApiKey) {
+    try {
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${resendApiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          from: getEmailFrom(),
+          to: input.to,
+          subject: input.subject,
+          text: input.text
+        })
+      });
+      if (!response.ok) {
+        const payload = await response.text().catch(() => "");
+        return {
+          status: "failed",
+          error: `Resend ${response.status}: ${payload || response.statusText}`
+        };
+      }
+      return { status: "sent", error: null };
+    } catch (error) {
+      return {
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+  if (webhookUrl) {
+    try {
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from: getEmailFrom(),
+          ...input
+        })
+      });
+      if (!response.ok) {
+        return {
+          status: "failed",
+          error: `EMAIL_WEBHOOK_URL ${response.status}: ${response.statusText}`
+        };
+      }
+      return { status: "sent", error: null };
+    } catch (error) {
+      return {
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+  return {
+    status: "skipped",
+    error: "Nenhum provedor de e-mail configurado."
+  };
+}
+async function sendAccessReviewEmail(user, templateName) {
+  if (!user.email) {
+    return createEmailLog({
+      userId: user.id,
+      email: "",
+      templateName,
+      status: "skipped",
+      error: "Usuario sem e-mail."
+    });
+  }
+  const template = getAccessTemplate(templateName);
+  const name = user.name?.trim() || "motorista";
+  const result = await sendEmailMessage({
+    to: user.email,
+    subject: template.subject,
+    text: template.body(name)
+  });
+  return createEmailLog({
+    userId: user.id,
+    email: user.email,
+    templateName,
+    status: result.status,
+    error: result.error ?? null
+  });
+}
+
 // server/routers.ts
 var IMILE_PROVIDER = "imile_rider_delivery";
 var BLOCKING_AUDIT_ISSUE_TYPES = /* @__PURE__ */ new Set([
@@ -11934,11 +12839,15 @@ var credentialsSchema = z2.object({
 });
 var registrationSchema = credentialsSchema.extend({
   name: z2.string().min(2, "Informe seu nome."),
-  phone: z2.string().min(8, "Informe um telefone valido.").max(32),
+  phone: z2.string().min(10, "Informe um WhatsApp valido.").max(32),
   companyName: z2.string().max(255).optional(),
   city: z2.string().min(2, "Informe sua cidade.").max(128),
   state: z2.string().min(2, "Informe o estado.").max(64),
   vehicleType: z2.string().min(2, "Informe o tipo de veiculo.").max(64),
+  userType: z2.string().min(2, "Informe o tipo de usuario.").max(64),
+  marketplace: z2.string().min(2, "Informe o marketplace principal.").max(64),
+  averageStopsPerDay: z2.number().int().min(1).max(2e3),
+  turnstileToken: z2.string().max(4096).optional(),
   acceptTerms: z2.boolean().refine((value) => value === true, {
     message: "Aceite os termos para criar a conta."
   })
@@ -11971,6 +12880,31 @@ var operationalEventSchema = z2.object({
   userAgent: z2.string().max(700).optional(),
   appVersion: z2.string().max(64).optional(),
   metadata: z2.record(z2.string(), z2.unknown()).optional()
+});
+var accessStatusFilterSchema = z2.enum([
+  "pending_review",
+  "approved",
+  "waitlist",
+  "blocked",
+  "suspended",
+  "all"
+]);
+var accessReviewActionSchema = z2.enum([
+  "approved",
+  "waitlist",
+  "blocked",
+  "suspended"
+]);
+var betaAccessSettingsSchema = z2.object({
+  maxApprovedUsers: z2.number().int().min(1).max(1e5),
+  allowNewRegistrations: z2.boolean(),
+  automaticApproval: z2.boolean(),
+  sendNewUsersToWaitlist: z2.boolean(),
+  maintenanceMode: z2.boolean(),
+  routesPerUserPerDay: z2.number().int().min(1).max(1e4),
+  stopsPerRouteLimit: z2.number().int().min(2).max(5e3),
+  importsPerHourLimit: z2.number().int().min(1).max(1e4),
+  maxFileSizeMb: z2.number().int().min(1).max(500)
 });
 var routeCreateSchema = z2.object({
   name: z2.string().min(1),
@@ -12023,6 +12957,58 @@ var stopUpdateSchema = z2.object({
   geocodingMethod: geocodingMethodSchema.optional(),
   geocodingSuspect: z2.boolean().optional()
 });
+var MAX_REGISTRATIONS_PER_IP_24H = 3;
+function normalizeWhatsApp(value) {
+  return value.replace(/[^\d+]/g, "").trim();
+}
+function assertValidWhatsApp(value) {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length < 10 || digits.length > 15) {
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: "Informe um WhatsApp valido com DDD."
+    });
+  }
+}
+function getRequestIp(ctx) {
+  const forwardedFor = ctx.req?.headers?.["x-forwarded-for"];
+  const raw = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor?.split(",")[0];
+  return (raw?.trim() || ctx.req?.ip || ctx.req?.socket?.remoteAddress || "").slice(0, 64);
+}
+function getRequestUserAgent(ctx) {
+  const value = ctx.req?.headers?.["user-agent"];
+  const raw = Array.isArray(value) ? value[0] : value;
+  return (raw || "").slice(0, 700);
+}
+async function verifyTurnstileIfConfigured(token, ip) {
+  const secret = process.env.TURNSTILE_SECRET_KEY?.trim();
+  if (!secret) return;
+  if (!token) {
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: "Confirme a verificacao de seguranca para criar a conta."
+    });
+  }
+  const response = await fetch(
+    "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        secret,
+        response: token,
+        ...ip ? { remoteip: ip } : {}
+      })
+    }
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success !== true) {
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: "Nao foi possivel validar a verificacao de seguranca."
+    });
+  }
+}
 function sanitizeUser(user) {
   if (!user) return null;
   const { passwordHash: _passwordHash, ...safeUser } = user;
@@ -12070,27 +13056,74 @@ async function recordRouteAuditEvent(userId, routeId, audit, source) {
     }
   });
 }
-function routeStopLimitMessage(stopCount) {
-  return `Esta rota tem ${stopCount} paradas e excede o limite comercial atual de testes de ${ENV.maxRouteStops} paradas por rota. Volumes maiores ser\xE3o liberados gradualmente conforme a evolu\xE7\xE3o da infraestrutura. Divida a tabela em rotas menores.`;
+function routeStopLimitMessage(stopCount, limit) {
+  return `Esta rota tem ${stopCount} paradas e excede o limite comercial atual de testes de ${limit} paradas por rota. Volumes maiores serao liberados gradualmente conforme a evolucao da infraestrutura. Divida a tabela em rotas menores.`;
 }
 async function assertRouteStopLimit(userId, stopCount, source, routeId) {
-  if (stopCount <= ENV.maxRouteStops) return;
+  const settings = await getBetaAccessSettings();
+  const maxStops = settings.stopsPerRouteLimit || ENV.maxRouteStops;
+  if (stopCount <= maxStops) return;
   await recordOperationalEvent(userId, {
     type: "route_stop_limit_exceeded",
     severity: "warning",
     source,
-    title: `Limite de ${ENV.maxRouteStops} paradas excedido`,
+    title: `Limite de ${maxStops} paradas excedido`,
     routeId,
-    message: routeStopLimitMessage(stopCount),
+    message: routeStopLimitMessage(stopCount, maxStops),
     metadata: {
       stopCount,
-      maxRouteStops: ENV.maxRouteStops
+      maxRouteStops: maxStops
     }
   });
   throw new TRPCError3({
     code: "BAD_REQUEST",
-    message: routeStopLimitMessage(stopCount)
+    message: routeStopLimitMessage(stopCount, maxStops)
   });
+}
+async function assertUserRouteCreationLimit(userId, source) {
+  const settings = await getBetaAccessSettings();
+  const dayStart = /* @__PURE__ */ new Date();
+  dayStart.setHours(0, 0, 0, 0);
+  const routesToday = await countUserRoutesSince(userId, dayStart);
+  if (routesToday >= settings.routesPerUserPerDay) {
+    await recordOperationalEvent(userId, {
+      type: "user_route_daily_limit_exceeded",
+      severity: "warning",
+      source,
+      title: "Limite diario de rotas atingido",
+      message: `Limite atual: ${settings.routesPerUserPerDay} rota(s) por dia.`,
+      metadata: {
+        routesToday,
+        routesPerUserPerDay: settings.routesPerUserPerDay
+      }
+    });
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: `Limite diario de ${settings.routesPerUserPerDay} rota(s) atingido para este usuario.`
+    });
+  }
+}
+async function assertUserImportHourlyLimit(userId, source) {
+  const settings = await getBetaAccessSettings();
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1e3);
+  const importsLastHour = await countUserRoutesSince(userId, oneHourAgo);
+  if (importsLastHour >= settings.importsPerHourLimit) {
+    await recordOperationalEvent(userId, {
+      type: "user_import_hourly_limit_exceeded",
+      severity: "warning",
+      source,
+      title: "Limite de importacoes por hora atingido",
+      message: `Limite atual: ${settings.importsPerHourLimit} importacao(oes) por hora.`,
+      metadata: {
+        importsLastHour,
+        importsPerHourLimit: settings.importsPerHourLimit
+      }
+    });
+    throw new TRPCError3({
+      code: "BAD_REQUEST",
+      message: `Limite de ${settings.importsPerHourLimit} importacao(oes) por hora atingido.`
+    });
+  }
 }
 async function setPasswordSession(ctx, openId, name, email) {
   const sessionToken = await sdk.createSessionToken(openId, {
@@ -12117,6 +13150,17 @@ var appRouter = router({
         );
       }
       return sanitizeUser(opts.ctx.user);
+    }),
+    betaLimits: publicProcedure.query(async () => {
+      const settings = await getBetaAccessSettings();
+      return {
+        allowNewRegistrations: settings.allowNewRegistrations,
+        maintenanceMode: settings.maintenanceMode,
+        routesPerUserPerDay: settings.routesPerUserPerDay,
+        stopsPerRouteLimit: settings.stopsPerRouteLimit,
+        importsPerHourLimit: settings.importsPerHourLimit,
+        maxFileSizeMb: settings.maxFileSizeMb
+      };
     }),
     login: publicProcedure.input(credentialsSchema).mutation(async ({ ctx, input }) => {
       const email = normalizeEmail2(input.email);
@@ -12154,6 +13198,28 @@ var appRouter = router({
     }),
     register: publicProcedure.input(registrationSchema).mutation(async ({ ctx, input }) => {
       const email = normalizeEmail2(input.email);
+      const requestIp = getRequestIp(ctx);
+      const requestUserAgent = getRequestUserAgent(ctx);
+      const phone = normalizeWhatsApp(input.phone);
+      assertValidWhatsApp(phone);
+      await verifyTurnstileIfConfigured(input.turnstileToken, requestIp);
+      const settings = await getBetaAccessSettings();
+      if (!settings.allowNewRegistrations) {
+        throw new TRPCError3({
+          code: "FORBIDDEN",
+          message: "Novos cadastros estao pausados no momento. Fale com o suporte para entrar na lista de interesse."
+        });
+      }
+      if (requestIp) {
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1e3);
+        const recentRegistrations = await countUsersRegisteredFromIpSince(requestIp, since);
+        if (recentRegistrations >= MAX_REGISTRATIONS_PER_IP_24H) {
+          throw new TRPCError3({
+            code: "TOO_MANY_REQUESTS",
+            message: "Muitos cadastros foram enviados desta conexao. Tente novamente mais tarde ou fale com o suporte."
+          });
+        }
+      }
       const existingUser = await getUserByEmail(email);
       if (existingUser) {
         throw new TRPCError3({
@@ -12162,6 +13228,10 @@ var appRouter = router({
         });
       }
       const role = isAdminEmail(email, ENV.adminEmails) ? "admin" : "user";
+      const approvedUsers = await countApprovedUsers();
+      const capacityAvailable = approvedUsers < settings.maxApprovedUsers;
+      const accountStatus = role === "admin" ? "approved" : settings.automaticApproval && capacityAvailable ? "approved" : settings.sendNewUsersToWaitlist || !capacityAvailable ? "waitlist" : "pending_review";
+      const reviewedAt = /* @__PURE__ */ new Date();
       const passwordHash = await hashPassword(input.password);
       const openId = buildPasswordOpenId(email);
       const user = await createPasswordUser({
@@ -12170,12 +13240,20 @@ var appRouter = router({
         email,
         passwordHash,
         role,
-        phone: input.phone.trim(),
+        phone,
         companyName: input.companyName?.trim() || null,
         city: input.city.trim(),
         state: input.state.trim(),
         vehicleType: input.vehicleType.trim(),
-        acceptedTermsAt: /* @__PURE__ */ new Date()
+        userType: input.userType.trim(),
+        marketplace: input.marketplace.trim(),
+        averageStopsPerDay: input.averageStopsPerDay,
+        acceptedTermsAt: /* @__PURE__ */ new Date(),
+        accountStatus,
+        registrationIp: requestIp || null,
+        registrationUserAgent: requestUserAgent || null,
+        approvedAt: accountStatus === "approved" ? reviewedAt : null,
+        waitlistedAt: accountStatus === "waitlist" ? reviewedAt : null
       });
       if (!user) {
         throw new TRPCError3({
@@ -12191,18 +13269,31 @@ var appRouter = router({
       );
       await recordOperationalEvent(user.id, {
         type: "user_registered",
-        severity: "info",
+        severity: accountStatus === "approved" ? "info" : "warning",
         source: "auth.register",
         title: "Novo cadastro",
         message: user.email ?? void 0,
         metadata: {
           role,
+          accountStatus,
           city: input.city.trim(),
           state: input.state.trim(),
           vehicleType: input.vehicleType.trim(),
-          companyName: input.companyName?.trim() || null
+          userType: input.userType.trim(),
+          marketplace: input.marketplace.trim(),
+          averageStopsPerDay: input.averageStopsPerDay,
+          companyName: input.companyName?.trim() || null,
+          capacity: {
+            approvedUsers,
+            maxApprovedUsers: settings.maxApprovedUsers
+          }
         }
       });
+      if (accountStatus === "approved") {
+        await sendAccessReviewEmail(user, "access_approved");
+      } else if (accountStatus === "waitlist") {
+        await sendAccessReviewEmail(user, "access_waitlist");
+      }
       return {
         ...sanitizeUser(user)
       };
@@ -12325,6 +13416,83 @@ var appRouter = router({
       page: z2.number().min(1).default(1),
       limit: z2.number().min(1).max(100).default(30)
     })).query(({ input }) => getAdminDashboardEvents(input.page, input.limit)),
+    accessRequests: adminProcedure.input(z2.object({
+      status: accessStatusFilterSchema.default("pending_review"),
+      search: z2.string().max(120).optional(),
+      page: z2.number().min(1).default(1),
+      limit: z2.number().min(1).max(100).default(50)
+    })).query(({ input }) => getAccessRequestsDashboard(input)),
+    accessRequestDetails: adminProcedure.input(z2.object({
+      userId: z2.number().int().positive()
+    })).query(async ({ input }) => {
+      const details = await getAccessRequestDetails(input.userId);
+      if (!details) {
+        throw new TRPCError3({
+          code: "NOT_FOUND",
+          message: "Usuario nao encontrado."
+        });
+      }
+      return details;
+    }),
+    reviewAccessRequest: adminProcedure.input(z2.object({
+      userId: z2.number().int().positive(),
+      action: accessReviewActionSchema,
+      note: z2.string().max(2e3).optional()
+    })).mutation(async ({ ctx, input }) => {
+      if (input.userId === ctx.user.id && input.action !== "approved") {
+        throw new TRPCError3({
+          code: "BAD_REQUEST",
+          message: "Nao altere seu proprio acesso administrativo."
+        });
+      }
+      if (input.action === "approved") {
+        const [settings, approvedUsers, target] = await Promise.all([
+          getBetaAccessSettings(),
+          countApprovedUsers(),
+          getUserById(input.userId)
+        ]);
+        if (target && target.accountStatus !== "approved" && approvedUsers >= settings.maxApprovedUsers) {
+          throw new TRPCError3({
+            code: "BAD_REQUEST",
+            message: "Capacidade maxima de usuarios aprovados atingida. Ajuste a Capacidade do Beta antes de aprovar."
+          });
+        }
+      }
+      const result = await reviewUserAccess({
+        userId: input.userId,
+        adminUserId: ctx.user.id,
+        action: input.action,
+        note: input.note ?? null
+      });
+      if (!result) {
+        throw new TRPCError3({
+          code: "NOT_FOUND",
+          message: "Usuario nao encontrado."
+        });
+      }
+      if (input.action === "approved") {
+        await sendAccessReviewEmail(result.user, "access_approved");
+      } else if (input.action === "waitlist") {
+        await sendAccessReviewEmail(result.user, "access_waitlist");
+      }
+      await recordOperationalEvent(result.user.id, {
+        type: "admin_user_access_reviewed",
+        severity: "info",
+        source: "admin.accessRequests",
+        title: "Status de acesso alterado",
+        message: result.user.email ?? void 0,
+        metadata: {
+          action: input.action,
+          reviewedBy: ctx.user.id,
+          accountStatus: result.user.accountStatus
+        }
+      });
+      return result;
+    }),
+    betaAccessSettings: adminProcedure.query(() => getBetaAccessSettings()),
+    updateBetaAccessSettings: adminProcedure.input(betaAccessSettingsSchema).mutation(
+      ({ ctx, input }) => updateBetaAccessSettings(ctx.user.id, input)
+    ),
     cleanupE2eUsers: adminProcedure.mutation(async ({ ctx }) => {
       const result = await cleanupE2eTestUsers();
       await recordOperationalEvent(ctx.user.id, {
@@ -12446,6 +13614,7 @@ var appRouter = router({
       };
     }),
     create: protectedProcedure.input(routeCreateSchema).mutation(async ({ ctx, input }) => {
+      await assertUserRouteCreationLimit(ctx.user.id, "routes.create");
       const route = await createRoute(ctx.user.id, input);
       if (route) {
         await recordOperationalEvent(ctx.user.id, {
@@ -12465,6 +13634,14 @@ var appRouter = router({
       respectInputSequence: z2.boolean().optional()
     })).mutation(async ({ ctx, input }) => {
       const { stops: stops2, respectInputSequence, ...routeInput } = input;
+      await assertUserRouteCreationLimit(
+        ctx.user.id,
+        "routes.createAndOptimize"
+      );
+      await assertUserImportHourlyLimit(
+        ctx.user.id,
+        "routes.createAndOptimize"
+      );
       await assertRouteStopLimit(
         ctx.user.id,
         stops2.length,

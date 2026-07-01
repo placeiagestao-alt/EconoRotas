@@ -57,7 +57,7 @@ type ImileCapturePlugin = {
 };
 
 const ImileCapture = registerPlugin<ImileCapturePlugin>("ImileCapture");
-const MAX_ROUTE_STOPS = 160;
+const DEFAULT_MAX_ROUTE_STOPS = 160;
 const IMPORT_SOURCE_OPTIONS: Array<{ value: StopSourceProvider; label: string }> = [
   { value: "generic", label: "Genérico" },
   { value: "shopee", label: "Shopee" },
@@ -325,6 +325,12 @@ export default function CreateRoute() {
   ]);
 
   const createAndOptimizeMutation = trpc.routes.createAndOptimize.useMutation();
+  const betaLimitsQuery = trpc.auth.betaLimits.useQuery(undefined, {
+    staleTime: 60_000,
+  });
+  const maxRouteStops =
+    betaLimitsQuery.data?.stopsPerRouteLimit ?? DEFAULT_MAX_ROUTE_STOPS;
+  const maxFileSizeMb = betaLimitsQuery.data?.maxFileSizeMb ?? 5;
   const imileDeliveriesQuery = trpc.imile.deliveries.useQuery(
     {
       dateFrom: imileDateFrom,
@@ -438,9 +444,9 @@ export default function CreateRoute() {
   };
 
   const assertRouteStopLimit = (stopCount: number, source: string) => {
-    if (stopCount <= MAX_ROUTE_STOPS) return true;
+    if (stopCount <= maxRouteStops) return true;
     toast.error(
-      `${source} tem ${stopCount} paradas. Durante testes e validação, o limite operacional é de ${MAX_ROUTE_STOPS} paradas por rota. Volumes maiores serão liberados gradualmente conforme a infraestrutura evoluir.`
+      `${source} tem ${stopCount} paradas. Durante testes e validacao, o limite operacional e de ${maxRouteStops} paradas por rota. Volumes maiores serao liberados gradualmente conforme a infraestrutura evoluir.`
     );
     return false;
   };
@@ -1050,6 +1056,14 @@ export default function CreateRoute() {
     const file = input.files?.[0];
 
     if (!file) return;
+    const maxFileSizeBytes = maxFileSizeMb * 1024 * 1024;
+    if (file.size > maxFileSizeBytes) {
+      toast.error(
+        `Arquivo maior que o limite atual de ${maxFileSizeMb} MB. Divida a planilha ou ajuste a capacidade no admin.`
+      );
+      input.value = "";
+      return;
+    }
 
     setIsImportingFile(true);
 
@@ -1846,21 +1860,21 @@ export default function CreateRoute() {
                 <span
                   className={cn(
                     "text-xs font-medium",
-                    stops.length > MAX_ROUTE_STOPS
+                    stops.length > maxRouteStops
                       ? "text-destructive"
-                      : stops.length >= MAX_ROUTE_STOPS * 0.9
+                      : stops.length >= maxRouteStops * 0.9
                         ? "text-amber-600"
                         : "text-muted-foreground"
                   )}
                 >
-                  {stops.length}/{MAX_ROUTE_STOPS} paradas
+                  {stops.length}/{maxRouteStops} paradas
                 </span>
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   onClick={handleAddStop}
-                  disabled={stops.length >= MAX_ROUTE_STOPS}
+                  disabled={stops.length >= maxRouteStops}
                   className="gap-2"
                 >
                   <Plus className="w-4 h-4" />
