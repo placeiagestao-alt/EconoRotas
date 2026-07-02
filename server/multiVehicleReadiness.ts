@@ -92,7 +92,22 @@ function readinessStatus(items: ReadinessItem[]): ReadinessStatus {
 }
 
 export async function getMultiVehicleReadinessDashboard() {
-  const [osrm, queue, workers, queueIntegrity, disasterRecovery, performanceBenchmarks] =
+  const disasterRecovery = await safeRead<any>(
+    () => db.getDisasterReadinessDashboard(),
+    {
+      status: "critical",
+      lastBackupAt: null,
+      backupAgeHours: null,
+      backupStatus: "unknown",
+      restoreTestAt: null,
+      restoreTestPassed: false,
+      rpoTargetHours: 24,
+      rtoTargetHours: 4,
+      alerts: [],
+    },
+    25_000
+  );
+  const [osrm, queue, workers, queueIntegrity, performanceBenchmarks] =
     await Promise.all([
       safeRead(() => getOsrmHealth(), {
         enabled: ENV.osrmEnabled,
@@ -120,28 +135,25 @@ export async function getMultiVehicleReadinessDashboard() {
         workerAverageRuntime: 0,
         workers: [],
       }),
-      safeRead<any>(() => db.getQueueIntegrityDashboard(), {
-        status: "attention",
-        duplicateJobs: 0,
-        failedRecoveries: 0,
-        stalledJobs: 0,
-      }),
-      safeRead<any>(() => db.getDisasterReadinessDashboard(), {
-        status: "critical",
-        lastBackupAt: null,
-        backupAgeHours: null,
-        backupStatus: "unknown",
-        restoreTestAt: null,
-        restoreTestPassed: false,
-        rpoTargetHours: 24,
-        rtoTargetHours: 4,
-        alerts: [],
-      }),
-      safeRead<any>(() => db.getPerformanceBenchmarkDashboard(), {
-        status: "unavailable",
-        targets: [],
-        totalRuns: 0,
-      }),
+      safeRead<any>(
+        () => db.getQueueIntegrityDashboard(),
+        {
+          status: "attention",
+          duplicateJobs: 0,
+          failedRecoveries: 0,
+          stalledJobs: 0,
+        },
+        25_000
+      ),
+      safeRead<any>(
+        () => db.getPerformanceBenchmarkDashboard(),
+        {
+          status: "unavailable",
+          targets: [],
+          totalRuns: 0,
+        },
+        25_000
+      ),
     ]);
 
   const osrmBlockers: string[] = [];
@@ -229,6 +241,7 @@ export async function getMultiVehicleReadinessDashboard() {
       rpoTargetHours: disasterRecovery.rpoTargetHours,
       rtoTargetHours: disasterRecovery.rtoTargetHours,
       alertCount: disasterRecovery.alerts?.length ?? 0,
+      error: disasterRecovery.error ?? null,
     },
     blockers: disasterBlockers,
   };
