@@ -282,9 +282,12 @@ async function listBaseTables(db: Queryable) {
 
 async function getPrimaryKeyColumns(db: Queryable, table: string) {
   const [rows] = await db.query<RowDataPacket[]>(
-    `SHOW KEYS FROM ${quoteIdentifier(table)} WHERE Key_name = 'PRIMARY' ORDER BY Seq_in_index`
+    `SHOW KEYS FROM ${quoteIdentifier(table)} WHERE Key_name = 'PRIMARY'`
   );
-  return rows.map(row => String(row.Column_name)).filter(Boolean);
+  return rows
+    .sort((a, b) => Number(a.Seq_in_index ?? 0) - Number(b.Seq_in_index ?? 0))
+    .map(row => String(row.Column_name))
+    .filter(Boolean);
 }
 
 async function getCreateTableSql(db: Queryable, table: string) {
@@ -320,11 +323,18 @@ function normalizeValue(value: unknown): unknown {
   return value;
 }
 
+function formatMysqlDateTime(value: unknown) {
+  const date = new Date(String(value));
+  if (!Number.isFinite(date.getTime())) return String(value);
+
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
 function restoreValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(restoreValue);
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    if (record.__econorotaType === "date") return String(record.value);
+    if (record.__econorotaType === "date") return formatMysqlDateTime(record.value);
     if (record.__econorotaType === "buffer") {
       return Buffer.from(String(record.value), "base64");
     }
