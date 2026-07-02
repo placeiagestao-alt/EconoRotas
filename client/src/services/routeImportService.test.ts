@@ -85,7 +85,7 @@ describe("parseRouteRows", () => {
     expect(route.stops.map((stop) => stop.isUnsequencedStop)).toEqual([false, false, true, false]);
   });
 
-  it("keeps a zero STOP as metadata even when it has the same address as another Shopee group", () => {
+  it("groups repeated Shopee addresses and keeps the first positive STOP as the stop anchor", () => {
     const sameAddress = "Rua Lefe Buchalla, 142, Parque Alto Bela Vista, Presidente Prudente, SP";
     const route = parseRouteRows(
       [
@@ -114,25 +114,18 @@ describe("parseRouteRows", () => {
 
     expect(route.stops.map((stop) => stop.address)).toEqual([
       sameAddress,
-      sameAddress,
-      sameAddress,
-      sameAddress,
-      sameAddress,
-      sameAddress,
       "Rua Distante, 10, Presidente Prudente, SP",
-      sameAddress,
     ]);
-    expect(route.stops.map((stop) => stop.originalStop)).toEqual([
-      20,
-      21,
-      22,
-      23,
-      24,
-      25,
-      30,
-      0,
-    ]);
-    expect(route.stops[7].isUnsequencedStop).toBe(true);
+    expect(route.totalDeliveries).toBe(8);
+    expect(route.groupedDeliveries).toBe(6);
+    expect(route.stops[0].deliveryCount).toBe(7);
+    expect(route.stops[0].metadata?.groupedDeliveryCount).toBe(7);
+    expect(route.stops[0].originalStop).toBe(20);
+    expect(route.stops[0].routingStop).toBe(20);
+    expect(route.stops[0].isUnsequencedStop).toBe(false);
+    expect(route.stops[0].notes).toContain("7x entregas neste endereco");
+    expect(route.stops[0].notes).toContain("STOPs: 20, 21, 22, 23, 24, 25, sem STOP");
+    expect(route.stops[1].originalStop).toBe(30);
   });
 
   it("treats dash STOP as unsequenced Shopee stop", () => {
@@ -372,6 +365,46 @@ describe("parseRouteRows", () => {
       "Rua A, 10, Centro, Presidente Prudente",
     ]);
   });
+
+  it("groups repeated spreadsheet addresses as one stop with delivery count and package notes", () => {
+    const sameAddress = "Rua Duplicada, 100, Centro, Presidente Prudente, SP";
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": sameAddress,
+          "SPX TN": "BR260000000001A",
+          Latitude: -22.1,
+          Longitude: -51.4,
+        },
+        {
+          "Destination Address": "Rua Unica, 200, Centro, Presidente Prudente, SP",
+          "SPX TN": "BR260000000003A",
+          Latitude: -22.2,
+          Longitude: -51.5,
+        },
+        {
+          "Destination Address": sameAddress,
+          "SPX TN": "BR260000000002A",
+          Latitude: -22.1001,
+          Longitude: -51.4001,
+        },
+      ],
+      "rota-endereco-repetido.xlsx",
+      "generic"
+    );
+
+    expect(route.stops).toHaveLength(2);
+    expect(route.totalDeliveries).toBe(3);
+    expect(route.groupedDeliveries).toBe(1);
+    expect(route.skippedRows).toBe(0);
+    expect(route.stops[0].address).toBe(sameAddress);
+    expect(route.stops[0].deliveryCount).toBe(2);
+    expect(route.stops[0].metadata?.groupedDeliveryCount).toBe(2);
+    expect(route.stops[0].notes).toContain("2x entregas neste endereco");
+    expect(route.stops[0].notes).toContain(
+      "Pacotes: BR260000000001A, BR260000000002A"
+    );
+  });
 });
 
 describe("parseImileScreenText", () => {
@@ -450,6 +483,32 @@ describe("parseImileScreenText", () => {
       "6052126314870",
     ]);
     expect(route.stops[0].metadata?.trackingNumber).toBe("6052826300704");
+  });
+
+  it("groups different iMile packages delivered to the same address", () => {
+    const route = parseImileScreenText(
+      `
+      <node content-desc="6052826300704" />
+      <node content-desc="Cliente Um" />
+      <node content-desc="100,Rua Mesmo Endereco,Jardim Eldorado,Presidente Prudente,SÃ£o Paulo&#10;E2E: Restante 24 Hora Tempo esgotado" />
+      <node content-desc="6052126314870" />
+      <node content-desc="Cliente Dois" />
+      <node content-desc="100,Rua Mesmo Endereco,Jardim Eldorado,Presidente Prudente,SÃ£o Paulo&#10;E2E: Restante 24 Hora Tempo esgotado" />
+      <node content-desc="6052126314888" />
+      <node content-desc="Cliente Tres" />
+      <node content-desc="200,Rua Nova,Vila Nova,Presidente Prudente,SÃ£o Paulo&#10;E2E: Restante 24 Hora Tempo esgotado" />
+      `,
+      "imile-mesmo-endereco.xml"
+    );
+
+    expect(route.stops).toHaveLength(2);
+    expect(route.totalDeliveries).toBe(3);
+    expect(route.groupedDeliveries).toBe(1);
+    expect(route.stops[0].deliveryCount).toBe(2);
+    expect(route.stops[0].metadata?.groupedDeliveryCount).toBe(2);
+    expect(route.stops[0].notes).toContain("2x entregas neste endereco");
+    expect(route.stops[0].notes).toContain("6052826300704");
+    expect(route.stops[0].notes).toContain("6052126314870");
   });
 
   it("recovers tracking when the address appears before the next card tracking", () => {

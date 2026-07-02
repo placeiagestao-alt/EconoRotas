@@ -289,7 +289,20 @@ function getShopeeStopLabel(stop: Stop) {
   return undefined;
 }
 
+function getGroupedDeliveryCount(stop?: Stop) {
+  const count = Number(stop?.metadata?.groupedDeliveryCount);
+  return Number.isFinite(count) && count > 1 ? Math.round(count) : undefined;
+}
+
+function getGroupedDeliveryLabel(stop?: Stop) {
+  const count = getGroupedDeliveryCount(stop);
+  return count ? `${count}x entregas neste endereco` : undefined;
+}
+
 function getPackageLabel(stop: Stop) {
+  const groupedDeliveryLabel = getGroupedDeliveryLabel(stop);
+  if (groupedDeliveryLabel) return groupedDeliveryLabel;
+
   const packageNumber = stop.metadata?.packageNumber || stop.packageNumber;
   if (!packageNumber || packageNumber === "0") return undefined;
   return `Pacote: ${packageNumber}`;
@@ -740,6 +753,8 @@ export default function RouteDetail() {
   const currentStopIdentity = currentStop
     ? getStopIdentityDetails(currentStop, deliveryState.currentIndex)
     : null;
+  const currentStopGroupedDeliveryLabel =
+    getGroupedDeliveryLabel(currentStop);
   const activeProximityStop =
     activeProximityAlert?.stopIndex !== undefined
       ? stops[activeProximityAlert.stopIndex]
@@ -2753,7 +2768,9 @@ export default function RouteDetail() {
                           )}
                           <div className="rounded-2xl border border-primary/10 bg-primary/10 p-4 text-primary">
                             <p className="text-xs font-semibold uppercase">
-                              Pacote
+                              {currentStopGroupedDeliveryLabel
+                                ? "Entregas"
+                                : "Pacote"}
                             </p>
                             <p className="mt-1 break-words text-2xl font-black leading-tight">
                               {currentStopIdentity?.packageLabel?.replace(
@@ -2775,6 +2792,17 @@ export default function RouteDetail() {
                                 <p className="mt-1 text-sm text-muted-foreground">
                                   Toque em Ir no mapa para navegar até a parada.
                                 </p>
+                                {currentStopGroupedDeliveryLabel ? (
+                                  <p className="mt-3 flex items-center gap-2 text-sm font-semibold text-primary">
+                                    <PackageCheck className="h-4 w-4 shrink-0" />
+                                    {currentStopGroupedDeliveryLabel}
+                                  </p>
+                                ) : null}
+                                {currentStop.notes ? (
+                                  <p className="mt-2 text-sm text-muted-foreground">
+                                    Observação: {currentStop.notes}
+                                  </p>
+                                ) : null}
                               </div>
                             </div>
                           </div>

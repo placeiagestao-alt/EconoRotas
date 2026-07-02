@@ -1114,6 +1114,11 @@ export default function CreateRoute() {
       }
 
       toast.success(`${importedRoute.stops.length} paradas importadas.`);
+      if ((importedRoute.groupedDeliveries ?? 0) > 0) {
+        toast.message(
+          `${importedRoute.groupedDeliveries} entregas agrupadas em enderecos ja importados.`
+        );
+      }
       if (importedRoute.hasStopSequence) {
         toast.message(
           "Coluna STOP detectada: escolha se deseja seguir essa sequencia ou otimizar automaticamente."

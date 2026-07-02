@@ -96,6 +96,178 @@ function normalizeHeader(value: string) {
     .trim();
 }
 
+function normalizeImportedAddressKey(value: string) {
+  return normalizeHeader(value);
+}
+
+function getImportedDeliveryCount(stop: Pick<ImportedStop, "deliveryCount">) {
+  const count = Number(stop.deliveryCount);
+  return Number.isFinite(count) && count > 0 ? Math.round(count) : 1;
+}
+
+function hasImportedCoordinates(stop: Pick<ImportedStop, "latitude" | "longitude">) {
+  return Boolean(stop.latitude && stop.longitude);
+}
+
+function pushUniqueText(values: string[], value: unknown) {
+  const text = cleanText(value);
+  if (!text) return;
+
+  const normalized = normalizeHeader(text);
+  if (!values.some((item) => normalizeHeader(item) === normalized)) {
+    values.push(text);
+  }
+}
+
+function summarizeValues(values: string[], limit = 8) {
+  if (values.length <= limit) return values.join(", ");
+
+  return `${values.slice(0, limit).join(", ")} +${values.length - limit}`;
+}
+
+function getImportedPackageNumber(stop: ImportedStop) {
+  return (
+    stop.packageNumber ||
+    stop.metadata?.packageNumber ||
+    stop.metadata?.trackingNumber ||
+    ""
+  );
+}
+
+function getImportedStopLabel(stop: ImportedStop) {
+  const stopNumber = Number(stop.originalStop ?? stop.routingStop);
+  if (Number.isFinite(stopNumber) && stopNumber > 0) return String(Math.round(stopNumber));
+  if (stop.isUnsequencedStop || stopNumber === 0) return "sem STOP";
+  return "";
+}
+
+function mergeGroupedStopNotes(
+  deliveryCount: number,
+  notes: string[],
+  packageNumbers: string[],
+  stopLabels: string[]
+) {
+  const parts = [`${deliveryCount}x entregas neste endereco`];
+
+  if (packageNumbers.length > 1) {
+    parts.push(`Pacotes: ${summarizeValues(packageNumbers)}`);
+  }
+
+  if (stopLabels.length > 1) {
+    parts.push(`STOPs: ${summarizeValues(stopLabels)}`);
+  }
+
+  notes.forEach((note) => pushUniqueText(parts, note));
+
+  return parts.join(" | ");
+}
+
+function mergeImportedStopsByAddress(stops: ImportedStop[]) {
+  type GroupState = {
+    stop: ImportedStop;
+    deliveryCount: number;
+    notes: string[];
+    packageNumbers: string[];
+    stopLabels: string[];
+  };
+
+  const groups = new Map<string, GroupState>();
+  const orderedKeys: string[] = [];
+
+  stops.forEach((stop) => {
+    const key = normalizeImportedAddressKey(stop.address) || `row-${stop.sourceRow}`;
+    let group = groups.get(key);
+
+    if (!group) {
+      group = {
+        stop: {
+          ...stop,
+          metadata: stop.metadata ? { ...stop.metadata } : undefined,
+        },
+        deliveryCount: 0,
+        notes: [],
+        packageNumbers: [],
+        stopLabels: [],
+      };
+      groups.set(key, group);
+      orderedKeys.push(key);
+    }
+
+    group.deliveryCount += getImportedDeliveryCount(stop);
+    pushUniqueText(group.notes, stop.notes);
+    pushUniqueText(group.packageNumbers, getImportedPackageNumber(stop));
+    pushUniqueText(group.stopLabels, getImportedStopLabel(stop));
+
+    if (!hasImportedCoordinates(group.stop) && hasImportedCoordinates(stop)) {
+      group.stop.latitude = stop.latitude;
+      group.stop.longitude = stop.longitude;
+    }
+
+    group.stop.sourceRow = Math.min(group.stop.sourceRow, stop.sourceRow);
+
+    const currentStopNumber = Number(group.stop.originalStop ?? group.stop.routingStop);
+    const incomingStopNumber = Number(stop.originalStop ?? stop.routingStop);
+    const currentHasPositiveStop =
+      Number.isFinite(currentStopNumber) && currentStopNumber > 0;
+    const incomingHasPositiveStop =
+      Number.isFinite(incomingStopNumber) && incomingStopNumber > 0;
+
+    if (
+      incomingHasPositiveStop &&
+      (!currentHasPositiveStop || incomingStopNumber < currentStopNumber)
+    ) {
+      group.stop.originalStop = Math.round(incomingStopNumber);
+      group.stop.routingStop = Math.round(incomingStopNumber);
+      group.stop.isUnsequencedStop = false;
+    } else if (!currentHasPositiveStop && (stop.isUnsequencedStop || incomingStopNumber === 0)) {
+      group.stop.originalStop = 0;
+      group.stop.routingStop = 0;
+      group.stop.isUnsequencedStop = true;
+    }
+  });
+
+  const groupedStops = orderedKeys.map((key) => {
+    const group = groups.get(key)!;
+    const deliveryCount = Math.max(1, group.deliveryCount);
+    const stop = {
+      ...group.stop,
+      deliveryCount: deliveryCount > 1 ? deliveryCount : group.stop.deliveryCount,
+      metadata: {
+        ...group.stop.metadata,
+        groupedDeliveryCount:
+          deliveryCount > 1
+            ? deliveryCount
+            : group.stop.metadata?.groupedDeliveryCount,
+      },
+      notes:
+        deliveryCount > 1
+          ? mergeGroupedStopNotes(
+              deliveryCount,
+              group.notes,
+              group.packageNumbers,
+              group.stopLabels
+            )
+          : group.notes[0] || group.stop.notes,
+    };
+
+    if (!stop.metadata?.groupedDeliveryCount) {
+      delete stop.metadata?.groupedDeliveryCount;
+    }
+
+    return stop;
+  });
+  const totalDeliveries = groupedStops.reduce(
+    (sum, stop) => sum + getImportedDeliveryCount(stop),
+    0
+  );
+
+  return {
+    stops: groupedStops,
+    totalDeliveries,
+    groupedDeliveries: Math.max(0, totalDeliveries - groupedStops.length),
+  };
+}
+
 function cleanText(value: unknown) {
   if (value === null || value === undefined) return "";
 
@@ -406,10 +578,6 @@ function hasAddressBetween(lines: string[], fromIndex: number, toIndex: number) 
   return lines.slice(start, end).some(looksLikeImileAddress);
 }
 
-function hasNearbyAddressBefore(lines: string[], index: number, maxDistance: number) {
-  return lines.slice(Math.max(0, index - maxDistance), index).some(looksLikeImileAddress);
-}
-
 function findNearestBefore(
   lines: string[],
   startIndex: number,
@@ -442,6 +610,25 @@ function findNearestAfter(
   return undefined;
 }
 
+function trackingLikelyBelongsToPreviousAddress(lines: string[], trackingIndex: number) {
+  const previousAddress = findNearestBefore(
+    lines,
+    trackingIndex,
+    looksLikeImileAddress,
+    4
+  );
+  if (!previousAddress) return false;
+
+  const trackingBeforePreviousAddress = findNearestBefore(
+    lines,
+    previousAddress.index,
+    isImileTracking,
+    8
+  );
+
+  return !trackingBeforePreviousAddress;
+}
+
 function parseImileRowsFromLines(lines: string[]) {
   const rows: ImileScreenRow[] = [];
   let currentTracking = "";
@@ -458,10 +645,13 @@ function parseImileRowsFromLines(lines: string[]) {
       const nextTracking = findNearestAfter(lines, index, isImileTracking, 12);
       const previousRecipient = findNearestBefore(lines, index, isLikelyImileRecipient, 8);
       const nextRecipient = findNearestAfter(lines, index, isLikelyImileRecipient, 12);
+      const previousTrackingBelongsToPriorAddress = previousTracking
+        ? trackingLikelyBelongsToPreviousAddress(lines, previousTracking.index)
+        : false;
       const trackingNumber =
         previousTracking &&
         !hasAddressBetween(lines, previousTracking.index, index) &&
-        !hasNearbyAddressBefore(lines, previousTracking.index, 4)
+        !previousTrackingBelongsToPriorAddress
           ? previousTracking.value
           : nextTracking?.value || currentTracking || undefined;
       const recipientSource =
@@ -493,18 +683,18 @@ function parseImileRowsFromLines(lines: string[]) {
 }
 
 function dedupeImileRows(rows: ImileScreenRow[]) {
-  const canonicalByKey = new Map<string, string>();
-  const rowsByCanonical = new Map<string, ImileScreenRow>();
-  const getKeys = (row: ImileScreenRow) =>
-    [row.trackingNumber, row.address]
-      .map((value) => normalizeHeader(value || ""))
-      .filter(Boolean);
+  const rowsByKey = new Map<string, ImileScreenRow>();
+  const getKey = (row: ImileScreenRow) => {
+    const trackingKey = normalizeHeader(row.trackingNumber || "");
+    const addressKey = normalizeHeader(row.address || "");
+
+    if (trackingKey && addressKey) return `${trackingKey}|${addressKey}`;
+    return trackingKey || addressKey || String(row.sourceRow);
+  };
 
   rows.forEach((row) => {
-    const keys = getKeys(row);
-    const canonicalKey =
-      keys.map((key) => canonicalByKey.get(key)).find(Boolean) || keys[0] || String(row.sourceRow);
-    const existing = rowsByCanonical.get(canonicalKey);
+    const key = getKey(row);
+    const existing = rowsByKey.get(key);
     const next = existing
       ? {
           ...existing,
@@ -517,11 +707,10 @@ function dedupeImileRows(rows: ImileScreenRow[]) {
         }
       : row;
 
-    rowsByCanonical.set(canonicalKey, next);
-    getKeys(next).forEach((key) => canonicalByKey.set(key, canonicalKey));
+    rowsByKey.set(key, next);
   });
 
-  return Array.from(rowsByCanonical.values());
+  return Array.from(rowsByKey.values());
 }
 
 function calculateImileGroupedDeliveries(input: string) {
@@ -641,13 +830,15 @@ export function parseRouteRows(
     .filter((stop) => stop.address);
 
   const hasStopSequence = useShopeeStop;
-  const stops = parsedRows.map(({ sequence, ...stop }) => ({
+  const importedStops = parsedRows.map(({ sequence, ...stop }) => ({
     ...stop,
     routingStop: useShopeeStop ? sequence : undefined,
   }));
+  const grouped = mergeImportedStopsByAddress(importedStops);
+  const stops = grouped.stops;
 
   if (stops.length < 2) {
-    throw new Error("A planilha precisa ter pelo menos 2 endere\u00e7os v\u00e1lidos.");
+    throw new Error("A planilha precisa ter pelo menos 2 enderecos unicos validos.");
   }
 
   return {
@@ -656,7 +847,9 @@ export function parseRouteRows(
     sourceProvider: normalizedSourceProvider,
     hasStopSequence,
     totalRows: rows.length,
-    skippedRows: rows.length - stops.length,
+    totalDeliveries: grouped.totalDeliveries,
+    groupedDeliveries: grouped.groupedDeliveries,
+    skippedRows: rows.length - importedStops.length,
     missingCoordinateRows: stops.filter((stop) => !stop.latitude || !stop.longitude).length,
   };
 }
@@ -668,7 +861,7 @@ export function parseImileScreenText(input: string, fileName = "imile-screen.txt
     throw new Error("A captura iMile precisa conter pelo menos 2 entregas visiveis.");
   }
 
-  const stops = rows.map((row, index) => ({
+  const importedStops = rows.map((row) => ({
     address: row.address,
     latitude: 0,
     longitude: 0,
@@ -680,11 +873,13 @@ export function parseImileScreenText(input: string, fileName = "imile-screen.txt
     metadata: buildImileMetadata(row),
     sourceRow: row.sourceRow,
   }));
+  const grouped = mergeImportedStopsByAddress(importedStops);
+  const stops = grouped.stops;
   const groupedDeliveries = Math.max(
     calculateImileGroupedDeliveries(input),
-    rows.reduce((sum, row) => sum + Math.max(0, row.deliveryCount - 1), 0)
+    grouped.groupedDeliveries
   );
-  const totalDeliveries = stops.length + groupedDeliveries;
+  const totalDeliveries = grouped.totalDeliveries;
 
   return {
     routeName: fileName.replace(/\.[^.]+$/, "") || "Rider Delivery",
