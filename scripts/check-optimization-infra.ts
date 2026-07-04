@@ -1,6 +1,35 @@
+import fs from "node:fs";
 import dotenv from "dotenv";
 
-dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || ".env" });
+function isLocalDatabaseUrl(value: string | undefined) {
+  if (!value) return true;
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return ["localhost", "127.0.0.1", "mysql", "host.docker.internal"].includes(
+      hostname
+    );
+  } catch {
+    return true;
+  }
+}
+
+function loadCheckEnvironment() {
+  const configuredPath = process.env.DOTENV_CONFIG_PATH;
+  if (configuredPath) {
+    dotenv.config({ path: configuredPath, quiet: true });
+    return configuredPath;
+  }
+
+  dotenv.config({ path: ".env", quiet: true });
+  if (isLocalDatabaseUrl(process.env.DATABASE_URL) && fs.existsSync(".env.worker.production")) {
+    dotenv.config({ path: ".env.worker.production", override: true, quiet: true });
+    return ".env.worker.production";
+  }
+
+  return ".env";
+}
+
+const loadedEnvPath = loadCheckEnvironment();
 
 const { getDatabaseHealth } = await import("../server/db");
 const {
@@ -47,10 +76,20 @@ try {
   };
 }
 const workerCount = "workerCount" in queue ? Number(queue.workerCount || 0) : 0;
-const ok = Boolean(database.connected && queue.configured && queue.reachable && workerCount > 0);
+const redisPolicyCompliant = (queue as any).redis?.policyCompliant;
+const ok = Boolean(
+  database.connected &&
+    queue.configured &&
+    queue.reachable &&
+    workerCount > 0 &&
+    redisPolicyCompliant !== false
+);
 
 console.log(JSON.stringify({
   ok,
+  env: {
+    loadedFrom: loadedEnvPath,
+  },
   database: {
     configured: database.configured,
     connected: database.connected,

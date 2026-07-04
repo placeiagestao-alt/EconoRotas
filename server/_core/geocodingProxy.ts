@@ -29,17 +29,22 @@ const DATABASE_CACHE_TTL_MS = Math.max(
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = Math.max(
   1,
-  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 240)
+  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 60)
 );
 const EXTERNAL_MIN_INTERVAL_MS = Math.max(
   0,
-  Number(process.env.GEOCODING_EXTERNAL_MIN_INTERVAL_MS || 350)
+  Number(process.env.GEOCODING_EXTERNAL_MIN_INTERVAL_MS || 1100)
+);
+const EXTERNAL_PROVIDER_COOLDOWN_MS = Math.max(
+  30_000,
+  Number(process.env.GEOCODING_PROVIDER_COOLDOWN_MS || 120_000)
 );
 
 const cache = new Map<string, { expiresAt: number; data: unknown }>();
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
 const inFlightSearches = new Map<string, Promise<unknown>>();
 let lastExternalSearchAt = 0;
+let externalProviderCooldownUntil = 0;
 
 function normalizeSearchQuery(query: string) {
   return query.replace(/\s+/g, " ").trim();
@@ -230,6 +235,15 @@ async function fetchExternalSearch(cacheKey: string, url: string) {
   if (existing) return existing;
 
   const request = (async () => {
+    const cooldownMs = externalProviderCooldownUntil - Date.now();
+    if (cooldownMs > 0) {
+      const error = new Error("Nominatim em cooldown apos rate limit.");
+      (error as Error & { status?: number; retryAfter?: string }).status = 429;
+      (error as Error & { status?: number; retryAfter?: string }).retryAfter =
+        String(Math.ceil(cooldownMs / 1000));
+      throw error;
+    }
+
     await waitForExternalSearchSlot();
 
     const response = await fetch(url, {
@@ -246,6 +260,17 @@ async function fetchExternalSearch(cacheKey: string, url: string) {
         response.status;
       (error as Error & { status?: number; retryAfter?: string }).retryAfter =
         response.headers.get("retry-after") || undefined;
+      if (response.status === 429) {
+        const retryAfterSeconds = Number(response.headers.get("retry-after"));
+        externalProviderCooldownUntil =
+          Date.now() +
+          Math.max(
+            EXTERNAL_PROVIDER_COOLDOWN_MS,
+            Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+              ? retryAfterSeconds * 1000
+              : 0
+          );
+      }
       throw error;
     }
 
@@ -414,6 +439,10 @@ export function registerGeocodingProxy(app: Express) {
           fallbackProvider: null,
           status: status ?? null,
           error: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+          providerCooldownUntil:
+            externalProviderCooldownUntil > Date.now()
+              ? new Date(externalProviderCooldownUntil).toISOString()
+              : null,
         },
       });
 

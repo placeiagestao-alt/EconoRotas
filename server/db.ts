@@ -3704,11 +3704,18 @@ export async function getQueueIntegrityDashboard(days = 30) {
       const runningJobs = memory.optimizationJobs.filter(
         job => job.status === "running"
       );
+      const queuedJobs = memory.optimizationJobs.filter(
+        job =>
+          job.status === "queued" && new Date(job.createdAt).getTime() >= cutoff
+      );
       return buildQueueIntegrityDashboard(
         events,
         failedJobs,
         runningJobs,
-        safeDays
+        safeDays,
+        60_000,
+        buildLongRunningJobAlerts(runningJobs, 60_000),
+        queuedJobs
       );
     }
     requireConfiguredDatabase();
@@ -3734,6 +3741,18 @@ export async function getQueueIntegrityDashboard(days = 30) {
       WHERE status = 'failed'
         AND created_at >= ?
       ORDER BY created_at DESC
+      LIMIT 2000
+    `,
+    [cutoffDate]
+  );
+  const [queuedJobs] = await _pool!.query<RowDataPacket[]>(
+    `
+      SELECT id, route_id AS routeId, user_id AS userId, provider_job_id AS providerJobId,
+        created_at AS createdAt
+      FROM optimization_jobs
+      WHERE status = 'queued'
+        AND created_at >= ?
+      ORDER BY created_at ASC
       LIMIT 2000
     `,
     [cutoffDate]
@@ -3775,7 +3794,8 @@ export async function getQueueIntegrityDashboard(days = 30) {
     runningJobs,
     safeDays,
     averageRuntimeMs,
-    runningAlerts
+    runningAlerts,
+    queuedJobs
   );
 }
 
@@ -4232,8 +4252,33 @@ function buildQueueIntegrityDashboard(
   runningJobs: any[],
   days: number,
   averageRuntimeMs = 60_000,
-  runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs)
+  runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs),
+  queuedJobs: any[] = []
 ) {
+  const now = Date.now();
+  const staleQueuedThresholdMs = Math.max(15 * 60_000, averageRuntimeMs * 3);
+  const queuedJobAges = queuedJobs
+    .map(job => {
+      const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
+      return Number.isFinite(createdAt) ? Math.max(0, now - createdAt) : 0;
+    })
+    .filter(ageMs => ageMs > 0);
+  const staleQueuedJobs = queuedJobs
+    .map(job => {
+      const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
+      const queuedMs = Number.isFinite(createdAt)
+        ? Math.max(0, now - createdAt)
+        : 0;
+      return {
+        id: Number(job.id),
+        routeId: Number(job.routeId ?? job.route_id ?? 0),
+        userId: job.userId ?? job.user_id ?? null,
+        providerJobId: job.providerJobId ?? job.provider_job_id ?? null,
+        createdAt: job.createdAt ?? job.created_at ?? null,
+        queuedMs,
+      };
+    })
+    .filter(job => job.queuedMs >= staleQueuedThresholdMs);
   const duplicateJobs = countEventsByType(events, "duplicate_job_detected");
   const jobRecoveredAfterCrash = countEventsByType(
     events,
@@ -4249,11 +4294,18 @@ function buildQueueIntegrityDashboard(
     events,
     "redis_reconnect_detected"
   );
-  const failedRecoveries = failedJobs.filter(job => {
+  const failedRecoveryJobs = failedJobs.filter(job => {
     const attemptCount = Number(job.attemptCount ?? job.attempt_count ?? 0);
     const maxAttempts = Number(job.maxAttempts ?? job.max_attempts ?? 3);
     return attemptCount >= maxAttempts;
-  }).length;
+  });
+  const recentFailedRecoveryCutoff = now - 7 * 24 * 60 * 60 * 1000;
+  const recentFailedRecoveryJobs = failedRecoveryJobs.filter(job => {
+    const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
+    return Number.isFinite(createdAt) && createdAt >= recentFailedRecoveryCutoff;
+  });
+  const failedRecoveries = failedRecoveryJobs.length;
+  const recentFailedRecoveries = recentFailedRecoveryJobs.length;
   const lastEvent = events[0];
 
   return {
@@ -4267,22 +4319,31 @@ function buildQueueIntegrityDashboard(
     stalledRecoveredCount,
     runningStalledJobs: runningAlerts.length,
     stalledJobs: stalledCount + runningAlerts.length,
+    queuedJobs: queuedJobs.length,
+    staleQueuedJobs: staleQueuedJobs.length,
+    oldestQueuedMs: queuedJobAges.length ? Math.max(...queuedJobAges) : 0,
+    staleQueuedThresholdMs,
+    staleQueuedJobDetails: staleQueuedJobs.slice(0, 20),
     averageRuntimeMs,
     longRunningJobs: runningAlerts,
     failedRecoveries,
+    recentFailedRecoveries,
+    failedRecoveryWindowDays: 7,
     redisReconnectCount,
     lastIntegrityCheck: lastEvent?.createdAt ?? null,
     status:
       duplicateJobs === 0 &&
-      failedRecoveries === 0 &&
+      recentFailedRecoveries === 0 &&
       stalledCount === 0 &&
-      runningAlerts.length === 0
+      runningAlerts.length === 0 &&
+      staleQueuedJobs.length === 0
         ? "healthy"
         : "attention",
     target: {
       duplicateJobs: 0,
-      failedRecoveries: 0,
+      recentFailedRecoveries: 0,
       stalledJobs: 0,
+      staleQueuedJobs: 0,
       recoveryAfterFailure: "100%",
     },
     recentEvents: events.slice(0, 20),

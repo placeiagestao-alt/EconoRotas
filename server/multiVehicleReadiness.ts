@@ -118,11 +118,17 @@ export async function getMultiVehicleReadinessDashboard() {
         timeoutMs: ENV.osrmHealthTimeoutMs,
         error: "Falha ao consultar OSRM.",
       }),
-      safeRead(() => getOptimizationQueueHealth(), {
+      safeRead<any>(() => getOptimizationQueueHealth(), {
         configured: false,
         reachable: false,
         queueName: "econorota-optimization",
         counts: null,
+        redis: {
+          maxmemoryPolicy: null,
+          policyTarget: "noeviction",
+          policyCompliant: null,
+          error: null,
+        },
         error: "Falha ao consultar fila.",
       }),
       safeRead(() => getOptimizationWorkersDashboard(), {
@@ -190,8 +196,14 @@ export async function getMultiVehicleReadinessDashboard() {
   };
 
   const workerBlockers: string[] = [];
+  const redisPolicy = (queue as any).redis;
   if (!queue.configured) workerBlockers.push("Redis/BullMQ nao configurado.");
   if (!queue.reachable) workerBlockers.push("Fila BullMQ nao esta acessivel.");
+  if (redisPolicy?.policyCompliant === false) {
+    workerBlockers.push(
+      `Redis maxmemory-policy esta ${redisPolicy.maxmemoryPolicy}; alvo operacional: ${redisPolicy.policyTarget}.`
+    );
+  }
   if (Number(workers.workerCount || 0) < Number(workers.minimumWorkerCount || 2)) {
     workerBlockers.push(
       `Apenas ${workers.workerCount || 0} worker(s) online; minimo exigido: ${workers.minimumWorkerCount || 2}.`
@@ -199,6 +211,11 @@ export async function getMultiVehicleReadinessDashboard() {
   }
   if (queueIntegrity.status !== "healthy") {
     workerBlockers.push("Integridade da fila nao esta saudavel.");
+  }
+  if (Number(queueIntegrity.staleQueuedJobs || 0) > 0) {
+    workerBlockers.push(
+      `${queueIntegrity.staleQueuedJobs} job(s) antigo(s) ficaram em queued sem execucao.`
+    );
   }
 
   const workerRedundancy: ReadinessItem = {
@@ -209,10 +226,19 @@ export async function getMultiVehicleReadinessDashboard() {
       workerCount: workers.workerCount,
       minimumWorkerCount: workers.minimumWorkerCount,
       workerHeartbeatCount: (queue as any).workerHeartbeatCount ?? null,
+      redisMaxmemoryPolicy: redisPolicy?.maxmemoryPolicy ?? null,
+      redisPolicyTarget: redisPolicy?.policyTarget ?? "noeviction",
+      redisPolicyCompliant: redisPolicy?.policyCompliant ?? null,
+      redisPolicyError: redisPolicy?.error ?? null,
       queueIntegrityStatus: queueIntegrity.status,
       duplicateJobs: queueIntegrity.duplicateJobs,
       failedRecoveries: queueIntegrity.failedRecoveries,
+      recentFailedRecoveries: queueIntegrity.recentFailedRecoveries ?? null,
+      failedRecoveryWindowDays: queueIntegrity.failedRecoveryWindowDays ?? null,
       stalledJobs: queueIntegrity.stalledJobs,
+      queuedJobs: queueIntegrity.queuedJobs ?? 0,
+      staleQueuedJobs: queueIntegrity.staleQueuedJobs ?? 0,
+      oldestQueuedMs: queueIntegrity.oldestQueuedMs ?? 0,
       workers: workers.workers,
     },
     blockers: workerBlockers,

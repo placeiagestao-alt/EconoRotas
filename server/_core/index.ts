@@ -296,25 +296,39 @@ function buildOperationalReadiness(args: {
     addCheck("queue", "critical", "Fila Redis/BullMQ configurada, mas indisponivel.", {
       error: args.queue.error ?? null,
     });
-  } else if (
-    Number(args.queue.workerCount ?? 0) <
-    Number(args.queue.minimumWorkerCount ?? 0)
-  ) {
-    addCheck(
-      "workers",
-      "attention",
-      `Workers online abaixo do minimo (${args.queue.workerCount}/${args.queue.minimumWorkerCount}).`,
-      {
+  } else {
+    if (args.queue.redis?.policyCompliant === false) {
+      addCheck(
+        "queueRedisPolicy",
+        "attention",
+        "Redis esta com politica de memoria inadequada para BullMQ.",
+        {
+          maxmemoryPolicy: args.queue.redis.maxmemoryPolicy ?? null,
+          policyTarget: args.queue.redis.policyTarget ?? "noeviction",
+        }
+      );
+    }
+
+    if (
+      Number(args.queue.workerCount ?? 0) <
+      Number(args.queue.minimumWorkerCount ?? 0)
+    ) {
+      addCheck(
+        "workers",
+        "attention",
+        `Workers online abaixo do minimo (${args.queue.workerCount}/${args.queue.minimumWorkerCount}).`,
+        {
+          workerCount: args.queue.workerCount ?? 0,
+          minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
+          alert: args.queue.alert ?? null,
+        }
+      );
+    } else {
+      addCheck("workers", "ready", "Workers operacionais.", {
         workerCount: args.queue.workerCount ?? 0,
         minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
-        alert: args.queue.alert ?? null,
-      }
-    );
-  } else {
-    addCheck("workers", "ready", "Workers operacionais.", {
-      workerCount: args.queue.workerCount ?? 0,
-      minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
-    });
+      });
+    }
   }
 
   if (args.queueIntegrity) {
@@ -330,6 +344,9 @@ function buildOperationalReadiness(args: {
         duplicateJobs: args.queueIntegrity.duplicateJobs ?? 0,
         stalledJobs: args.queueIntegrity.stalledJobs ?? 0,
         failedRecoveries: args.queueIntegrity.failedRecoveries ?? 0,
+        recentFailedRecoveries: args.queueIntegrity.recentFailedRecoveries ?? 0,
+        queuedJobs: args.queueIntegrity.queuedJobs ?? 0,
+        staleQueuedJobs: args.queueIntegrity.staleQueuedJobs ?? 0,
       }
     );
   }

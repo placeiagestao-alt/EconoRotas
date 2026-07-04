@@ -23,8 +23,17 @@ RESTORE_TEST_DATABASE_URL=mysql://...
 DR_RESTORE_CONFIRM_DATABASE=nome_do_banco_descartavel
 ```
 
+Quando o banco descartavel fica no mesmo servidor de `DATABASE_URL`, substitua
+`RESTORE_TEST_DATABASE_URL` por:
+
+```env
+DR_RESTORE_DATABASE_NAME=nome_do_banco_descartavel
+DR_RESTORE_CONFIRM_DATABASE=nome_do_banco_descartavel
+```
+
 `DR_RESTORE_CONFIRM_DATABASE` deve ser exatamente o nome do banco apontado por
-`RESTORE_TEST_DATABASE_URL`. Isso evita reset acidental de um banco real.
+`RESTORE_TEST_DATABASE_URL` ou `DR_RESTORE_DATABASE_NAME`. Isso evita reset
+acidental de um banco real.
 
 O banco de restore deve ter nome claramente descartavel, contendo termos como
 `restore`, `drill`, `backup`, `test`, `homolog`, `staging` ou `evidenc`.
@@ -56,6 +65,25 @@ Executar o drill completo:
 corepack pnpm@10.33.4 run drill:disaster-recovery
 ```
 
+Executar a rotina diaria manualmente:
+
+```powershell
+corepack pnpm@10.33.4 run dr:daily
+```
+
+Registrar a rotina diaria no Windows Task Scheduler:
+
+```powershell
+corepack pnpm@10.33.4 run dr:register-task
+```
+
+A task criada e `EconoRotasDisasterRecoveryDaily`, roda diariamente as 03:15,
+usa `scripts/run-disaster-recovery-daily.ps1` e grava log em
+`logs/disaster-recovery-daily.log`. O registro nao dispara novo drill na hora;
+para iniciar imediatamente, rode `scripts/register-disaster-recovery-task.ps1
+-StartNow`. O runner executa o drill completo e so mantem o painel dentro do
+RPO quando consegue gravar `backup_completed` e `restore_test_passed`.
+
 O backup local e gravado em `backups/disaster-recovery` e essa pasta e ignorada
 pelo Git.
 
@@ -75,3 +103,22 @@ O readiness de Disaster Recovery continua em atencao ou critical quando:
 
 Esta sprint e infraestrutura operacional. Nao misturar com motor de rota nem UX
 no mesmo commit/release, salvo correcao emergencial.
+
+## Fila Redis
+
+BullMQ exige Redis sem eviction para nao perder jobs, locks ou heartbeats sob
+pressao de memoria. A politica operacional e `maxmemory-policy=noeviction`.
+
+Verificar e tentar aplicar via comando:
+
+```powershell
+corepack pnpm@10.33.4 run redis:enforce-noeviction -- --apply
+```
+
+Alguns provedores gerenciados bloqueiam `CONFIG SET`. Nesse caso, ajuste a
+politica no painel/API do provedor ou crie uma instancia Redis nova ja com
+`noeviction`, depois rode:
+
+```powershell
+corepack pnpm@10.33.4 run check:optimization-infra
+```

@@ -144,6 +144,7 @@ export async function getOptimizationQueueHealth() {
     const workerHeartbeats = await getRecentWorkerHeartbeats().catch(() => []);
     const workerHeartbeatCount = workerHeartbeats.length;
     const workerCount = Math.max(workers.length, workerHeartbeatCount);
+    const redis = await getRedisPolicyHealth();
     await recordWorkerUnderReplicatedAlert(workerCount).catch(() => undefined);
 
     return {
@@ -151,6 +152,7 @@ export async function getOptimizationQueueHealth() {
       reachable: true,
       queueName: OPTIMIZATION_QUEUE_NAME,
       counts,
+      redis,
       workerCount,
       workerHeartbeatCount,
       minimumWorkerCount: MIN_WORKER_COUNT,
@@ -250,6 +252,25 @@ async function getRedisMaxmemoryPolicy() {
     .split(/\r?\n/)
     .find((entry) => entry.toLowerCase().startsWith("maxmemory_policy:"));
   return line?.split(":")[1]?.trim() || null;
+}
+
+async function getRedisPolicyHealth() {
+  try {
+    const maxmemoryPolicy = await getRedisMaxmemoryPolicy();
+    return {
+      maxmemoryPolicy,
+      policyTarget: "noeviction",
+      policyCompliant: maxmemoryPolicy ? maxmemoryPolicy === "noeviction" : null,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      maxmemoryPolicy: null,
+      policyTarget: "noeviction",
+      policyCompliant: null,
+      error: sanitizeQueueError(error),
+    };
+  }
 }
 
 async function getRecentWorkerHeartbeatCount() {

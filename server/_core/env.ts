@@ -114,6 +114,7 @@ export const ENV = {
   bullmqRedisUrl: firstEnvString(
     process.env.BULLMQ_REDIS_URL,
     process.env.ECONOROTAS_REDIS_URL,
+    process.env.KV_URL,
     process.env.REDIS_URL
   ),
   backupLastCompletedAt: process.env.BACKUP_LAST_COMPLETED_AT ?? "",

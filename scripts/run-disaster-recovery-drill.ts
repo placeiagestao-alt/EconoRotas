@@ -72,6 +72,7 @@ Usage:
 Required environment:
   DATABASE_URL                  Source production MySQL URL.
   RESTORE_TEST_DATABASE_URL     Disposable MySQL URL used for restore validation.
+  DR_RESTORE_DATABASE_NAME      Optional disposable database name on the same server.
   DR_RESTORE_CONFIRM_DATABASE   Must equal the target database name.
 
 Optional environment:
@@ -154,6 +155,18 @@ function parseDatabaseTarget(name: string, value: string): DatabaseTarget {
   };
 }
 
+function buildRestoreUrlFromSource(sourceUrl: string, databaseName: string) {
+  if (!sourceUrl || !databaseName) return "";
+
+  try {
+    const parsed = new URL(sourceUrl);
+    parsed.pathname = `/${encodeURIComponent(databaseName)}`;
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
 function isLocalDatabase(target: DatabaseTarget) {
   return [
     "mysql",
@@ -211,6 +224,11 @@ function shouldUseSsl(
   const explicit = readEnvString(`${prefix}_SSL`);
   if (explicit === "true") return true;
   if (explicit === "false") return false;
+  if (prefix === "RESTORE_TEST_DATABASE") {
+    const sourceExplicit = readEnvString("DATABASE_SSL");
+    if (sourceExplicit === "true") return true;
+    if (sourceExplicit === "false") return false;
+  }
   return /ssl-mode=required|tidbcloud|aivencloud|planetscale|railway/i.test(
     url
   );
@@ -223,7 +241,39 @@ function getDatabaseSslCa(prefix: "DATABASE" | "RESTORE_TEST_DATABASE") {
   const caPath = readEnvString(`${prefix}_SSL_CA_PATH`);
   if (caPath && fs.existsSync(caPath)) return fs.readFileSync(caPath, "utf8");
 
+  if (prefix === "RESTORE_TEST_DATABASE") {
+    return getDatabaseSslCa("DATABASE");
+  }
+
   return undefined;
+}
+
+function shouldRejectUnauthorized(prefix: "DATABASE" | "RESTORE_TEST_DATABASE") {
+  const explicit = readEnvString(`${prefix}_SSL_REJECT_UNAUTHORIZED`);
+  if (explicit === "true") return true;
+  if (explicit === "false") return false;
+
+  if (prefix === "RESTORE_TEST_DATABASE") {
+    const sourceExplicit = readEnvString("DATABASE_SSL_REJECT_UNAUTHORIZED");
+    if (sourceExplicit === "true") return true;
+    if (sourceExplicit === "false") return false;
+  }
+
+  return true;
+}
+
+function getMysqlDriverUrl(databaseUrl: string) {
+  try {
+    const url = new URL(databaseUrl);
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (key.toLowerCase().startsWith("ssl")) {
+        url.searchParams.delete(key);
+      }
+    }
+    return url.toString();
+  } catch {
+    return databaseUrl;
+  }
 }
 
 function createPool(
@@ -231,7 +281,7 @@ function createPool(
   prefix: "DATABASE" | "RESTORE_TEST_DATABASE"
 ) {
   const options: any = {
-    uri: target.url,
+    uri: getMysqlDriverUrl(target.url),
     waitForConnections: true,
     connectionLimit: readPositiveInteger("DR_DB_CONNECTION_LIMIT", 2),
     queueLimit: 0,
@@ -242,8 +292,7 @@ function createPool(
   if (shouldUseSsl(target.url, prefix)) {
     options.ssl = {
       minVersion: "TLSv1.2",
-      rejectUnauthorized:
-        readEnvString(`${prefix}_SSL_REJECT_UNAUTHORIZED`) !== "false",
+      rejectUnauthorized: shouldRejectUnauthorized(prefix),
       ca: getDatabaseSslCa(prefix),
     };
   }
@@ -646,10 +695,17 @@ async function main() {
     "DATABASE_URL",
     readEnvString("DATABASE_URL")
   );
+  const sourceUrl = readEnvString("DATABASE_URL");
+  const restoreUrl =
+    readEnvString("RESTORE_TEST_DATABASE_URL") ||
+    readEnvString("DR_RESTORE_DATABASE_URL") ||
+    buildRestoreUrlFromSource(
+      sourceUrl,
+      readEnvString("DR_RESTORE_DATABASE_NAME")
+    );
   const target = parseDatabaseTarget(
     "RESTORE_TEST_DATABASE_URL",
-    readEnvString("RESTORE_TEST_DATABASE_URL") ||
-      readEnvString("DR_RESTORE_DATABASE_URL")
+    restoreUrl
   );
   assertSourceSafe(source);
   assertRestoreTargetSafe(source, target);
