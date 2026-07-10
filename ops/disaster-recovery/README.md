@@ -45,11 +45,31 @@ DR_BACKUP_DIR=backups/disaster-recovery
 DR_BACKUP_BATCH_SIZE=1000
 DR_DB_CONNECTION_LIMIT=2
 DR_RESTORE_ALLOW_ANY_TARGET=false
+DR_RPO_HOURS=24
+DR_RTO_HOURS=4
+DR_RESTORE_MAX_AGE_HOURS=168
+DR_RETENTION_DAYS=14
+DR_SCHEDULE_ENABLED=false
 ```
 
 Use `DR_RESTORE_ALLOW_ANY_TARGET=true` somente quando o alvo foi revisado e e
 descartavel. O script apaga as tabelas existentes no banco de restore antes de
 validar o backup.
+
+Mude `DR_SCHEDULE_ENABLED` para `true` somente depois que o agendador externo
+for verificado. Nao use `true` antes de confirmar a task/cron e sua ultima
+execucao.
+`DR_RETENTION_DAYS` define a politica observada; o EconoRotas nao apaga backups
+automaticamente.
+
+## Metas iniciais
+
+- RPO: backup concluido nas ultimas 24 horas.
+- RTO: restore completo em ate 4 horas.
+- Restore drill: pelo menos uma vez a cada 168 horas (7 dias).
+- Retencao: 14 dias, nunca abaixo de 7 dias no beta.
+- Recorrencia comprovada: pelo menos dois backups e dois restores aprovados no
+  historico operacional recente.
 
 ## Execucao
 
@@ -64,6 +84,10 @@ Executar o drill completo:
 ```powershell
 corepack pnpm@10.33.4 run drill:disaster-recovery
 ```
+
+Esse comando le o banco de origem, cria um novo arquivo de backup, apaga apenas
+as tabelas do banco descartavel confirmado e grava eventos no banco de origem.
+Nunca execute sem revisar o alvo e `DR_RESTORE_CONFIRM_DATABASE`.
 
 Executar a rotina diaria manualmente:
 
@@ -90,14 +114,50 @@ pelo Git.
 ## Evidencia no painel
 
 Depois de um drill aprovado, o painel de Operacoes passa a encontrar evidencia
-real em `operationalEvents`.
+real em `operationalEvents`. `/api/monitor/ping` informa:
 
-O readiness de Disaster Recovery continua em atencao ou critical quando:
+- `lastBackupAt`, `backupAgeHours`, `backupStatus` e `backupWithinRpo`;
+- `restoreTestAt`, `restoreAgeHours`, `restoreStatus` e
+  `restoreWithinWindow`;
+- `restoreDurationMs` e `rtoMet`;
+- RPO, RTO, validade do restore e retencao configurados;
+- contadores em `history`, `reason`, `reasons` e `nextAction`;
+- variaveis de politica ausentes em `configuration.missingVariables`.
 
-- nao existe `backup_completed` recente;
-- existe `backup_failed` mais novo que o ultimo backup concluido;
-- nao existe `restore_test_passed` aprovado;
-- alguma tabela critica nao responde.
+Interpretacao:
+
+- `ok`: backup e restore recentes, RTO atendido, politica e recorrencia
+  comprovadas;
+- `attention`: operacao valida, mas configuracao, duracao ou recorrencia ainda
+  nao estao totalmente comprovadas;
+- `warning`: backup fora do RPO, restore vencido, RTO excedido ou retencao
+  abaixo de 7 dias;
+- `no-go`: backup ausente/falho, restore ausente/falho ou tabela critica
+  inacessivel.
+
+Uma falha mais recente sempre vence flags antigas de ambiente. Portanto,
+`RESTORE_TEST_PASSED=true` sem timestamp valido nao torna o DR saudavel.
+
+## Frequencia e retencao
+
+No beta, execute backup diariamente e restore drill semanalmente. A rotina
+atual executa ambos diariamente, o que e mais conservador e aceitavel.
+
+Mantenha copias por 7 a 14 dias em armazenamento separado do banco de origem.
+Antes de qualquer limpeza, confirme integridade, sincronizacao externa e pelo
+menos um restore recente. Este projeto nao remove backups automaticamente.
+
+## Resposta a falhas
+
+1. `backup_failed` ou backup fora do RPO: preservar logs, corrigir acesso/disco
+   e executar novo backup.
+2. `restore_test_failed`: bloquear promocao comercial, revisar o banco
+   descartavel e repetir o drill.
+3. Restore acima do RTO: medir gargalo de leitura, rede e insercao antes do
+   proximo teste.
+4. Task atrasada: conferir `Get-ScheduledTaskInfo`, energia, credenciais e
+   `logs/disaster-recovery-daily.log`.
+5. Nunca testar restore contra o banco de origem.
 
 ## Regra de release
 

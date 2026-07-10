@@ -14,6 +14,7 @@ import mysql, {
 type DisasterArgs = {
   backupDir?: string;
   checkConfig: boolean;
+  execute: boolean;
   help: boolean;
   noRecordEvents: boolean;
 };
@@ -59,6 +60,10 @@ const ENV_PATHS = [
 ];
 const DEFAULT_BACKUP_DIR = path.join("backups", "disaster-recovery");
 const DEFAULT_BATCH_SIZE = 1000;
+const DEFAULT_RPO_HOURS = 24;
+const DEFAULT_RTO_HOURS = 4;
+const DEFAULT_RESTORE_MAX_AGE_HOURS = 168;
+const DEFAULT_RETENTION_DAYS = 14;
 const SAFE_TARGET_DATABASE_PATTERN =
   /(restore|drill|backup|test|homolog|staging|evidenc|scratch)/i;
 
@@ -68,6 +73,7 @@ function printHelp() {
 Usage:
   pnpm run check:disaster-recovery
   pnpm run drill:disaster-recovery
+  node --import tsx scripts/run-disaster-recovery-drill.ts --execute
 
 Required environment:
   DATABASE_URL                  Source production MySQL URL.
@@ -78,9 +84,14 @@ Required environment:
 Optional environment:
   DR_BACKUP_DIR                 Default: ${DEFAULT_BACKUP_DIR}
   DR_BACKUP_BATCH_SIZE          Default: ${DEFAULT_BATCH_SIZE}
+  DR_RPO_HOURS                  Default: ${DEFAULT_RPO_HOURS}
+  DR_RTO_HOURS                  Default: ${DEFAULT_RTO_HOURS}
+  DR_RESTORE_MAX_AGE_HOURS      Default: ${DEFAULT_RESTORE_MAX_AGE_HOURS}
+  DR_RETENTION_DAYS             Default: ${DEFAULT_RETENTION_DAYS}
   DR_RESTORE_ALLOW_ANY_TARGET   Set true only when the target database is disposable.
 
 Safety:
+  Direct execution requires --execute. Configuration check never connects or writes.
   The restore target is reset before validation. The source database is never dropped.
   Successful drills record backup_completed and restore_test_passed events.`);
 }
@@ -88,6 +99,7 @@ Safety:
 function parseArgs(argv: string[]): DisasterArgs {
   const args: DisasterArgs = {
     checkConfig: false,
+    execute: false,
     help: false,
     noRecordEvents: false,
   };
@@ -96,6 +108,7 @@ function parseArgs(argv: string[]): DisasterArgs {
     if (arg === "--") continue;
     if (arg === "--help" || arg === "-h") args.help = true;
     else if (arg === "--check-config") args.checkConfig = true;
+    else if (arg === "--execute") args.execute = true;
     else if (arg === "--no-record-events") args.noRecordEvents = true;
     else if (arg.startsWith("--backup-dir=")) {
       args.backupDir = arg.slice("--backup-dir=".length);
@@ -124,6 +137,38 @@ function readEnvString(name: string) {
 function readPositiveInteger(name: string, fallback: number) {
   const parsed = Number(process.env[name]);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function getDrPolicy() {
+  return {
+    rpoTargetHours: readPositiveInteger("DR_RPO_HOURS", DEFAULT_RPO_HOURS),
+    rtoTargetHours: readPositiveInteger("DR_RTO_HOURS", DEFAULT_RTO_HOURS),
+    restoreMaxAgeHours: readPositiveInteger(
+      "DR_RESTORE_MAX_AGE_HOURS",
+      DEFAULT_RESTORE_MAX_AGE_HOURS
+    ),
+    retentionDays: readPositiveInteger(
+      "DR_RETENTION_DAYS",
+      DEFAULT_RETENTION_DAYS
+    ),
+    scheduleEnabled: readEnvString("DR_SCHEDULE_ENABLED") === "true",
+  };
+}
+
+function assertDrPolicyValues() {
+  for (const name of [
+    "DR_RPO_HOURS",
+    "DR_RTO_HOURS",
+    "DR_RESTORE_MAX_AGE_HOURS",
+    "DR_RETENTION_DAYS",
+  ]) {
+    const value = readEnvString(name);
+    if (!value) continue;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(`${name} precisa ser um numero positivo.`);
+    }
+  }
 }
 
 function parseDatabaseTarget(name: string, value: string): DatabaseTarget {
@@ -248,7 +293,9 @@ function getDatabaseSslCa(prefix: "DATABASE" | "RESTORE_TEST_DATABASE") {
   return undefined;
 }
 
-function shouldRejectUnauthorized(prefix: "DATABASE" | "RESTORE_TEST_DATABASE") {
+function shouldRejectUnauthorized(
+  prefix: "DATABASE" | "RESTORE_TEST_DATABASE"
+) {
   const explicit = readEnvString(`${prefix}_SSL_REJECT_UNAUTHORIZED`);
   if (explicit === "true") return true;
   if (explicit === "false") return false;
@@ -383,7 +430,8 @@ function restoreValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(restoreValue);
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    if (record.__econorotaType === "date") return formatMysqlDateTime(record.value);
+    if (record.__econorotaType === "date")
+      return formatMysqlDateTime(record.value);
     if (record.__econorotaType === "buffer") {
       return Buffer.from(String(record.value), "base64");
     }
@@ -656,6 +704,7 @@ function publicBackupMetadata(
   restore?: RestoreSummary
 ) {
   return {
+    policy: getDrPolicy(),
     source: safeDatabaseSummary(source),
     restoreTarget: safeDatabaseSummary(target),
     backup: backup
@@ -688,8 +737,14 @@ async function main() {
     printHelp();
     return;
   }
+  if (!args.checkConfig && !args.execute) {
+    throw new Error(
+      "Execucao destrutiva do alvo de restore exige a flag explicita --execute."
+    );
+  }
 
   loadEnv();
+  assertDrPolicyValues();
 
   const source = parseDatabaseTarget(
     "DATABASE_URL",
@@ -703,10 +758,7 @@ async function main() {
       sourceUrl,
       readEnvString("DR_RESTORE_DATABASE_NAME")
     );
-  const target = parseDatabaseTarget(
-    "RESTORE_TEST_DATABASE_URL",
-    restoreUrl
-  );
+  const target = parseDatabaseTarget("RESTORE_TEST_DATABASE_URL", restoreUrl);
   assertSourceSafe(source);
   assertRestoreTargetSafe(source, target);
 
@@ -724,6 +776,7 @@ async function main() {
             DEFAULT_BATCH_SIZE
           ),
           recordEvents: !args.noRecordEvents,
+          policy: getDrPolicy(),
           source: safeDatabaseSummary(source),
           restoreTarget: safeDatabaseSummary(target),
         },
