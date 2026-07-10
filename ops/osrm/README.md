@@ -45,8 +45,10 @@ Depois do OSRM proprio estar respondendo via HTTPS:
 ```text
 OSRM_ENABLED=true
 OSRM_BASE_URL=https://seu-osrm-proprio.example.com
+OSRM_PROFILE=driving
 OSRM_REQUEST_TIMEOUT_MS=8000
 OSRM_HEALTH_TIMEOUT_MS=3000
+OSRM_MAX_TABLE_NODES=100
 OSRM_REQUIRED=true
 ```
 
@@ -55,7 +57,8 @@ otimizacao em vez de salvar uma rota por estimativa geografica.
 
 ## Validacao
 
-- `/api/health` deve retornar `osrm.reachable: true`.
+- `/api/health` deve retornar `osrm.reachable: true`,
+  `osrm.providerType: "self_hosted"` e `osrm.productionReady: true`.
 - `/api/monitor/ping` deve retornar 200.
 - O painel Operacao deve mostrar taxa de fallback OSRM caindo para perto de 0%.
 - Se desligar o OSRM com `OSRM_REQUIRED=true`, o health deve retornar 500 e a

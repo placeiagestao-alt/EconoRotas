@@ -1,7 +1,6 @@
 param(
   [string]$EndpointBaseUrl = "https://econorotas.duckdns.org",
   [string]$AppHealthUrl = "https://econo-rotas.vercel.app/api/health",
-  [int]$RequiredMinStops = 101,
   [switch]$SkipDeploy
 )
 
@@ -60,6 +59,16 @@ if (($env:NODE_OPTIONS -split " ") -notcontains "--use-system-ca") {
 }
 
 $baseUrl = $EndpointBaseUrl.TrimEnd("/")
+$endpointUri = [Uri]$baseUrl
+if ($endpointUri.Scheme -ne "https") {
+  throw "OSRM de producao deve usar HTTPS."
+}
+if (
+  $endpointUri.Host -eq "router.project-osrm.org" -or
+  $endpointUri.Host.EndsWith(".project-osrm.org")
+) {
+  throw "router.project-osrm.org nao pode ser ativado como OSRM proprio."
+}
 $routeHealthUrl = "$baseUrl/route/v1/driving/-51.407,-22.121;-51.406,-22.122?overview=false&alternatives=false&steps=false"
 $tableHealthUrl = "$baseUrl/table/v1/driving/-51.407,-22.121;-51.406,-22.122;-51.405,-22.123?annotations=duration,distance"
 
@@ -84,11 +93,11 @@ if ($table.code -ne "Ok") {
 
 Set-VercelEnv -Name "OSRM_ENABLED" -Value "true"
 Set-VercelEnv -Name "OSRM_BASE_URL" -Value $baseUrl
+Set-VercelEnv -Name "OSRM_PROFILE" -Value "driving"
 Set-VercelEnv -Name "OSRM_REQUEST_TIMEOUT_MS" -Value "8000"
 Set-VercelEnv -Name "OSRM_HEALTH_TIMEOUT_MS" -Value "3000"
 Set-VercelEnv -Name "OSRM_MAX_TABLE_NODES" -Value "100"
 Set-VercelEnv -Name "OSRM_REQUIRED" -Value "true"
-Set-VercelEnv -Name "OSRM_REQUIRED_MIN_STOPS" -Value ([string]$RequiredMinStops)
 
 if (!$SkipDeploy) {
   Write-Output "Publicando novo deploy de producao para carregar variaveis OSRM..."
@@ -107,6 +116,8 @@ if (!$SkipDeploy) {
       if (
         $health.osrm.required -eq $true -and
         $health.osrm.reachable -eq $true -and
+        $health.osrm.productionReady -eq $true -and
+        $health.osrm.providerType -eq "self_hosted" -and
         [string]$health.osrm.baseUrl -eq $baseUrl
       ) {
         Write-Output "Vercel pronta: OSRM proprio ativo em $baseUrl."

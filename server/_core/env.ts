@@ -38,6 +38,12 @@ function readPositiveInt(value: string | undefined, fallback: number) {
 }
 
 const OPTIMIZED_ROUTE_STOP_LIMIT = 160;
+const DR_POLICY_ENV_NAMES = [
+  "DR_RPO_HOURS",
+  "DR_RTO_HOURS",
+  "DR_RESTORE_MAX_AGE_HOURS",
+  "DR_RETENTION_DAYS",
+] as const;
 
 function readAtLeastOptimizedRouteStopLimit(value: string | undefined) {
   const parsed = readPositiveInt(value, OPTIMIZED_ROUTE_STOP_LIMIT);
@@ -51,7 +57,9 @@ export const ENV = {
   usingDemoCookieSecret: false,
   databaseUrl: readEnvString(process.env.DATABASE_URL),
   databaseSsl: readEnvString(process.env.DATABASE_SSL),
-  databaseSslRejectUnauthorized: readEnvString(process.env.DATABASE_SSL_REJECT_UNAUTHORIZED),
+  databaseSslRejectUnauthorized: readEnvString(
+    process.env.DATABASE_SSL_REJECT_UNAUTHORIZED
+  ),
   oAuthServerUrl: readEnvString(process.env.OAUTH_SERVER_URL),
   authLoginProvider: readEnvString(process.env.AUTH_LOGIN_PROVIDER),
   googleClientId: readEnvString(process.env.GOOGLE_CLIENT_ID),
@@ -93,12 +101,20 @@ export const ENV = {
   imileFallbackBaseUrls: process.env.IMILE_FALLBACK_BASE_URLS ?? "",
   imileCaptureUploadToken: process.env.IMILE_CAPTURE_UPLOAD_TOKEN ?? "",
   osrmEnabled:
-    process.env.VITEST === "true" ? false : process.env.OSRM_ENABLED !== "false",
-  osrmBaseUrl: process.env.OSRM_BASE_URL ?? "https://router.project-osrm.org",
-  osrmRequestTimeoutMs: Number(process.env.OSRM_REQUEST_TIMEOUT_MS || 8000),
-  osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3000),
+    process.env.VITEST === "true"
+      ? false
+      : process.env.OSRM_ENABLED !== "false",
+  osrmBaseUrl: readEnvString(process.env.OSRM_BASE_URL),
+  osrmProfile: readEnvString(process.env.OSRM_PROFILE) || "driving",
+  osrmRequestTimeoutMs: readPositiveInt(
+    process.env.OSRM_REQUEST_TIMEOUT_MS,
+    8000
+  ),
+  osrmHealthTimeoutMs: readPositiveInt(
+    process.env.OSRM_HEALTH_TIMEOUT_MS,
+    3000
+  ),
   osrmRequired: process.env.OSRM_REQUIRED === "true",
-  osrmRequiredMinStops: readPositiveInt(process.env.OSRM_REQUIRED_MIN_STOPS, 101),
   maxSyncStops: Math.min(
     readAtLeastOptimizedRouteStopLimit(process.env.MAX_SYNC_STOPS),
     OPTIMIZED_ROUTE_STOP_LIMIT
@@ -108,7 +124,9 @@ export const ENV = {
     OPTIMIZED_ROUTE_STOP_LIMIT
   ),
   maxGeographicFallbackStops: Math.min(
-    readAtLeastOptimizedRouteStopLimit(process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS),
+    readAtLeastOptimizedRouteStopLimit(
+      process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS
+    ),
     OPTIMIZED_ROUTE_STOP_LIMIT
   ),
   bullmqRedisUrl: firstEnvString(
@@ -121,6 +139,25 @@ export const ENV = {
   backupStatus: process.env.BACKUP_STATUS ?? "",
   restoreTestLastPassedAt: process.env.RESTORE_TEST_LAST_PASSED_AT ?? "",
   restoreTestPassed: process.env.RESTORE_TEST_PASSED === "true",
-  integrationCredentialsSecret:
-    firstEnvString(process.env.INTEGRATION_CREDENTIALS_SECRET, process.env.JWT_SECRET),
+  drRpoHours: readPositiveInt(process.env.DR_RPO_HOURS, 24),
+  drRtoHours: readPositiveInt(process.env.DR_RTO_HOURS, 4),
+  drRestoreMaxAgeHours: readPositiveInt(
+    process.env.DR_RESTORE_MAX_AGE_HOURS,
+    168
+  ),
+  drRetentionDays: readPositiveInt(process.env.DR_RETENTION_DAYS, 14),
+  drScheduleEnabled: process.env.DR_SCHEDULE_ENABLED === "true",
+  drPolicyMissingVariables: DR_POLICY_ENV_NAMES.filter(
+    name => !readEnvString(process.env[name])
+  ),
+  drPolicyInvalidVariables: DR_POLICY_ENV_NAMES.filter(name => {
+    const value = readEnvString(process.env[name]);
+    if (!value) return false;
+    const parsed = Number(value);
+    return !Number.isFinite(parsed) || parsed <= 0;
+  }),
+  integrationCredentialsSecret: firstEnvString(
+    process.env.INTEGRATION_CREDENTIALS_SECRET,
+    process.env.JWT_SECRET
+  ),
 };
