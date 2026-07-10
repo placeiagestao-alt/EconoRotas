@@ -28,11 +28,14 @@ import {
   emailLogs,
   betaAccessSettings,
 } from "../drizzle/schema";
-import {
-  ACCOUNT_STATUSES,
-  type AccountStatus,
-} from "../shared/accountAccess";
+import { ACCOUNT_STATUSES, type AccountStatus } from "../shared/accountAccess";
 import { ENV } from "./_core/env";
+import { evaluateDisasterReadiness } from "./disasterReadiness";
+import {
+  evaluatePerformanceBenchmarkRun,
+  PERFORMANCE_BENCHMARK_SAMPLE_SIZE,
+  PERFORMANCE_BENCHMARK_TARGETS,
+} from "./performanceBenchmarkPolicy";
 import {
   calculateGeocodingConfidence,
   summarizeGeocodingConfidence,
@@ -1453,7 +1456,11 @@ const DEFAULT_BETA_ACCESS_SETTINGS = {
   updatedAt: new Date(0),
 };
 
-export type AccessReviewAction = "approved" | "waitlist" | "blocked" | "suspended";
+export type AccessReviewAction =
+  | "approved"
+  | "waitlist"
+  | "blocked"
+  | "suspended";
 export type AccessRequestStatusFilter = AccountStatus | "all";
 
 function normalizeAccountStatus(value: unknown): AccountStatus {
@@ -1621,13 +1628,16 @@ export async function updateBetaAccessSettings(
     requireConfiguredDatabase();
   }
 
-  await db.insert(betaAccessSettings).values({
-    id: BETA_ACCESS_SETTINGS_ID,
-    ...values,
-    createdAt: now,
-  }).onDuplicateKeyUpdate({
-    set: values,
-  });
+  await db
+    .insert(betaAccessSettings)
+    .values({
+      id: BETA_ACCESS_SETTINGS_ID,
+      ...values,
+      createdAt: now,
+    })
+    .onDuplicateKeyUpdate({
+      set: values,
+    });
 
   return getBetaAccessSettings();
 }
@@ -1670,10 +1680,7 @@ export async function countUsersRegisteredFromIpSince(ip: string, since: Date) {
     .select({ count: sql<number>`COUNT(*)` })
     .from(users)
     .where(
-      and(
-        eq(users.registrationIp, normalizedIp),
-        gte(users.createdAt, since)
-      )
+      and(eq(users.registrationIp, normalizedIp), gte(users.createdAt, since))
     );
   return Number(result[0]?.count || 0);
 }
@@ -1698,7 +1705,10 @@ export async function countUserRoutesSince(userId: number, since: Date) {
   return Number(result[0]?.count || 0);
 }
 
-function buildAccessSummary(rows: any[], settings: Awaited<ReturnType<typeof getBetaAccessSettings>>) {
+function buildAccessSummary(
+  rows: any[],
+  settings: Awaited<ReturnType<typeof getBetaAccessSettings>>
+) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const approvedUsers = rows.filter(
@@ -1737,12 +1747,14 @@ function safeAccessUser(row: any) {
   };
 }
 
-export async function getAccessRequestsDashboard(input: {
-  status?: AccessRequestStatusFilter;
-  search?: string;
-  page?: number;
-  limit?: number;
-} = {}) {
+export async function getAccessRequestsDashboard(
+  input: {
+    status?: AccessRequestStatusFilter;
+    search?: string;
+    page?: number;
+    limit?: number;
+  } = {}
+) {
   const settings = await getBetaAccessSettings();
   const status = input.status ?? "pending_review";
   const safePage = Math.max(1, Number(input.page || 1));
@@ -1756,7 +1768,8 @@ export async function getAccessRequestsDashboard(input: {
       const allRows = [...memory.users].map(safeAccessUser);
       const filtered = allRows.filter(user => {
         const matchesStatus =
-          status === "all" || normalizeAccountStatus(user.accountStatus) === status;
+          status === "all" ||
+          normalizeAccountStatus(user.accountStatus) === status;
         const searchable = [
           user.name,
           user.email,
@@ -1779,7 +1792,10 @@ export async function getAccessRequestsDashboard(input: {
         total: filtered.length,
         summary: buildAccessSummary(allRows, settings),
         settings,
-        users: sortByDateDesc(filtered, "createdAt").slice(offset, offset + safeLimit),
+        users: sortByDateDesc(filtered, "createdAt").slice(
+          offset,
+          offset + safeLimit
+        ),
       };
     }
     requireConfiguredDatabase();
@@ -1792,19 +1808,23 @@ export async function getAccessRequestsDashboard(input: {
     params.push(status);
   }
   if (search) {
-    where.push("(LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(u.email, '')) LIKE ? OR LOWER(COALESCE(u.phone, '')) LIKE ? OR LOWER(COALESCE(u.city, '')) LIKE ? OR LOWER(COALESCE(u.state, '')) LIKE ?)");
+    where.push(
+      "(LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(u.email, '')) LIKE ? OR LOWER(COALESCE(u.phone, '')) LIKE ? OR LOWER(COALESCE(u.city, '')) LIKE ? OR LOWER(COALESCE(u.state, '')) LIKE ?)"
+    );
     const like = `%${search}%`;
     params.push(like, like, like, like, like);
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   const [countRows, rows, summaryRows] = await Promise.all([
-    _pool!.query<RowDataPacket[]>(
-      `SELECT COUNT(*) AS total FROM users u ${whereSql}`,
-      params
-    ).then(([result]) => result),
-    _pool!.query<RowDataPacket[]>(
-      `
+    _pool!
+      .query<
+        RowDataPacket[]
+      >(`SELECT COUNT(*) AS total FROM users u ${whereSql}`, params)
+      .then(([result]) => result),
+    _pool!
+      .query<RowDataPacket[]>(
+        `
         SELECT
           u.id,
           u.openId,
@@ -1838,10 +1858,12 @@ export async function getAccessRequestsDashboard(input: {
         LIMIT ?
         OFFSET ?
       `,
-      [...params, safeLimit + 1, offset]
-    ).then(([result]) => result),
-    _pool!.query<RowDataPacket[]>(
-      `
+        [...params, safeLimit + 1, offset]
+      )
+      .then(([result]) => result),
+    _pool!
+      .query<RowDataPacket[]>(
+        `
         SELECT
           accountStatus,
           COUNT(*) AS total,
@@ -1849,7 +1871,8 @@ export async function getAccessRequestsDashboard(input: {
         FROM users
         GROUP BY accountStatus
       `
-    ).then(([result]) => result),
+      )
+      .then(([result]) => result),
   ]);
 
   const summaryInput = summaryRows.flatMap(row => {
@@ -1897,8 +1920,8 @@ export async function getAccessRequestDetails(userId: number) {
               memory.users.find(item => item.id === review.adminUserId)?.name ??
               null,
             adminEmail:
-              memory.users.find(item => item.id === review.adminUserId)?.email ??
-              null,
+              memory.users.find(item => item.id === review.adminUserId)
+                ?.email ?? null,
           })),
         "createdAt"
       );
@@ -1917,8 +1940,9 @@ export async function getAccessRequestDetails(userId: number) {
 
   const [userRows, reviewRows, emailRows] = await Promise.all([
     db.select().from(users).where(eq(users.id, userId)).limit(1),
-    _pool!.query<RowDataPacket[]>(
-      `
+    _pool!
+      .query<RowDataPacket[]>(
+        `
         SELECT
           r.id,
           r.user_id AS userId,
@@ -1935,10 +1959,12 @@ export async function getAccessRequestDetails(userId: number) {
         WHERE r.user_id = ?
         ORDER BY r.created_at DESC
       `,
-      [userId]
-    ).then(([rows]) => rows),
-    _pool!.query<RowDataPacket[]>(
-      `
+        [userId]
+      )
+      .then(([rows]) => rows),
+    _pool!
+      .query<RowDataPacket[]>(
+        `
         SELECT
           id,
           user_id AS userId,
@@ -1952,8 +1978,9 @@ export async function getAccessRequestDetails(userId: number) {
         ORDER BY created_at DESC
         LIMIT 20
       `,
-      [userId]
-    ).then(([rows]) => rows),
+        [userId]
+      )
+      .then(([rows]) => rows),
   ]);
 
   if (!userRows[0]) return null;
@@ -2018,7 +2045,9 @@ export async function reviewUserAccess(input: {
   const db = await getDb();
   if (!db) {
     if (await shouldUseMemoryDb()) {
-      const existing = memory.users.find(item => Number(item.id) === input.userId);
+      const existing = memory.users.find(
+        item => Number(item.id) === input.userId
+      );
       if (!existing) return null;
       Object.assign(existing, updateValues);
       const review = {
@@ -2035,7 +2064,10 @@ export async function reviewUserAccess(input: {
     requireConfiguredDatabase();
   }
 
-  await db.update(users).set(updateValues as any).where(eq(users.id, input.userId));
+  await db
+    .update(users)
+    .set(updateValues as any)
+    .where(eq(users.id, input.userId));
   await db.insert(adminUserReviews).values(reviewValues as any);
   return {
     user: safeAccessUser((await getUserById(input.userId)) ?? target),
@@ -3910,24 +3942,17 @@ function parseOptionalDate(value: unknown) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function dateAgeHours(date: Date | null) {
-  if (!date) return null;
-  return Math.max(
-    0,
-    Math.round(((Date.now() - date.getTime()) / 3_600_000) * 10) / 10
+function latestDate(...dates: Array<Date | null>) {
+  return dates.reduce<Date | null>(
+    (latest, date) =>
+      date && (!latest || date.getTime() > latest.getTime()) ? date : latest,
+    null
   );
 }
 
-function readBooleanLike(value: unknown) {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (["true", "1", "yes", "sim", "passed", "ok"].includes(normalized))
-      return true;
-    if (["false", "0", "no", "nao", "não", "failed"].includes(normalized))
-      return false;
-  }
-  return false;
+function parseRuntimeMs(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 async function hasRecentDisasterReadinessEvent(
@@ -3994,20 +4019,19 @@ async function getLatestDisasterEvents() {
   const db = await getDb();
   if (!db) {
     if (await shouldUseMemoryDb()) {
-      return DISASTER_EVENT_TYPES.map(
-        type =>
-          sortByDateDesc(
-            memory.operationalEvents.filter(event => event.type === type),
-            "createdAt"
-          )[0] ?? null
-      ).filter(Boolean);
+      return sortByDateDesc(
+        memory.operationalEvents.filter(event =>
+          (DISASTER_EVENT_TYPES as readonly string[]).includes(event.type)
+        ),
+        "createdAt"
+      ).slice(0, 100);
     }
     requireConfiguredDatabase();
   }
 
   const [rows] = await _pool!.query<RowDataPacket[]>(
     `
-      SELECT id, type, severity, title, message, metadata, createdAt
+      SELECT id, type, severity, title, message, runtime, metadata, createdAt
       FROM operationalEvents FORCE INDEX (operationalEvents_type_createdAt_idx)
       WHERE type IN (${DISASTER_EVENT_TYPES.map(() => "?").join(",")})
       ORDER BY createdAt DESC
@@ -4066,8 +4090,10 @@ async function getCriticalTableReadiness() {
 }
 
 export async function getDisasterReadinessDashboard() {
-  const rpoTargetHours = 24;
-  const rtoTargetHours = 4;
+  const rpoTargetHours = ENV.drRpoHours;
+  const rtoTargetHours = ENV.drRtoHours;
+  const restoreMaxAgeHours = ENV.drRestoreMaxAgeHours;
+  const retentionDays = ENV.drRetentionDays;
   const events = await getLatestDisasterEvents();
   const lastBackupEvent = latestEventByType(events, "backup_completed");
   const backupFailedEvent = latestEventByType(events, "backup_failed");
@@ -4076,129 +4102,123 @@ export async function getDisasterReadinessDashboard() {
 
   const envBackupAt = parseOptionalDate(ENV.backupLastCompletedAt);
   const eventBackupAt = parseOptionalDate(lastBackupEvent?.createdAt);
-  const lastBackupAt = envBackupAt ?? eventBackupAt;
+  const lastBackupAt = latestDate(envBackupAt, eventBackupAt);
   const backupFailedAt = parseOptionalDate(backupFailedEvent?.createdAt);
-  const backupAgeHours = dateAgeHours(lastBackupAt);
-  const backupStatus = (
-    ENV.backupStatus ||
-    (backupFailedAt && (!lastBackupAt || backupFailedAt >= lastBackupAt)
+  const envBackupStatus = ENV.backupStatus.trim().toLowerCase();
+  const envFailureActive =
+    envBackupStatus === "failed" &&
+    (!eventBackupAt ||
+      !envBackupAt ||
+      envBackupAt.getTime() >= eventBackupAt.getTime());
+  const backupStatus: "completed" | "failed" | "unknown" =
+    envFailureActive ||
+    (backupFailedAt &&
+      (!lastBackupAt || backupFailedAt.getTime() >= lastBackupAt.getTime()))
       ? "failed"
       : lastBackupAt
         ? "completed"
-        : "unknown")
-  )
-    .trim()
-    .toLowerCase();
+        : envBackupStatus === "failed"
+          ? "failed"
+          : "unknown";
 
-  const envRestoreAt = parseOptionalDate(ENV.restoreTestLastPassedAt);
+  const envRestoreAt = ENV.restoreTestPassed
+    ? parseOptionalDate(ENV.restoreTestLastPassedAt)
+    : null;
   const eventRestoreAt = parseOptionalDate(restorePassedEvent?.createdAt);
-  const restoreTestAt = envRestoreAt ?? eventRestoreAt;
-  const restoreTestPassed =
-    ENV.restoreTestPassed ||
-    Boolean(
-      restoreTestAt &&
-      (!restoreFailedEvent ||
-        restoreTestAt >= new Date(restoreFailedEvent.createdAt))
-    );
+  const restoreTestAt = latestDate(envRestoreAt, eventRestoreAt);
+  const restoreFailedAt = parseOptionalDate(restoreFailedEvent?.createdAt);
+  const restoreStatus =
+    restoreFailedAt &&
+    (!restoreTestAt || restoreFailedAt.getTime() >= restoreTestAt.getTime())
+      ? ("failed" as const)
+      : restoreTestAt
+        ? ("passed" as const)
+        : ("missing" as const);
+  const restoreTestPassed = restoreStatus === "passed";
+  const restoreDurationMs =
+    eventRestoreAt &&
+    restoreTestAt &&
+    eventRestoreAt.getTime() === restoreTestAt.getTime()
+      ? parseRuntimeMs(restorePassedEvent?.runtime)
+      : null;
 
   const criticalTables = await getCriticalTableReadiness();
   const tableErrors = criticalTables.filter(table => table.status !== "ok");
-  const alerts: Array<{
-    type: string;
-    severity: "warning" | "error" | "fatal";
-    severityLabel: "warning" | "critical";
-    title: string;
-    message: string;
-    metadata?: Record<string, unknown>;
-  }> = [];
-
-  if (!lastBackupAt) {
-    alerts.push({
-      type: "backup_missing",
-      severity: "fatal",
-      severityLabel: "critical",
-      title: "Backup sem evidencia registrada",
-      message:
-        "Nenhuma evidencia de backup foi encontrada em variaveis ou eventos operacionais.",
-      metadata: { rpoTargetHours, backupAgeHours: null },
-    });
-  } else if ((backupAgeHours ?? 0) > 72) {
-    alerts.push({
-      type: "backup_missing",
-      severity: "fatal",
-      severityLabel: "critical",
-      title: "Backup acima de 72 horas",
-      message: `Ultimo backup tem ${backupAgeHours}h. Meta RPO: ${rpoTargetHours}h.`,
-      metadata: { rpoTargetHours, backupAgeHours, thresholdHours: 72 },
-    });
-  } else if ((backupAgeHours ?? 0) > 24) {
-    alerts.push({
-      type: "backup_missing",
-      severity: "warning",
-      severityLabel: "warning",
-      title: "Backup acima de 24 horas",
-      message: `Ultimo backup tem ${backupAgeHours}h. Meta RPO: ${rpoTargetHours}h.`,
-      metadata: { rpoTargetHours, backupAgeHours, thresholdHours: 24 },
-    });
-  }
-
-  if (backupStatus === "failed") {
-    alerts.push({
-      type: "backup_failed",
-      severity: "fatal",
-      severityLabel: "critical",
-      title: "Falha de backup registrada",
-      message: "A ultima evidencia de backup indica falha.",
-      metadata: {
-        backupStatus,
-        backupFailedAt: backupFailedAt?.toISOString() ?? null,
-      },
-    });
-  }
-
-  if (!restoreTestPassed) {
-    alerts.push({
-      type: "restore_test_failed",
-      severity: "warning",
-      severityLabel: "warning",
-      title: "Restore test nao aprovado",
-      message: "Nenhuma evidencia de teste de restore aprovado foi encontrada.",
-      metadata: {
-        rtoTargetHours,
-        restoreTestAt: restoreTestAt?.toISOString() ?? null,
-      },
-    });
-  }
-
-  for (const table of tableErrors) {
-    alerts.push({
-      type: "restore_test_failed",
-      severity: "fatal",
-      severityLabel: "critical",
-      title: `Tabela critica inacessivel: ${table.table}`,
-      message:
-        table.error ?? "Tabela critica nao respondeu a consulta de prontidao.",
-      metadata: { table: table.table, status: table.status },
-    });
-  }
+  const history = {
+    backupCompleted: events.filter(event => event.type === "backup_completed")
+      .length,
+    backupFailed: events.filter(event => event.type === "backup_failed").length,
+    restorePassed: events.filter(event => event.type === "restore_test_passed")
+      .length,
+    restoreFailed: events.filter(event => event.type === "restore_test_failed")
+      .length,
+  };
+  const evaluation = evaluateDisasterReadiness({
+    rpoTargetHours,
+    rtoTargetHours,
+    restoreMaxAgeHours,
+    retentionDays,
+    policyExplicit:
+      ENV.drPolicyMissingVariables.length === 0 &&
+      ENV.drPolicyInvalidVariables.length === 0,
+    scheduleEnabled: ENV.drScheduleEnabled,
+    lastBackupAt,
+    backupStatus,
+    restoreTestAt,
+    restoreStatus,
+    restoreDurationMs,
+    history,
+    tableErrors,
+  });
+  const alerts = evaluation.issues.map(issue => ({
+    type: issue.type,
+    level: issue.level,
+    severity:
+      issue.level === "no-go"
+        ? ("fatal" as const)
+        : issue.level === "warning"
+          ? ("warning" as const)
+          : ("warning" as const),
+    severityLabel: issue.level,
+    title: issue.title,
+    message: issue.message,
+    action: issue.action,
+    metadata: issue.metadata,
+  }));
 
   await persistDisasterReadinessAlerts(alerts);
 
-  const status = alerts.some(alert => alert.severity === "fatal")
-    ? "critical"
-    : alerts.length > 0
-      ? "warning"
-      : "healthy";
-
   return {
-    status,
+    status: evaluation.status,
+    reason: evaluation.reason,
+    reasons: evaluation.reasons,
+    nextAction: evaluation.nextAction,
     rpoTargetHours,
     rtoTargetHours,
+    restoreMaxAgeHours,
+    retentionDays,
     lastBackupAt: lastBackupAt?.toISOString() ?? null,
-    backupAgeHours,
-    backupStatus: backupStatus || "unknown",
+    backupAgeHours: evaluation.backupAgeHours,
+    backupWithinRpo: evaluation.backupWithinRpo,
+    backupStatus,
     restoreTestAt: restoreTestAt?.toISOString() ?? null,
+    restoreAgeHours: evaluation.restoreAgeHours,
+    restoreWithinWindow: evaluation.restoreWithinWindow,
+    restoreStatus,
     restoreTestPassed,
+    restoreDurationMs: evaluation.restoreDurationMs,
+    restoreDurationHours: evaluation.restoreDurationHours,
+    rtoMet: evaluation.rtoMet,
+    recurringEvidence: evaluation.recurringEvidence,
+    configuration: {
+      policyExplicit:
+        ENV.drPolicyMissingVariables.length === 0 &&
+        ENV.drPolicyInvalidVariables.length === 0,
+      missingVariables: ENV.drPolicyMissingVariables,
+      invalidVariables: ENV.drPolicyInvalidVariables,
+      scheduleEnabled: ENV.drScheduleEnabled,
+    },
+    history,
     criticalTables,
     alerts,
     events: {
@@ -4302,7 +4322,9 @@ function buildQueueIntegrityDashboard(
   const recentFailedRecoveryCutoff = now - 7 * 24 * 60 * 60 * 1000;
   const recentFailedRecoveryJobs = failedRecoveryJobs.filter(job => {
     const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
-    return Number.isFinite(createdAt) && createdAt >= recentFailedRecoveryCutoff;
+    return (
+      Number.isFinite(createdAt) && createdAt >= recentFailedRecoveryCutoff
+    );
   });
   const failedRecoveries = failedRecoveryJobs.length;
   const recentFailedRecoveries = recentFailedRecoveryJobs.length;
@@ -4605,13 +4627,6 @@ function roundMetric(value: number, digits = 1) {
   return Math.round(value * factor) / factor;
 }
 
-const PERFORMANCE_BENCHMARK_TARGETS: Record<number, number> = {
-  250: 15_000,
-  500: 30_000,
-  1000: 60_000,
-  2000: 180_000,
-};
-
 export type CreatePerformanceBenchmarkInput = {
   scenario?: string;
   stopCount: number;
@@ -4699,69 +4714,207 @@ export async function createPerformanceBenchmark(
   return result[0] ?? null;
 }
 
+function parsePerformanceBenchmarkMetadata(value: unknown) {
+  if (!value) return {} as Record<string, any>;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as Record<string, any>;
+    } catch {
+      return {} as Record<string, any>;
+    }
+  }
+  return typeof value === "object"
+    ? (value as Record<string, any>)
+    : ({} as Record<string, any>);
+}
+
+function benchmarkProviderType(metadata: Record<string, any>) {
+  if (metadata.providerType) return String(metadata.providerType);
+  try {
+    const hostname = new URL(
+      String(metadata.osrmBaseUrl || "")
+    ).hostname.toLowerCase();
+    return hostname === "router.project-osrm.org" ||
+      hostname.endsWith(".project-osrm.org")
+      ? "public"
+      : "self_hosted";
+  } catch {
+    return null;
+  }
+}
+
+function evaluatePersistedBenchmark(row: any) {
+  const metadata = parsePerformanceBenchmarkMetadata(row?.metadata);
+  return evaluatePerformanceBenchmarkRun({
+    stopCount: Number(row?.stopCount ?? row?.stop_count ?? 0),
+    runtimeMs: Number(row?.runtimeMs ?? row?.runtime_ms ?? 0),
+    success: Boolean(row?.success),
+    osrmCalls: Number(row?.osrmCalls ?? row?.osrm_calls ?? 0),
+    osrmFailures: Number(row?.osrmFailures ?? row?.osrm_failures ?? 0),
+    matrixCacheHit: Number(row?.matrixCacheHit ?? row?.matrix_cache_hit ?? 0),
+    matrixCacheMiss: Number(
+      row?.matrixCacheMiss ?? row?.matrix_cache_miss ?? 0
+    ),
+    providerType: benchmarkProviderType(metadata),
+    qualityScore:
+      metadata.qualityScore == null ? null : Number(metadata.qualityScore),
+    qualityStatus:
+      metadata.qualityStatus == null ? null : String(metadata.qualityStatus),
+    duplicateAddressCount:
+      metadata.duplicateAddressCount == null
+        ? null
+        : Number(metadata.duplicateAddressCount),
+    duplicateCoordinateCount:
+      metadata.duplicateCoordinateCount == null
+        ? null
+        : Number(metadata.duplicateCoordinateCount),
+    payloadBytes:
+      metadata.payloadBytes == null ? null : Number(metadata.payloadBytes),
+  });
+}
+
 function buildPerformanceBenchmarkDashboard(
   rows: any[],
   days: number,
-  tableAvailable = true
+  tableAvailable = true,
+  historicalRows: any[] = rows
 ) {
-  const scenarioTargets = [250, 500, 1000, 2000].map(stopCount => {
-    const values = rows.filter(
-      row => Number(row.stopCount ?? row.stop_count) === stopCount
-    );
-    const runtimes = values.map(row =>
-      Number(row.runtimeMs ?? row.runtime_ms ?? 0)
-    );
-    const latest = values
-      .slice()
-      .sort(
-        (a, b) =>
-          new Date(b.createdAt ?? b.created_at ?? 0).getTime() -
-          new Date(a.createdAt ?? a.created_at ?? 0).getTime()
-      )[0];
-    const latestRuntimeMs = Number(
-      latest?.runtimeMs ?? latest?.runtime_ms ?? 0
-    );
-    const targetMs = PERFORMANCE_BENCHMARK_TARGETS[stopCount];
-    const latestCriteriaMet = Boolean(
-      latest?.criteriaMet ?? latest?.criteria_met ?? false
-    );
-    return {
-      stopCount,
-      targetMs,
-      runs: values.length,
-      latestRuntimeMs,
-      latestPeakMemoryMb: Number(
-        latest?.peakMemoryMb ?? latest?.peak_memory_mb ?? 0
-      ),
-      latestQueueWaitMs: Number(
-        latest?.queueWaitMs ?? latest?.queue_wait_ms ?? 0
-      ),
-      latestOsrmLatencyMs: Number(
-        latest?.osrmLatencyMs ?? latest?.osrm_latency_ms ?? 0
-      ),
-      latestAuditCycles: Number(
-        latest?.auditCycles ?? latest?.audit_cycles ?? 0
-      ),
-      latestMicroClusterCount: Number(
-        latest?.microClusterCount ?? latest?.micro_cluster_count ?? 0
-      ),
-      latestCriteriaMet,
-      averageRuntimeMs: Math.round(metricAverage(runtimes)),
-      p95RuntimeMs: Math.round(metricPercentile(runtimes, 95)),
-      p99RuntimeMs: Math.round(metricPercentile(runtimes, 99)),
-      status: !latest
+  const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+  const scenarioTargets = Object.keys(PERFORMANCE_BENCHMARK_TARGETS)
+    .map(Number)
+    .map(stopCount => {
+      const values = rows.filter(
+        row => Number(row.stopCount ?? row.stop_count) === stopCount
+      );
+      const historicalValues = historicalRows.filter(
+        row => Number(row.stopCount ?? row.stop_count) === stopCount
+      );
+      const runtimes = values.map(row =>
+        Number(row.runtimeMs ?? row.runtime_ms ?? 0)
+      );
+      const latest = historicalValues
+        .slice()
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt ?? b.created_at ?? 0).getTime() -
+            new Date(a.createdAt ?? a.created_at ?? 0).getTime()
+        )[0];
+      const latestAt = latest?.createdAt ?? latest?.created_at ?? null;
+      const latestAtMs = latestAt ? new Date(latestAt).getTime() : 0;
+      const fresh = Boolean(latest && latestAtMs >= cutoffMs);
+      const latestRuntimeMs = Number(
+        latest?.runtimeMs ?? latest?.runtime_ms ?? 0
+      );
+      const latestMetadata = parsePerformanceBenchmarkMetadata(
+        latest?.metadata
+      );
+      const latestEvaluation = latest
+        ? evaluatePersistedBenchmark(latest)
+        : null;
+      const validRuns = values.filter(
+        row => evaluatePersistedBenchmark(row).passed
+      ).length;
+      const failureReasons = latestEvaluation
+        ? [...latestEvaluation.failureReasons]
+        : [`Sem benchmark persistido para ${stopCount} paradas.`];
+
+      if (latest && !fresh) {
+        failureReasons.unshift(
+          `Ultimo benchmark expirou da janela de ${days} dias.`
+        );
+      }
+      if (validRuns < PERFORMANCE_BENCHMARK_SAMPLE_SIZE) {
+        failureReasons.push(
+          `Amostra valida ${validRuns}/${PERFORMANCE_BENCHMARK_SAMPLE_SIZE} na janela.`
+        );
+      }
+
+      const uniqueFailureReasons = Array.from(new Set(failureReasons));
+      const status = !latest
         ? "missing"
-        : latestCriteriaMet && latestRuntimeMs > 0 && latestRuntimeMs < targetMs
-          ? "ready"
-          : "no-go",
-      latestAt: latest?.createdAt ?? latest?.created_at ?? null,
-    };
-  });
+        : !fresh
+          ? "expired"
+          : latestEvaluation?.passed &&
+              validRuns >= PERFORMANCE_BENCHMARK_SAMPLE_SIZE
+            ? "ready"
+            : "no-go";
+
+      return {
+        stopCount,
+        targetMs: PERFORMANCE_BENCHMARK_TARGETS[stopCount],
+        minimumSampleSize: PERFORMANCE_BENCHMARK_SAMPLE_SIZE,
+        runs: values.length,
+        historicalRuns: historicalValues.length,
+        validRuns,
+        fresh,
+        latestRuntimeMs,
+        latestSuccess: Boolean(latest?.success),
+        latestStoredCriteriaMet: Boolean(
+          latest?.criteriaMet ?? latest?.criteria_met ?? false
+        ),
+        latestCriteriaMet: Boolean(latestEvaluation?.passed),
+        latestRuntimeWithinTarget: Boolean(
+          latestEvaluation?.runtimeWithinTarget
+        ),
+        latestOsrmFailureRate: latestEvaluation?.osrmFailureRate ?? null,
+        latestProviderType: benchmarkProviderType(latestMetadata),
+        latestQualityScore:
+          latestMetadata.qualityScore == null
+            ? null
+            : Number(latestMetadata.qualityScore),
+        latestQualityStatus: latestMetadata.qualityStatus ?? null,
+        latestPayloadBytes:
+          latestMetadata.payloadBytes == null
+            ? null
+            : Number(latestMetadata.payloadBytes),
+        latestExecutionMode: latestMetadata.executionMode ?? "unknown",
+        latestWorkerUsed: Boolean(latestMetadata.workerUsed),
+        latestWorkerHostname: latestMetadata.workerHostname ?? null,
+        latestQueueUsed: Boolean(latestMetadata.queueUsed),
+        latestPeakMemoryMb: Number(
+          latest?.peakMemoryMb ?? latest?.peak_memory_mb ?? 0
+        ),
+        latestQueueWaitMs: Number(
+          latest?.queueWaitMs ?? latest?.queue_wait_ms ?? 0
+        ),
+        latestOsrmLatencyMs: Number(
+          latest?.osrmLatencyMs ?? latest?.osrm_latency_ms ?? 0
+        ),
+        latestOsrmCalls: Number(latest?.osrmCalls ?? latest?.osrm_calls ?? 0),
+        latestOsrmFailures: Number(
+          latest?.osrmFailures ?? latest?.osrm_failures ?? 0
+        ),
+        latestMatrixCacheHit: Number(
+          latest?.matrixCacheHit ?? latest?.matrix_cache_hit ?? 0
+        ),
+        latestMatrixCacheMiss: Number(
+          latest?.matrixCacheMiss ?? latest?.matrix_cache_miss ?? 0
+        ),
+        latestAuditCycles: Number(
+          latest?.auditCycles ?? latest?.audit_cycles ?? 0
+        ),
+        latestMicroClusterCount: Number(
+          latest?.microClusterCount ?? latest?.micro_cluster_count ?? 0
+        ),
+        failureReasons: uniqueFailureReasons,
+        recommendedAction:
+          uniqueFailureReasons[0] ??
+          `Executar mais benchmarks ate completar ${PERFORMANCE_BENCHMARK_SAMPLE_SIZE} amostras.`,
+        averageRuntimeMs: Math.round(metricAverage(runtimes)),
+        p95RuntimeMs: Math.round(metricPercentile(runtimes, 95)),
+        p99RuntimeMs: Math.round(metricPercentile(runtimes, 99)),
+        status,
+        latestAt,
+      };
+    });
 
   const totalRuns = rows.length;
   const successfulRuns = rows.filter(row => Boolean(row.success)).length;
-  const criteriaMetRuns = rows.filter(row =>
+  const storedCriteriaMetRuns = rows.filter(row =>
     Boolean(row.criteriaMet ?? row.criteria_met)
+  ).length;
+  const criteriaMetRuns = rows.filter(
+    row => evaluatePersistedBenchmark(row).passed
   ).length;
   const osrmCalls = rows.reduce(
     (total, row) => total + Number(row.osrmCalls ?? row.osrm_calls ?? 0),
@@ -4777,6 +4930,7 @@ function buildPerformanceBenchmarkDashboard(
     days,
     totalRuns,
     successfulRuns,
+    storedCriteriaMetRuns,
     criteriaMetRuns,
     successRate: roundMetric(metricPercent(successfulRuns, totalRuns)),
     criteriaMetRate: roundMetric(metricPercent(criteriaMetRuns, totalRuns)),
@@ -4784,6 +4938,20 @@ function buildPerformanceBenchmarkDashboard(
     osrmFailures,
     osrmFailureRate: roundMetric(metricPercent(osrmFailures, osrmCalls)),
     targets: scenarioTargets,
+    commercialLimits: {
+      betaControlledStops: 150,
+      initialProductionStops: 150,
+      increaseTo250Requires: "benchmark250 ready",
+      increaseTo500Requires: "benchmark250 e benchmark500 ready",
+      highScaleBenchmarkEvidenceReady: scenarioTargets
+        .filter(
+          target => target.stopCount === 1000 || target.stopCount === 2000
+        )
+        .every(target => target.status === "ready"),
+      highScalePromiseAllowed: false,
+      highScaleRequires:
+        "benchmarks 1000/2000 ready, OSRM proprio, DR ok e workers em hosts independentes",
+    },
     status: !tableAvailable
       ? "unavailable"
       : scenarioTargets.every(target => target.status === "ready")
@@ -4805,20 +4973,37 @@ export async function getPerformanceBenchmarkDashboard(days = 30) {
       const rows = memory.performanceBenchmarks.filter(
         row => new Date(row.createdAt).getTime() >= cutoffDate.getTime()
       );
-      return buildPerformanceBenchmarkDashboard(rows, safeDays);
+      return buildPerformanceBenchmarkDashboard(
+        rows,
+        safeDays,
+        true,
+        memory.performanceBenchmarks
+      );
     }
     requireConfiguredDatabase();
   }
 
   try {
-    const rows = await db
-      .select()
-      .from(performanceBenchmarks)
-      .where(gte(performanceBenchmarks.createdAt, cutoffDate))
-      .orderBy(desc(performanceBenchmarks.createdAt))
-      .limit(500);
+    const [rows, historicalRows] = await Promise.all([
+      db
+        .select()
+        .from(performanceBenchmarks)
+        .where(gte(performanceBenchmarks.createdAt, cutoffDate))
+        .orderBy(desc(performanceBenchmarks.createdAt))
+        .limit(500),
+      db
+        .select()
+        .from(performanceBenchmarks)
+        .orderBy(desc(performanceBenchmarks.createdAt))
+        .limit(500),
+    ]);
 
-    return buildPerformanceBenchmarkDashboard(rows, safeDays);
+    return buildPerformanceBenchmarkDashboard(
+      rows,
+      safeDays,
+      true,
+      historicalRows
+    );
   } catch (error) {
     return {
       ...buildPerformanceBenchmarkDashboard([], safeDays, false),
@@ -4899,7 +5084,7 @@ function buildGoLive500Dashboard(args: {
   } else if (benchmark500Status !== "ready") {
     issues.push({
       severity: "critical",
-      message: `Benchmark oficial de ${maxRouteStops} paradas nao atingiu a meta de 30 segundos.`,
+      message: `Benchmark oficial de ${maxRouteStops} paradas nao liberado: ${benchmark500?.failureReasons?.[0] ?? "evidencia insuficiente"}.`,
     });
   }
   if (runtimeP95Ms > 60_000) {
@@ -4980,6 +5165,12 @@ function buildGoLive500Dashboard(args: {
           latestRuntimeMs: benchmark500.latestRuntimeMs,
           latestPeakMemoryMb: benchmark500.latestPeakMemoryMb,
           latestOsrmLatencyMs: benchmark500.latestOsrmLatencyMs,
+          latestSuccess: benchmark500.latestSuccess,
+          latestCriteriaMet: benchmark500.latestCriteriaMet,
+          validRuns: benchmark500.validRuns,
+          minimumSampleSize: benchmark500.minimumSampleSize,
+          failureReasons: benchmark500.failureReasons,
+          recommendedAction: benchmark500.recommendedAction,
           runs: benchmark500.runs,
           latestAt: benchmark500.latestAt,
         }

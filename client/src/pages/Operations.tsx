@@ -1008,9 +1008,9 @@ export default function Operations() {
               {disasterReadiness ? (
                 <div
                   className={`rounded-lg border p-4 ${
-                    disasterReadiness.status === "healthy"
+                    disasterReadiness.status === "ok"
                       ? "border-emerald-200 bg-emerald-50/50"
-                      : disasterReadiness.status === "critical"
+                      : disasterReadiness.status === "no-go"
                         ? "border-destructive/40 bg-destructive/5"
                         : "border-amber-300 bg-amber-50/60"
                   }`}
@@ -1025,18 +1025,20 @@ export default function Operations() {
                     </div>
                     <Badge
                       variant={
-                        disasterReadiness.status === "critical"
+                        disasterReadiness.status === "no-go"
                           ? "destructive"
-                          : disasterReadiness.status === "healthy"
+                          : disasterReadiness.status === "ok"
                             ? "outline"
                             : "secondary"
                       }
                     >
-                      {disasterReadiness.status === "healthy"
-                        ? "Saudavel"
-                        : disasterReadiness.status === "critical"
-                          ? "Critico"
-                          : "Atencao"}
+                      {disasterReadiness.status === "ok"
+                        ? "OK"
+                        : disasterReadiness.status === "no-go"
+                          ? "No-go"
+                          : disasterReadiness.status === "warning"
+                            ? "Warning"
+                            : "Atencao"}
                     </Badge>
                   </div>
 
@@ -1049,7 +1051,8 @@ export default function Operations() {
                         {formatDate(disasterReadiness.lastBackupAt)}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        Idade: {formatHours(disasterReadiness.backupAgeHours)}
+                        {disasterReadiness.backupStatus ?? "unknown"} - Idade:{" "}
+                        {formatHours(disasterReadiness.backupAgeHours)}
                       </p>
                     </div>
                     <div className="rounded-lg border border-border/70 bg-background/80 p-3">
@@ -1057,12 +1060,15 @@ export default function Operations() {
                         Restore test
                       </p>
                       <p className="mt-1 text-sm font-semibold">
-                        {disasterReadiness.restoreTestPassed
+                        {disasterReadiness.restoreStatus === "passed"
                           ? "Aprovado"
-                          : "Sem evidencia"}
+                          : disasterReadiness.restoreStatus === "failed"
+                            ? "Falhou"
+                            : "Sem evidencia"}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        {formatDate(disasterReadiness.restoreTestAt)}
+                        {formatDate(disasterReadiness.restoreTestAt)} - Idade:{" "}
+                        {formatHours(disasterReadiness.restoreAgeHours)}
                       </p>
                     </div>
                     <div className="rounded-lg border border-border/70 bg-background/80 p-3">
@@ -1094,6 +1100,12 @@ export default function Operations() {
                       </p>
                     </div>
                   </div>
+
+                  {disasterReadiness.nextAction ? (
+                    <p className="mt-4 text-sm text-slate-700">
+                      Proxima acao: {disasterReadiness.nextAction}
+                    </p>
+                  ) : null}
 
                   {Array.isArray(disasterReadiness.alerts) &&
                   disasterReadiness.alerts.length > 0 ? (
@@ -1358,8 +1370,23 @@ export default function Operations() {
                               ? "READY"
                               : target.status === "no-go"
                                 ? "NO-GO"
-                                : "Sem dado"}
+                                : target.status === "expired"
+                                  ? "Expirado"
+                                  : "Sem dado"}
                           </Badge>
+                          {Array.isArray(target.failureReasons) &&
+                          target.failureReasons.length > 0 ? (
+                            <div className="md:col-span-6">
+                              <p className="text-xs font-medium text-destructive">
+                                {target.failureReasons[0]}
+                              </p>
+                              {target.recommendedAction ? (
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  Acao: {target.recommendedAction}
+                                </p>
+                              ) : null}
+                            </div>
+                          ) : null}
                         </div>
                       )
                     )}
