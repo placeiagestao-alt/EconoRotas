@@ -35,12 +35,27 @@ function createAuthContext(
 describe("Route endpoints", () => {
   afterEach(() => {
     ENV.osrmRequired = false;
-    ENV.osrmRequiredMinStops = 101;
     ENV.maxSyncStops = 160;
     ENV.maxRouteStops = 160;
     ENV.maxGeographicFallbackStops = 160;
     ENV.bullmqRedisUrl = "";
     ENV.adminEmails = "";
+    ENV.backupLastCompletedAt = "";
+    ENV.backupStatus = "";
+    ENV.restoreTestLastPassedAt = "";
+    ENV.restoreTestPassed = false;
+    ENV.drRpoHours = 24;
+    ENV.drRtoHours = 4;
+    ENV.drRestoreMaxAgeHours = 168;
+    ENV.drRetentionDays = 14;
+    ENV.drScheduleEnabled = false;
+    ENV.drPolicyMissingVariables = [
+      "DR_RPO_HOURS",
+      "DR_RTO_HOURS",
+      "DR_RESTORE_MAX_AGE_HOURS",
+      "DR_RETENTION_DAYS",
+    ];
+    ENV.drPolicyInvalidVariables = [];
   });
 
   const makeStops = (count: number) =>
@@ -838,7 +853,7 @@ describe("Route endpoints", () => {
         "admin_dashboard_metrics",
       ])
     );
-    expect(readiness.status).toMatch(/healthy|warning|critical/);
+    expect(readiness.status).toMatch(/ok|attention|warning|no-go/);
     expect(Array.isArray(readiness.alerts)).toBe(true);
   });
 
@@ -890,20 +905,66 @@ describe("Route endpoints", () => {
     expect(readiness.restoreTestPassed).toBe(true);
   });
 
-  it("persists performance benchmark history for admin dashboards", async () => {
-    await db.createPerformanceBenchmark({
-      scenario: "test-suite",
-      stopCount: 250,
-      runtimeMs: 12_000,
-      peakMemoryMb: 180,
-      queueWaitMs: 20,
-      osrmLatencyMs: 40,
-      auditCycles: 2,
-      microClusterCount: 4,
-      osrmCalls: 8,
-      osrmFailures: 0,
-      success: true,
+  it("does not let static environment flags mask newer DR failures", async () => {
+    ENV.backupLastCompletedAt = "2026-01-01T00:00:00.000Z";
+    ENV.backupStatus = "completed";
+    ENV.restoreTestLastPassedAt = "2026-01-01T00:00:00.000Z";
+    ENV.restoreTestPassed = true;
+
+    await db.createOperationalEvent({
+      userId: null,
+      routeId: null,
+      stopId: null,
+      type: "backup_failed",
+      severity: "fatal",
+      source: "test.disasterRecovery",
+      title: "Falha nova de backup",
+      message: "Falha posterior ao estado estatico.",
     });
+    await db.createOperationalEvent({
+      userId: null,
+      routeId: null,
+      stopId: null,
+      type: "restore_test_failed",
+      severity: "fatal",
+      source: "test.disasterRecovery",
+      title: "Falha nova de restore",
+      message: "Falha posterior ao estado estatico.",
+    });
+
+    const readiness = await db.getDisasterReadinessDashboard();
+
+    expect(readiness.status).toBe("no-go");
+    expect(readiness.backupStatus).toBe("failed");
+    expect(readiness.restoreStatus).toBe("failed");
+    expect(readiness.restoreTestPassed).toBe(false);
+  });
+
+  it("persists performance benchmark history for admin dashboards", async () => {
+    for (let sample = 0; sample < 3; sample += 1) {
+      await db.createPerformanceBenchmark({
+        scenario: "test-suite",
+        stopCount: 250,
+        runtimeMs: 12_000 + sample,
+        peakMemoryMb: 180,
+        queueWaitMs: 20,
+        osrmLatencyMs: 40,
+        auditCycles: 2,
+        microClusterCount: 4,
+        osrmCalls: 8,
+        osrmFailures: 0,
+        matrixCacheMiss: 1,
+        success: true,
+        metadata: {
+          providerType: "self_hosted",
+          qualityScore: 92,
+          qualityStatus: "good",
+          duplicateAddressCount: 0,
+          duplicateCoordinateCount: 0,
+          payloadBytes: 4096,
+        },
+      });
+    }
 
     const dashboard = await db.getPerformanceBenchmarkDashboard(30);
 
@@ -913,7 +974,45 @@ describe("Route endpoints", () => {
     expect(dashboard.totalRuns).toBeGreaterThanOrEqual(1);
     expect(dashboard.successRate).toBeGreaterThan(0);
     expect(target250?.latestRuntimeMs).toBeGreaterThan(0);
+    expect(target250?.validRuns).toBe(3);
     expect(target250?.status).toBe("ready");
+  });
+
+  it("explains a fast benchmark rejected after OSRM failure", async () => {
+    await db.createPerformanceBenchmark({
+      scenario: "osrm-enterprise",
+      stopCount: 250,
+      runtimeMs: 1931,
+      peakMemoryMb: 242,
+      osrmLatencyMs: 1903,
+      osrmCalls: 1,
+      osrmFailures: 1,
+      matrixCacheMiss: 1,
+      success: false,
+      criteriaMet: false,
+      metadata: {
+        providerType: "public",
+        payloadBytes: 25_000,
+        duplicateAddressCount: 0,
+        duplicateCoordinateCount: 0,
+      },
+    });
+
+    const dashboard = await db.getPerformanceBenchmarkDashboard(30);
+    const target250 = dashboard.targets.find(
+      target => target.stopCount === 250
+    );
+
+    expect(target250?.latestRuntimeWithinTarget).toBe(true);
+    expect(target250?.latestSuccess).toBe(false);
+    expect(target250?.latestCriteriaMet).toBe(false);
+    expect(target250?.failureReasons).toContain(
+      "A otimizacao nao produziu uma rota valida."
+    );
+    expect(target250?.failureReasons).toContain(
+      "OSRM falhou em 1/1 chamada(s) (100%)."
+    );
+    expect(target250?.status).toBe("no-go");
   });
 
   it("includes performance benchmarks in the consolidated admin dashboard", async () => {
@@ -923,7 +1022,7 @@ describe("Route endpoints", () => {
     const dashboard = await caller.admin.dashboard();
 
     expect((dashboard as any).performanceBenchmarks).toBeDefined();
-    expect((dashboard as any).performanceBenchmarks.targets).toHaveLength(4);
+    expect((dashboard as any).performanceBenchmarks.targets).toHaveLength(6);
   });
 
   it("exposes a consolidated multi-vehicle readiness decision", async () => {
@@ -936,12 +1035,20 @@ describe("Route endpoints", () => {
     expect(readiness.items.osrmEnterprise.status).toMatch(
       /READY|PARTIAL|NO-GO/
     );
+    expect(readiness.items.databasePersistence.status).toMatch(
+      /READY|PARTIAL|NO-GO/
+    );
+    expect(readiness.items.queueInfrastructure.status).toMatch(
+      /READY|PARTIAL|NO-GO/
+    );
     expect(readiness.items.workerRedundancy.status).toMatch(
       /READY|PARTIAL|NO-GO/
     );
     expect(readiness.items.disasterRecovery.status).toMatch(
       /READY|PARTIAL|NO-GO/
     );
+    expect(readiness.items.benchmark50.evidence.stopCount).toBe(50);
+    expect(readiness.items.benchmark150.evidence.stopCount).toBe(150);
     expect(readiness.items.benchmark250.evidence.stopCount).toBe(250);
     expect(readiness.items.benchmark500.evidence.stopCount).toBe(500);
     expect(readiness.items.benchmark1000.evidence.stopCount).toBe(1000);
@@ -987,7 +1094,6 @@ describe("Route endpoints", () => {
 
   it("rejects optimization when OSRM is required and road metrics are unavailable", async () => {
     ENV.osrmRequired = true;
-    ENV.osrmRequiredMinStops = 1;
     const caller = appRouter.createCaller(createAuthContext(8217));
 
     const route = await caller.routes.create({

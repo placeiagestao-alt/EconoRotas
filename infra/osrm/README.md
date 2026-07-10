@@ -9,7 +9,6 @@ Objetivo: hospedar OSRM proprio para remover dependencia do `router.project-osrm
    - 16 GB RAM runtime, 32 GB RAM recomendado para preprocessamento
    - 80 GB disco minimo
 2. Liberar portas publicas:
-
    - `22/tcp` para instalacao via SSH.
    - `80/tcp` e `443/tcp` para Nginx/Certbot.
    - nao exponha `5000/tcp`; o OSRM fica atras do proxy.
@@ -64,11 +63,11 @@ Esse segundo script valida o endpoint, configura:
 ```env
 OSRM_ENABLED=true
 OSRM_BASE_URL=https://econorotas.duckdns.org
+OSRM_PROFILE=driving
 OSRM_REQUEST_TIMEOUT_MS=8000
 OSRM_HEALTH_TIMEOUT_MS=3000
 OSRM_MAX_TABLE_NODES=100
 OSRM_REQUIRED=true
-OSRM_REQUIRED_MIN_STOPS=101
 ```
 
 e publica novo deploy de producao.
@@ -118,9 +117,9 @@ Configurar na aplicacao:
 OSRM_BASE_URL=https://osrm.econorotas.com
 OSRM_REQUIRED=true
 OSRM_ENABLED=true
+OSRM_PROFILE=driving
 OSRM_REQUEST_TIMEOUT_MS=8000
 OSRM_HEALTH_TIMEOUT_MS=3000
-OSRM_REQUIRED_MIN_STOPS=101
 ```
 
 ## Healthcheck

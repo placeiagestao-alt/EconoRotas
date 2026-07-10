@@ -19,12 +19,12 @@ const required = [
   },
   {
     name: "JWT_SECRET",
-    check: (value) => typeof value === "string" && value.length >= 32,
+    check: value => typeof value === "string" && value.length >= 32,
     message: "use um segredo aleatório com pelo menos 32 caracteres",
   },
   {
     name: "INTEGRATION_CREDENTIALS_SECRET",
-    check: (value) =>
+    check: value =>
       typeof (value || process.env.JWT_SECRET) === "string" &&
       (value || process.env.JWT_SECRET).length >= 32,
     message:
@@ -32,58 +32,87 @@ const required = [
   },
   {
     name: "PUBLIC_APP_URL",
-    check: (value) => /^https:\/\/.+/i.test(value || ""),
+    check: value => /^https:\/\/.+/i.test(value || ""),
     message: "use a URL pública HTTPS do app",
   },
   {
     name: "ALLOWED_ORIGINS",
-    check: (value) => Boolean(value),
+    check: value => Boolean(value),
     message: "liste os domínios autorizados para CORS",
   },
   {
     name: "VITE_ENABLE_DEV_LOGIN",
-    check: (value) => value !== "true",
+    check: value => value !== "true",
     message: "login de desenvolvimento deve ficar desligado",
   },
   {
     name: "ALLOW_EPHEMERAL_DB",
-    check: (value) => value !== "true",
+    check: value => value !== "true",
     message:
       "banco temporário deve ficar desligado em produção; use armazenamento persistente",
+  },
+  {
+    name: "OSRM_ENABLED",
+    check: value => value !== "false",
+    message: "mantenha OSRM_ENABLED=true para operacao comercial",
+  },
+  {
+    name: "OSRM_BASE_URL",
+    check: value => isOwnProductionOsrm(value),
+    message:
+      "configure uma URL HTTPS de OSRM proprio; router.project-osrm.org nao e aceito para escala",
+  },
+  {
+    name: "OSRM_REQUIRED",
+    check: value => value === "true",
+    message:
+      "use OSRM_REQUIRED=true para impedir fallback geografico silencioso em producao comercial",
+  },
+  {
+    name: "OSRM_PROFILE",
+    check: value => !value || /^[a-z0-9_-]+$/i.test(value),
+    message: "use um perfil OSRM valido, por exemplo driving",
   },
 ];
 
 const optionalWarnings = [
   {
     name: "REQUIRE_MANAGED_DATABASE",
-    warn: (value) => Number(process.env.CAPACITY_TARGET_USERS || 0) >= 50 && value !== "true",
+    warn: value =>
+      Number(process.env.CAPACITY_TARGET_USERS || 0) >= 50 && value !== "true",
     message:
       "para teste real com 50 usuarios, use REQUIRE_MANAGED_DATABASE=true e DATABASE_URL MySQL gerenciado",
   },
   {
     name: "DATABASE_SSL",
-    warn: (value) => Boolean(process.env.DATABASE_URL) && value !== "true",
+    warn: value => Boolean(process.env.DATABASE_URL) && value !== "true",
     message: "bancos gerenciados normalmente exigem SSL em produção",
   },
   {
     name: "NOMINATIM_CONTACT_EMAIL",
-    warn: (value) => !value,
+    warn: value => !value,
     message: "configure um e-mail de contato para uso responsável do geocoding",
   },
   {
-    name: "OSRM_BASE_URL",
-    warn: (value) =>
-      Number(process.env.CAPACITY_TARGET_USERS || 0) >= 50 &&
-      (!value || value.includes("router.project-osrm.org")),
+    name: "DR_POLICY",
+    warn: () =>
+      [
+        "DR_RPO_HOURS",
+        "DR_RTO_HOURS",
+        "DR_RESTORE_MAX_AGE_HOURS",
+        "DR_RETENTION_DAYS",
+      ].some(name => {
+        const value = Number(process.env[name]);
+        return !Number.isFinite(value) || value <= 0;
+      }),
     message:
-      "para teste real com 50 usuarios, configure uma instancia OSRM propria e evite depender do router.project-osrm.org",
+      "explicite valores numericos positivos para RPO, RTO, validade do restore e retencao",
   },
   {
-    name: "OSRM_REQUIRED",
-    warn: (value) =>
-      Number(process.env.CAPACITY_TARGET_USERS || 0) >= 50 && value !== "true",
+    name: "DR_SCHEDULE_ENABLED",
+    warn: value => value !== "true",
     message:
-      "ative OSRM_REQUIRED=true depois de configurar OSRM proprio para impedir fallback geografico silencioso",
+      "confirme true somente depois de validar a rotina recorrente de backup/restore",
   },
 ];
 
@@ -108,7 +137,7 @@ function isPersistentDatabaseUrl(value) {
 function hasRedisRestConfig() {
   return Boolean(
     (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) ||
-      (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN)
+    (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN)
   );
 }
 
@@ -122,6 +151,20 @@ function hasPersistentStorage() {
 
 function requiresManagedDatabase() {
   return process.env.REQUIRE_MANAGED_DATABASE === "true";
+}
+
+function isOwnProductionOsrm(value) {
+  try {
+    const url = new URL(value || "");
+    const hostname = url.hostname.toLowerCase();
+    return (
+      url.protocol === "https:" &&
+      hostname !== "router.project-osrm.org" &&
+      !hostname.endsWith(".project-osrm.org")
+    );
+  } catch {
+    return false;
+  }
 }
 
 const failures = [];

@@ -27,6 +27,7 @@ import {
 } from "./optimization";
 import {
   buildSequentialRouteWithRoadMetrics,
+  getOsrmConfiguration,
   optimizeRouteWithRoadMetrics,
 } from "./osrm";
 import {
@@ -1563,6 +1564,7 @@ export async function optimizeUserRoute(
   }
 
   const mode = requestedMode || route.mode;
+  const osrmBaseUrl = getOsrmConfiguration().baseUrl;
   const clusteringStartedAt = Date.now();
   clusterStops(locations, { localityMode: options?.localityMode });
   runtimeBreakdown.clusteringMs = Date.now() - clusteringStartedAt;
@@ -1615,7 +1617,7 @@ export async function optimizeUserRoute(
               Math.max(1, runtimeBreakdown.osrmCallCount),
             minCalls: OSRM_CIRCUIT_MIN_CALLS,
             threshold: OSRM_CIRCUIT_FAILURE_RATE,
-            osrmBaseUrl: ENV.osrmBaseUrl,
+            osrmBaseUrl,
           },
         }).catch((error) => {
           console.warn("[Routes] Failed to record OSRM circuit event:", error);
@@ -1674,7 +1676,7 @@ export async function optimizeUserRoute(
         metadata: {
           stopCount: attemptLocations.length,
           maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
-          osrmBaseUrl: ENV.osrmBaseUrl,
+          osrmBaseUrl,
           auditSource,
         },
       }).catch((error) => {
@@ -1697,7 +1699,7 @@ export async function optimizeUserRoute(
         metadata: {
           stopCount: attemptLocations.length,
           maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
-          osrmBaseUrl: ENV.osrmBaseUrl,
+          osrmBaseUrl,
         },
       }).catch((error) => {
         console.warn("[Routes] Failed to record OSRM required event:", error);
@@ -1727,7 +1729,7 @@ export async function optimizeUserRoute(
         metadata: {
           stopCount: attemptLocations.length,
           maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
-          osrmBaseUrl: ENV.osrmBaseUrl,
+          osrmBaseUrl,
           auditSource,
           allowLargeSync: true,
         },
@@ -1758,7 +1760,7 @@ export async function optimizeUserRoute(
         metadata: {
           stopCount: attemptLocations.length,
           maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
-          osrmBaseUrl: ENV.osrmBaseUrl,
+          osrmBaseUrl,
           auditSource,
           auditPolicy,
           routingStrategy: getRoutingStrategy(auditPolicy),
@@ -2358,12 +2360,8 @@ export async function optimizeUserRoute(
   }
 
   const { optimized, audit, auditSource } = optimizationAttempt;
-  const osrmRequiredForRoute =
-    ENV.osrmRequired && routeStops.length >= ENV.osrmRequiredMinStops;
   const osrmRequiredBlocked =
-    osrmRequiredForRoute &&
-    !optimizationAttempt.usedRoadMetrics &&
-    optimizationAttempt.auditPolicy !== SHOPEE_STOP_AUDIT_POLICY;
+    ENV.osrmRequired && !optimizationAttempt.usedRoadMetrics;
   if (osrmRequiredBlocked) {
     const osrmFallbackIssue: RouteAuditIssue =
       audit.issues.find((issue) => issue.type === "osrm_fallback") ?? {
@@ -2399,8 +2397,8 @@ export async function optimizeUserRoute(
         issueCount: audit.issueCount,
         totalDistanceKm: audit.totalDistanceKm,
         osrmRequired: ENV.osrmRequired,
-        osrmRequiredMinStops: ENV.osrmRequiredMinStops,
-        osrmBaseUrl: ENV.osrmBaseUrl,
+        osrmRequiredForAllRoutes: true,
+        osrmBaseUrl,
         blockingIssue: osrmBlockingReason.issue,
       },
     }).catch((error) => {
@@ -2410,7 +2408,7 @@ export async function optimizeUserRoute(
     await recordRouteMetricForAttempt(osrmBlockingReason);
 
     throw new TRPCError({
-      code: "BAD_REQUEST",
+      code: "PRECONDITION_FAILED",
       message: osrmBlockingReason.message,
     });
   }

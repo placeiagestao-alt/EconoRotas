@@ -13,7 +13,7 @@ Plataforma escolhida: Vercel Hobby, por permitir deploy GitHub gratuito sem cart
 1. Acesse https://vercel.com/new
 2. Importe `placeiagestao-alt/EconoRotas`
 3. Framework preset: `Other`
-4. Build command: `pnpm run build:vercel`
+4. Build command: `pnpm run build:vercel:prod`
 5. Output directory: `dist/public`
 6. Install command: `pnpm install --frozen-lockfile`
 
@@ -80,6 +80,47 @@ corepack pnpm run db:migrate
 
 Sem `DATABASE_URL`, o deploy de producao falha por decisao do backend.
 
+## Politica de Disaster Recovery
+
+Configure na Vercel e no host que executa a rotina:
+
+```env
+DR_RPO_HOURS=24
+DR_RTO_HOURS=4
+DR_RESTORE_MAX_AGE_HOURS=168
+DR_RETENTION_DAYS=14
+DR_SCHEDULE_ENABLED=false
+```
+
+Mude `DR_SCHEDULE_ENABLED` para `true` somente depois de validar a task/cron real.
+Credenciais e nome do banco descartavel de restore devem permanecer apenas no
+host operacional, nunca no frontend. Consulte
+`ops/disaster-recovery/README.md`.
+
+## OSRM proprio
+
+Para escala comercial, configure estas variaveis no ambiente `Production` da
+Vercel e no ambiente dos workers:
+
+```env
+OSRM_ENABLED=true
+OSRM_BASE_URL=https://seu-osrm-proprio.example.com
+OSRM_PROFILE=driving
+OSRM_REQUEST_TIMEOUT_MS=8000
+OSRM_HEALTH_TIMEOUT_MS=3000
+OSRM_MAX_TABLE_NODES=100
+OSRM_REQUIRED=true
+```
+
+`OSRM_BASE_URL` deve usar HTTPS e nao pode apontar para
+`router.project-osrm.org`. O backend nao injeta endpoint publico quando a
+variavel esta ausente. Com `OSRM_REQUIRED=true`, qualquer indisponibilidade do
+OSRM bloqueia a otimizacao e impede fallback geografico silencioso.
+
+Ative `OSRM_REQUIRED=true` somente depois de validar os endpoints `route` e
+`table` da instancia propria. O script `pnpm run osrm:activate-vercel` executa
+essa validacao antes de alterar as variaveis.
+
 ## Validacao
 
 Apos o deploy, teste:
@@ -91,7 +132,13 @@ curl https://econo-rotas.vercel.app/api/health
 Resposta esperada:
 
 ```json
-{"ok":true,"app":"EconoRotas","environment":"production","mode":"persistent"}
+{
+  "ok": true,
+  "app": "EconoRota",
+  "environment": "production",
+  "mode": "persistent",
+  "osrm": { "providerType": "self_hosted", "productionReady": true }
+}
 ```
 
 ## Android

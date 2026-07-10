@@ -124,6 +124,7 @@ releases/
 .codex-artifacts/
 .manus/
 .manus-logs/
+ultimas execuções/
 .project-config.json
 **/.agents/
 **/skills-lock.json

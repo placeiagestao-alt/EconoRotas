@@ -236,55 +236,33 @@ function buildOperationalReadiness(args: {
     { mode: args.mode }
   );
 
-  if (!args.osrm?.enabled) {
-    addCheck(
-      "osrm",
-      args.osrm?.required ? "critical" : "attention",
-      args.osrm?.required
-        ? "OSRM obrigatorio esta desativado."
-        : "OSRM esta desativado; rotas dependerao de estimativa geografica.",
-      { required: Boolean(args.osrm?.required), baseUrl: args.osrm?.baseUrl ?? null }
-    );
-  } else if (args.osrm.required && !args.osrm.reachable) {
-    addCheck(
-      "osrm",
-      "critical",
-      "OSRM obrigatorio esta indisponivel.",
-      {
-        baseUrl: args.osrm.baseUrl ?? null,
-        latencyMs: args.osrm.latencyMs ?? null,
-        error: args.osrm.error ?? null,
-      }
-    );
-  } else if (!args.osrm.reachable) {
-    addCheck(
-      "osrm",
-      "attention",
-      "OSRM indisponivel; rotas pequenas podem usar fallback e rotas grandes podem ser bloqueadas.",
-      {
-        baseUrl: args.osrm.baseUrl ?? null,
-        latencyMs: args.osrm.latencyMs ?? null,
-        error: args.osrm.error ?? null,
-      }
-    );
-  } else if (String(args.osrm.baseUrl || "").includes("router.project-osrm.org")) {
-    addCheck(
-      "osrm",
-      "attention",
-      "OSRM usa endpoint publico. Funciona, mas nao e infra propria de producao.",
-      {
-        baseUrl: args.osrm.baseUrl,
-        latencyMs: args.osrm.latencyMs ?? null,
-        required: Boolean(args.osrm.required),
-      }
-    );
-  } else {
-    addCheck("osrm", "ready", "OSRM operacional.", {
-      baseUrl: args.osrm.baseUrl ?? null,
-      latencyMs: args.osrm.latencyMs ?? null,
-      required: Boolean(args.osrm.required),
-    });
-  }
+  const osrmStatus: OperationalReadinessStatus =
+    args.osrm?.status === "no-go"
+      ? "critical"
+      : args.osrm?.status === "ok"
+        ? "ready"
+        : "attention";
+  addCheck(
+    "osrm",
+    osrmStatus,
+    args.osrm?.reason ?? "Estado do OSRM indisponivel.",
+    {
+      enabled: Boolean(args.osrm?.enabled),
+      required: Boolean(args.osrm?.required),
+      configured: Boolean(args.osrm?.configured),
+      configurationValid: Boolean(args.osrm?.configurationValid),
+      reachable: Boolean(args.osrm?.reachable),
+      usable: Boolean(args.osrm?.usable),
+      productionReady: Boolean(args.osrm?.productionReady),
+      providerType: args.osrm?.providerType ?? "unconfigured",
+      isPublic: Boolean(args.osrm?.isPublic),
+      baseUrl: args.osrm?.baseUrl ?? null,
+      profile: args.osrm?.profile ?? null,
+      fallbackPolicy: args.osrm?.fallbackPolicy ?? null,
+      latencyMs: args.osrm?.latencyMs ?? null,
+      error: args.osrm?.error ?? null,
+    }
+  );
 
   if (!args.queue?.configured) {
     addCheck(
@@ -293,9 +271,14 @@ function buildOperationalReadiness(args: {
       "Fila assincrona nao configurada; otimizacoes ficam limitadas ao modo sincrono."
     );
   } else if (!args.queue.reachable) {
-    addCheck("queue", "critical", "Fila Redis/BullMQ configurada, mas indisponivel.", {
-      error: args.queue.error ?? null,
-    });
+    addCheck(
+      "queue",
+      "critical",
+      "Fila Redis/BullMQ configurada, mas indisponivel.",
+      {
+        error: args.queue.error ?? null,
+      }
+    );
   } else {
     if (args.queue.redis?.policyCompliant === false) {
       addCheck(
@@ -353,23 +336,41 @@ function buildOperationalReadiness(args: {
 
   if (args.disasterReadiness) {
     const status: OperationalReadinessStatus =
-      args.disasterReadiness.status === "healthy"
+      args.disasterReadiness.status === "ok"
         ? "ready"
-        : args.disasterReadiness.status === "critical"
+        : args.disasterReadiness.status === "no-go"
           ? "critical"
           : "attention";
     addCheck(
       "disasterRecovery",
       status,
-      status === "ready"
-        ? "Backup e restore com evidencias validas."
-        : "Backup/restore ainda nao esta pronto para operacao comercial.",
+      args.disasterReadiness.reason ??
+        (status === "ready"
+          ? "Backup e restore com evidencias validas."
+          : "Backup/restore ainda nao esta pronto para operacao comercial."),
       {
         status: args.disasterReadiness.status,
         lastBackupAt: args.disasterReadiness.lastBackupAt ?? null,
         backupAgeHours: args.disasterReadiness.backupAgeHours ?? null,
+        backupStatus: args.disasterReadiness.backupStatus ?? "unknown",
+        backupWithinRpo: Boolean(args.disasterReadiness.backupWithinRpo),
         restoreTestAt: args.disasterReadiness.restoreTestAt ?? null,
+        restoreAgeHours: args.disasterReadiness.restoreAgeHours ?? null,
+        restoreStatus: args.disasterReadiness.restoreStatus ?? "missing",
+        restoreWithinWindow: Boolean(
+          args.disasterReadiness.restoreWithinWindow
+        ),
         restoreTestPassed: Boolean(args.disasterReadiness.restoreTestPassed),
+        restoreDurationMs: args.disasterReadiness.restoreDurationMs ?? null,
+        rpoTargetHours: args.disasterReadiness.rpoTargetHours ?? null,
+        rtoTargetHours: args.disasterReadiness.rtoTargetHours ?? null,
+        restoreMaxAgeHours:
+          args.disasterReadiness.restoreMaxAgeHours ?? null,
+        retentionDays: args.disasterReadiness.retentionDays ?? null,
+        recurringEvidence: Boolean(
+          args.disasterReadiness.recurringEvidence
+        ),
+        nextAction: args.disasterReadiness.nextAction ?? null,
         alerts: args.disasterReadiness.alerts ?? [],
       }
     );
@@ -412,7 +413,7 @@ async function getStorageHealthSnapshot(source: string) {
   const storageAvailable = ENV.requireManagedDatabase
     ? database.connected
     : database.connected || fallbackStore.loaded || canUseLocalFallback;
-  const osrmAvailable = !osrm.required || (osrm.enabled && osrm.reachable);
+  const osrmAvailable = !osrm.required || osrm.usable;
   const systemAvailable = storageAvailable && osrmAvailable;
   const mode = database.connected
     ? "persistent"

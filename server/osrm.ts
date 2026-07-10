@@ -31,13 +31,49 @@ type OsrmRouteResponse = {
   code?: string;
 };
 
+export type OsrmProviderType =
+  | "unconfigured"
+  | "invalid"
+  | "public"
+  | "self_hosted";
+
+export type OsrmReadinessStatus = "ok" | "attention" | "no-go";
+
+export type OsrmConfiguration = {
+  configured: boolean;
+  configurationValid: boolean;
+  providerType: OsrmProviderType;
+  isPublic: boolean;
+  baseUrl: string | null;
+  profile: string;
+  productionEligible: boolean;
+  routingAllowed: boolean;
+  configurationError: string | null;
+};
+
 export type OsrmHealth = {
   enabled: boolean;
   required: boolean;
   configured: boolean;
+  configurationValid: boolean;
   reachable: boolean;
   baseUrl: string | null;
+  profile: string;
+  providerType: OsrmProviderType;
+  isPublic: boolean;
+  productionEligible: boolean;
+  productionReady: boolean;
+  usable: boolean;
+  fallbackPolicy: "blocked" | "geographic_allowed";
+  status: OsrmReadinessStatus;
+  reason: string;
   timeoutMs: number;
+  requestTimeoutMs: number;
+  latencyMs?: number;
+  maxTableNodes: number;
+  retries: number;
+  services: Array<"route" | "table">;
+  healthCheckSkipped: boolean;
   error: string | null;
 };
 
@@ -58,18 +94,103 @@ function readPositiveIntegerEnv(name: string, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-function isPublicOsrmProvider() {
+function sanitizeBaseUrlForDisplay(value: string) {
   try {
-    return new URL(ENV.osrmBaseUrl).hostname.toLowerCase() === "router.project-osrm.org";
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
   } catch {
-    return false;
+    return null;
+  }
+}
+
+export function getOsrmConfiguration(): OsrmConfiguration {
+  const rawBaseUrl = ENV.osrmBaseUrl.trim().replace(/\/+$/, "");
+  const profile = ENV.osrmProfile.trim();
+  if (!rawBaseUrl) {
+    return {
+      configured: false,
+      configurationValid: false,
+      providerType: "unconfigured",
+      isPublic: false,
+      baseUrl: null,
+      profile,
+      productionEligible: false,
+      routingAllowed: false,
+      configurationError: "OSRM_BASE_URL nao configurado.",
+    };
+  }
+
+  try {
+    const url = new URL(rawBaseUrl);
+    const protocolValid = url.protocol === "http:" || url.protocol === "https:";
+    const profileValid = /^[a-z0-9_-]+$/i.test(profile);
+    const hostname = url.hostname.toLowerCase();
+    const isPublic =
+      hostname === "router.project-osrm.org" ||
+      hostname.endsWith(".project-osrm.org");
+    const configurationValid = protocolValid && profileValid;
+    const productionEligible =
+      configurationValid && url.protocol === "https:" && !isPublic;
+    let configurationError: string | null = null;
+
+    if (!protocolValid) {
+      configurationError = "OSRM_BASE_URL deve usar protocolo http ou https.";
+    } else if (!profileValid) {
+      configurationError =
+        "OSRM_PROFILE invalido. Use apenas letras, numeros, hifen ou sublinhado.";
+    } else if (ENV.isProduction && ENV.osrmRequired && isPublic) {
+      configurationError =
+        "OSRM_REQUIRED=true nao permite router.project-osrm.org em producao.";
+    } else if (
+      ENV.isProduction &&
+      ENV.osrmRequired &&
+      url.protocol !== "https:"
+    ) {
+      configurationError =
+        "OSRM_REQUIRED=true exige OSRM_BASE_URL com HTTPS em producao.";
+    }
+
+    return {
+      configured: true,
+      configurationValid,
+      providerType: configurationValid
+        ? isPublic
+          ? "public"
+          : "self_hosted"
+        : "invalid",
+      isPublic,
+      baseUrl: sanitizeBaseUrlForDisplay(rawBaseUrl),
+      profile,
+      productionEligible,
+      routingAllowed:
+        configurationValid &&
+        !(ENV.isProduction && ENV.osrmRequired && !productionEligible),
+      configurationError,
+    };
+  } catch {
+    return {
+      configured: true,
+      configurationValid: false,
+      providerType: "invalid",
+      isPublic: false,
+      baseUrl: null,
+      profile,
+      productionEligible: false,
+      routingAllowed: false,
+      configurationError: "OSRM_BASE_URL invalido.",
+    };
   }
 }
 
 function getRoadMatrixMaxNodes() {
+  const configuration = getOsrmConfiguration();
   return readPositiveIntegerEnv(
     "OSRM_MAX_TABLE_NODES",
-    isPublicOsrmProvider() ? 50 : 100
+    configuration.isPublic ? 50 : 100
   );
 }
 
@@ -168,7 +289,10 @@ function isValidCoordinate(location: Location) {
   );
 }
 
-function buildNodes(locations: Location[], options: RouteOptimizationOptions = {}) {
+function buildNodes(
+  locations: Location[],
+  options: RouteOptimizationOptions = {}
+) {
   const nodes: MatrixNode[] = locations.map((location, deliveryIndex) => ({
     location,
     deliveryIndex,
@@ -188,10 +312,11 @@ function buildNodes(locations: Location[], options: RouteOptimizationOptions = {
 
 function buildOsrmTableUrl(nodes: MatrixNode[]) {
   const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const profile = ENV.osrmProfile;
   const coordinates = nodes
     .map(({ location }) => `${location.longitude},${location.latitude}`)
     .join(";");
-  return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
+  return `${baseUrl}/table/v1/${profile}/${coordinates}?annotations=duration,distance`;
 }
 
 function hashText(value: string) {
@@ -210,7 +335,7 @@ function coordinateKey(node: MatrixNode) {
 function buildMatrixHashes(nodes: MatrixNode[]) {
   const orderedCoordinates = nodes.map(coordinateKey).join("|");
   const unorderedCoordinates = nodes
-    .map((node) =>
+    .map(node =>
       [
         node.role,
         Number(node.location.latitude).toFixed(6),
@@ -222,28 +347,41 @@ function buildMatrixHashes(nodes: MatrixNode[]) {
   const providerKey = ENV.osrmBaseUrl.replace(/\/+$/, "");
 
   return {
-    matrixHash: hashText(["driving", providerKey, orderedCoordinates].join("|")),
-    clusterHash: hashText(["driving", unorderedCoordinates].join("|")),
+    matrixHash: hashText(
+      [ENV.osrmProfile, providerKey, orderedCoordinates].join("|")
+    ),
+    clusterHash: hashText([ENV.osrmProfile, unorderedCoordinates].join("|")),
   };
 }
 
-function isMatrixValue(value: unknown, expectedSize: number): value is MatrixValue {
+function isMatrixValue(
+  value: unknown,
+  expectedSize: number
+): value is MatrixValue {
   return (
     Array.isArray(value) &&
     value.length === expectedSize &&
     value.every(
-      (row) =>
+      row =>
         Array.isArray(row) &&
         row.length === expectedSize &&
-        row.every((item) => typeof item === "number" && Number.isFinite(item))
+        row.every(item => typeof item === "number" && Number.isFinite(item))
     )
   );
 }
 
-function buildOsrmHealthUrl() {
+function buildOsrmRouteHealthUrl() {
   const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const profile = ENV.osrmProfile;
   const coordinates = "-51.407,-22.121;-51.406,-22.122";
-  return `${baseUrl}/route/v1/driving/${coordinates}?overview=false&alternatives=false&steps=false`;
+  return `${baseUrl}/route/v1/${profile}/${coordinates}?overview=false&alternatives=false&steps=false`;
+}
+
+function buildOsrmTableHealthUrl() {
+  const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const profile = ENV.osrmProfile;
+  const coordinates = "-51.407,-22.121;-51.406,-22.122";
+  return `${baseUrl}/table/v1/${profile}/${coordinates}?annotations=duration,distance`;
 }
 
 function normalizeMatrix(
@@ -252,13 +390,15 @@ function normalizeMatrix(
 ): MatrixValue | null {
   if (!values?.length) return null;
 
-  const normalized = values.map((row) =>
-    row.map((value) =>
-      typeof value === "number" && Number.isFinite(value) ? value / factor : Infinity
+  const normalized = values.map(row =>
+    row.map(value =>
+      typeof value === "number" && Number.isFinite(value)
+        ? value / factor
+        : Infinity
     )
   );
 
-  return normalized.some((row) => row.some((value) => !Number.isFinite(value)))
+  return normalized.some(row => row.some(value => !Number.isFinite(value)))
     ? null
     : normalized;
 }
@@ -271,15 +411,30 @@ async function fetchRoadMatrix(
   startNodeIndex?: number;
   endNodeIndex?: number;
 } | null> {
-  if (!ENV.osrmEnabled || locations.length === 0) return null;
+  const configuration = getOsrmConfiguration();
+  if (
+    !ENV.osrmEnabled ||
+    !configuration.configurationValid ||
+    !configuration.routingAllowed ||
+    locations.length === 0
+  ) {
+    return null;
+  }
 
-  const { nodes, startNodeIndex, endNodeIndex } = buildNodes(locations, options);
-  if (nodes.length < 2 || nodes.some((node) => !isValidCoordinate(node.location))) {
+  const { nodes, startNodeIndex, endNodeIndex } = buildNodes(
+    locations,
+    options
+  );
+  if (
+    nodes.length < 2 ||
+    nodes.some(node => !isValidCoordinate(node.location))
+  ) {
     return null;
   }
 
   const startedAt = Date.now();
-  const provider = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const provider =
+    configuration.baseUrl ?? "osrm-configured-with-invalid-display-url";
   const record = (
     success: boolean,
     failureReason: string | null = null,
@@ -328,7 +483,10 @@ async function fetchRoadMatrix(
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    ENV.osrmRequestTimeoutMs
+  );
 
   try {
     const response = await fetch(buildOsrmTableUrl(nodes), {
@@ -355,15 +513,17 @@ async function fetchRoadMatrix(
     }
 
     if (shouldUseMatrixCache) {
-      await db.upsertOsrmMatrixCache({
-        matrixHash,
-        clusterHash,
-        stopCount: nodes.length,
-        durationMatrix: durationsMinutes,
-        distanceMatrix: distancesKm,
-        provider: "osrm",
-        osrmBaseUrl: provider,
-      }).catch(() => null);
+      await db
+        .upsertOsrmMatrixCache({
+          matrixHash,
+          clusterHash,
+          stopCount: nodes.length,
+          durationMatrix: durationsMinutes,
+          distanceMatrix: distancesKm,
+          provider: "osrm",
+          osrmBaseUrl: provider,
+        })
+        .catch(() => null);
     }
     record(true);
     return {
@@ -372,7 +532,10 @@ async function fetchRoadMatrix(
       endNodeIndex,
     };
   } catch (error) {
-    record(false, error instanceof Error ? error.name || error.message : "fetch_error");
+    record(
+      false,
+      error instanceof Error ? error.name || error.message : "fetch_error"
+    );
     return null;
   } finally {
     clearTimeout(timeout);
@@ -380,73 +543,184 @@ async function fetchRoadMatrix(
 }
 
 export async function getOsrmHealth(): Promise<OsrmHealth> {
-  const baseUrl = ENV.osrmBaseUrl.trim().replace(/\/+$/, "");
-  const configured = Boolean(baseUrl);
+  const configuration = getOsrmConfiguration();
+  const fallbackPolicy: OsrmHealth["fallbackPolicy"] = ENV.osrmRequired
+    ? "blocked"
+    : "geographic_allowed";
   const baseHealth = {
     enabled: ENV.osrmEnabled,
     required: ENV.osrmRequired,
-    configured,
+    configured: configuration.configured,
+    configurationValid: configuration.configurationValid,
     reachable: false,
-    baseUrl: configured ? baseUrl : null,
+    baseUrl: configuration.baseUrl,
+    profile: configuration.profile,
+    providerType: configuration.providerType,
+    isPublic: configuration.isPublic,
+    productionEligible: configuration.productionEligible,
+    productionReady: false,
+    usable: false,
+    fallbackPolicy,
+    status: "attention" as OsrmReadinessStatus,
+    reason: "",
     timeoutMs: ENV.osrmHealthTimeoutMs,
+    requestTimeoutMs: ENV.osrmRequestTimeoutMs,
+    maxTableNodes: getRoadMatrixMaxNodes(),
+    retries: 0,
+    services: ["route", "table"] as Array<"route" | "table">,
+    healthCheckSkipped: false,
     error: null,
   };
 
   if (!ENV.osrmEnabled) {
+    const reason = ENV.osrmRequired
+      ? "OSRM obrigatorio esta desativado por OSRM_ENABLED=false."
+      : "OSRM esta desativado; fallback geografico permanece permitido.";
     return {
       ...baseHealth,
-      error: ENV.osrmRequired ? "OSRM_REQUIRED=true, mas OSRM_ENABLED=false." : null,
+      status: ENV.osrmRequired ? "no-go" : "attention",
+      reason,
+      healthCheckSkipped: true,
+      error: ENV.osrmRequired ? reason : null,
     };
   }
 
-  if (!configured) {
+  if (!configuration.configured || !configuration.configurationValid) {
+    const reason =
+      configuration.configurationError ?? "Configuracao OSRM invalida.";
     return {
       ...baseHealth,
-      error: "OSRM_BASE_URL nao configurado.",
+      status: ENV.osrmRequired ? "no-go" : "attention",
+      reason,
+      healthCheckSkipped: true,
+      error: reason,
+    };
+  }
+
+  if (!configuration.routingAllowed) {
+    const reason =
+      configuration.configurationError ??
+      "Configuracao OSRM bloqueada pela politica de producao.";
+    return {
+      ...baseHealth,
+      status: "no-go",
+      reason,
+      healthCheckSkipped: true,
+      error: reason,
     };
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ENV.osrmHealthTimeoutMs);
+  const startedAt = Date.now();
 
   try {
-    const response = await fetch(buildOsrmHealthUrl(), {
-      signal: controller.signal,
-      headers: { Accept: "application/json" },
-    });
-    if (!response.ok) {
+    const [routeResponse, tableResponse] = await Promise.all([
+      fetch(buildOsrmRouteHealthUrl(), {
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      }),
+      fetch(buildOsrmTableHealthUrl(), {
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      }),
+    ]);
+    if (!routeResponse.ok || !tableResponse.ok) {
+      const service = !routeResponse.ok ? "route" : "table";
+      const status = !routeResponse.ok
+        ? routeResponse.status
+        : tableResponse.status;
+      const reason = `OSRM ${service} respondeu HTTP ${status}.`;
       return {
         ...baseHealth,
-        error: `OSRM respondeu HTTP ${response.status}.`,
+        status: ENV.osrmRequired ? "no-go" : "attention",
+        reason,
+        error: reason,
       };
     }
 
-    const data = (await response.json()) as OsrmRouteResponse;
-    if (data.code !== "Ok") {
+    const [routeData, tableData] = await Promise.all([
+      routeResponse.json() as Promise<OsrmRouteResponse>,
+      tableResponse.json() as Promise<OsrmTableResponse>,
+    ]);
+    if (routeData.code !== "Ok" || tableData.code !== "Ok") {
+      const service = routeData.code !== "Ok" ? "route" : "table";
+      const code = routeData.code !== "Ok" ? routeData.code : tableData.code;
+      const reason = `OSRM ${service} respondeu code=${code ?? "indefinido"}.`;
       return {
         ...baseHealth,
-        error: `OSRM respondeu code=${data.code ?? "indefinido"}.`,
+        status: ENV.osrmRequired ? "no-go" : "attention",
+        reason,
+        error: reason,
       };
     }
+
+    const healthDistances = normalizeMatrix(tableData.distances, 1000);
+    const healthDurations = normalizeMatrix(tableData.durations, 60);
+    if (
+      !healthDistances ||
+      !healthDurations ||
+      !isMatrixValue(healthDistances, 2) ||
+      !isMatrixValue(healthDurations, 2)
+    ) {
+      const reason =
+        "OSRM table respondeu sem matriz valida de distancia/duracao.";
+      return {
+        ...baseHealth,
+        status: ENV.osrmRequired ? "no-go" : "attention",
+        reason,
+        error: reason,
+      };
+    }
+
+    const usable = true;
+    const productionReady =
+      configuration.productionEligible && ENV.osrmRequired;
+    const status: OsrmReadinessStatus =
+      ENV.isProduction && !productionReady
+        ? "attention"
+        : configuration.isPublic
+          ? "attention"
+          : "ok";
+    const reason =
+      ENV.isProduction && configuration.isPublic
+        ? "OSRM publico esta alcancavel, mas nao e escalavel nem possui SLA do EconoRotas."
+        : ENV.isProduction && !ENV.osrmRequired
+          ? "OSRM proprio esta saudavel, mas OSRM_REQUIRED=false permite fallback geografico."
+          : configuration.isPublic
+            ? "OSRM publico foi configurado explicitamente para este ambiente."
+            : "OSRM proprio esta configurado e saudavel.";
 
     return {
       ...baseHealth,
       reachable: true,
+      productionReady,
+      usable,
+      status,
+      reason,
+      latencyMs: Date.now() - startedAt,
     };
   } catch (error) {
+    const detail =
+      error instanceof Error ? error.message : "Falha ao consultar OSRM.";
+    const reason = `OSRM indisponivel: ${detail}`;
     return {
       ...baseHealth,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Falha ao consultar OSRM.",
+      status: ENV.osrmRequired ? "no-go" : "attention",
+      reason,
+      error: detail,
     };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-function getMetric(matrix: RoadMatrix, mode: MatrixMetric, from: number, to: number) {
+function getMetric(
+  matrix: RoadMatrix,
+  mode: MatrixMetric,
+  from: number,
+  to: number
+) {
   return mode === "duration"
     ? matrix.durationsMinutes[from][to]
     : matrix.distancesKm[from][to];
@@ -489,7 +763,12 @@ function calculateSequenceMetric(
   }
 
   if (endNodeIndex !== undefined) {
-    total += getMetric(matrix, mode, sequence[sequence.length - 1], endNodeIndex);
+    total += getMetric(
+      matrix,
+      mode,
+      sequence[sequence.length - 1],
+      endNodeIndex
+    );
   }
 
   return total;
@@ -526,13 +805,27 @@ function buildRoadRoute(
   endNodeIndex?: number
 ): OptimizedRoute {
   return {
-    sequence: sequence.map((nodeIndex) => matrix.nodes[nodeIndex].deliveryIndex ?? nodeIndex),
+    sequence: sequence.map(
+      nodeIndex => matrix.nodes[nodeIndex].deliveryIndex ?? nodeIndex
+    ),
     totalDistance:
       Math.round(
-        calculateSequenceMetric(matrix, sequence, "distance", startNodeIndex, endNodeIndex) * 100
+        calculateSequenceMetric(
+          matrix,
+          sequence,
+          "distance",
+          startNodeIndex,
+          endNodeIndex
+        ) * 100
       ) / 100,
     totalTime: Math.round(
-      calculateSequenceMetric(matrix, sequence, "duration", startNodeIndex, endNodeIndex)
+      calculateSequenceMetric(
+        matrix,
+        sequence,
+        "duration",
+        startNodeIndex,
+        endNodeIndex
+      )
     ),
     waypoints: sequence.map((nodeIndex, sequenceIndex) => ({
       ...matrix.nodes[nodeIndex].location,
@@ -563,7 +856,12 @@ function buildNearestSequence(
     let nearestMetric = Infinity;
 
     for (const candidateIndex of Array.from(available)) {
-      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(
+        matrix,
+        objective,
+        currentNodeIndex,
+        candidateIndex
+      );
       if (metric < nearestMetric) {
         nearestMetric = metric;
         nearestIndex = candidateIndex;
@@ -643,21 +941,38 @@ function enforceLocalNearestRoadSequence(
   const localitySettings = getLocalitySettings(localityMode);
 
   while (remaining.size > 0) {
-    const plannedNext = initialSequence.find((nodeIndex) => remaining.has(nodeIndex));
+    const plannedNext = initialSequence.find(nodeIndex =>
+      remaining.has(nodeIndex)
+    );
     if (plannedNext === undefined) break;
 
     let nearestIndex = plannedNext;
-    let nearestMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
+    let nearestMetric = getObjectiveMetric(
+      matrix,
+      objective,
+      currentNodeIndex,
+      plannedNext
+    );
 
     for (const candidateIndex of Array.from(remaining)) {
-      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(
+        matrix,
+        objective,
+        currentNodeIndex,
+        candidateIndex
+      );
       if (metric < nearestMetric) {
         nearestMetric = metric;
         nearestIndex = candidateIndex;
       }
     }
 
-    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const plannedMetric = getObjectiveMetric(
+      matrix,
+      objective,
+      currentNodeIndex,
+      plannedNext
+    );
     const jumpIsOperationallyBad =
       nearestIndex !== plannedNext &&
       isAvoidableLocalJump(nearestMetric, plannedMetric, localitySettings);
@@ -685,11 +1000,21 @@ function calculateAvoidableJumpPenalty(
 
   for (const plannedNext of sequence) {
     remaining.delete(plannedNext);
-    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const plannedMetric = getObjectiveMetric(
+      matrix,
+      objective,
+      currentNodeIndex,
+      plannedNext
+    );
     let nearestMetric = plannedMetric;
 
     for (const candidateIndex of [plannedNext, ...Array.from(remaining)]) {
-      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(
+        matrix,
+        objective,
+        currentNodeIndex,
+        candidateIndex
+      );
       if (metric < nearestMetric) {
         nearestMetric = metric;
       }
@@ -718,9 +1043,9 @@ function buildClusteredDeliveryNodeSequence(
     nodeByDeliveryIndex.set(deliveryIndex, nodeIndex);
   });
 
-  const sequence = clusters.flatMap((cluster) =>
+  const sequence = clusters.flatMap(cluster =>
     cluster.stops
-      .map((stop) => nodeByDeliveryIndex.get(stop.originalIndex))
+      .map(stop => nodeByDeliveryIndex.get(stop.originalIndex))
       .filter((nodeIndex): nodeIndex is number => nodeIndex !== undefined)
   );
 
@@ -753,16 +1078,26 @@ function calculateClusterSwitchPenalty(
   });
 
   let penalty = 0;
-  for (let sequenceIndex = 1; sequenceIndex < sequence.length; sequenceIndex += 1) {
+  for (
+    let sequenceIndex = 1;
+    sequenceIndex < sequence.length;
+    sequenceIndex += 1
+  ) {
     const previousCluster = clusterByNodeIndex.get(sequence[sequenceIndex - 1]);
     const currentCluster = clusterByNodeIndex.get(sequence[sequenceIndex]);
-    if (!previousCluster || !currentCluster || previousCluster === currentCluster) {
+    if (
+      !previousCluster ||
+      !currentCluster ||
+      previousCluster === currentCluster
+    ) {
       continue;
     }
 
     const pendingInPreviousCluster = sequence
       .slice(sequenceIndex + 1)
-      .filter((nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster);
+      .filter(
+        nodeIndex => clusterByNodeIndex.get(nodeIndex) === previousCluster
+      );
     if (pendingInPreviousCluster.length > 0) {
       const fromNode = sequence[sequenceIndex - 1];
       const toNode = sequence[sequenceIndex];
@@ -775,7 +1110,8 @@ function calculateClusterSwitchPenalty(
         ) / pendingInPreviousCluster.length;
 
       penalty +=
-        settings.prematureClusterSwitchPenalty * pendingInPreviousCluster.length +
+        settings.prematureClusterSwitchPenalty *
+          pendingInPreviousCluster.length +
         switchDuration * settings.penaltyMultiplier +
         averagePendingDuration * settings.penaltyMultiplier;
     }
@@ -818,7 +1154,7 @@ async function optimizePartitionedRouteWithRoadMetrics(
   const remaining = [...partitions];
   const largestPartitionSize = Math.max(
     0,
-    ...partitions.map((partition) => partition.stops.length)
+    ...partitions.map(partition => partition.stops.length)
   );
   const finalSequence: number[] = [];
   const finalWaypoints: OptimizedRoute["waypoints"] = [];
@@ -830,7 +1166,9 @@ async function optimizePartitionedRouteWithRoadMetrics(
     const partitionIndex = chooseNextPartition(remaining, currentLocation);
     const [partition] = remaining.splice(partitionIndex, 1);
     const isLastPartition = remaining.length === 0;
-    const partitionLocations = partition.stops.map(({ originalIndex, ...stop }) => stop);
+    const partitionLocations = partition.stops.map(
+      ({ originalIndex, ...stop }) => stop
+    );
 
     const optimizedPartition = await optimizeRouteWithRoadMetrics(
       partitionLocations,
@@ -886,7 +1224,7 @@ export async function buildSequentialRouteWithRoadMetrics(
 
   const deliveryNodeIndexes = result.matrix.nodes
     .map((node, nodeIndex) => (node.role === "delivery" ? nodeIndex : -1))
-    .filter((nodeIndex) => nodeIndex >= 0);
+    .filter(nodeIndex => nodeIndex >= 0);
 
   return buildRoadRoute(
     result.matrix,
@@ -922,7 +1260,7 @@ export async function optimizeRouteWithRoadMetrics(
 
   const deliveryNodeIndexes = result.matrix.nodes
     .map((node, nodeIndex) => (node.role === "delivery" ? nodeIndex : -1))
-    .filter((nodeIndex) => nodeIndex >= 0);
+    .filter(nodeIndex => nodeIndex >= 0);
   const objective = chooseObjective(mode);
   const clusteredSequence = buildClusteredDeliveryNodeSequence(
     locations,
@@ -931,7 +1269,12 @@ export async function optimizeRouteWithRoadMetrics(
   );
   const startCandidates =
     result.startNodeIndex !== undefined || deliveryNodeIndexes.length > 40
-      ? [Math.min(Math.max(startIndex, 0), Math.max(deliveryNodeIndexes.length - 1, 0))]
+      ? [
+          Math.min(
+            Math.max(startIndex, 0),
+            Math.max(deliveryNodeIndexes.length - 1, 0)
+          ),
+        ]
       : deliveryNodeIndexes.map((_, index) => index);
 
   let bestSequence: number[] | null = null;
@@ -980,18 +1323,20 @@ export async function optimizeRouteWithRoadMetrics(
           result.startNodeIndex,
           result.endNodeIndex
         );
-        const penalty = calculateAvoidableJumpPenalty(
-          result.matrix,
-          candidateSequence,
-          objective,
-          result.startNodeIndex,
-          options.localityMode
-        ) + calculateClusterSwitchPenalty(
-          result.matrix,
-          locations,
-          candidateSequence,
-          options.localityMode
-        );
+        const penalty =
+          calculateAvoidableJumpPenalty(
+            result.matrix,
+            candidateSequence,
+            objective,
+            result.startNodeIndex,
+            options.localityMode
+          ) +
+          calculateClusterSwitchPenalty(
+            result.matrix,
+            locations,
+            candidateSequence,
+            options.localityMode
+          );
         const score = metric + penalty;
 
         if (score < bestScore) {

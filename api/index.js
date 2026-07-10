@@ -653,12 +653,18 @@ function readAtLeastOptimizedRouteStopLimit(value) {
   const parsed = readPositiveInt(value, OPTIMIZED_ROUTE_STOP_LIMIT);
   return Math.max(parsed, OPTIMIZED_ROUTE_STOP_LIMIT);
 }
-var hasConfiguredCookieSecret, OPTIMIZED_ROUTE_STOP_LIMIT, ENV;
+var hasConfiguredCookieSecret, OPTIMIZED_ROUTE_STOP_LIMIT, DR_POLICY_ENV_NAMES, ENV;
 var init_env = __esm({
   "server/_core/env.ts"() {
     "use strict";
     hasConfiguredCookieSecret = Boolean(process.env.JWT_SECRET);
     OPTIMIZED_ROUTE_STOP_LIMIT = 160;
+    DR_POLICY_ENV_NAMES = [
+      "DR_RPO_HOURS",
+      "DR_RTO_HOURS",
+      "DR_RESTORE_MAX_AGE_HOURS",
+      "DR_RETENTION_DAYS"
+    ];
     ENV = {
       appId: readEnvString(process.env.VITE_APP_ID),
       cookieSecret: readEnvString(process.env.JWT_SECRET),
@@ -666,7 +672,9 @@ var init_env = __esm({
       usingDemoCookieSecret: false,
       databaseUrl: readEnvString(process.env.DATABASE_URL),
       databaseSsl: readEnvString(process.env.DATABASE_SSL),
-      databaseSslRejectUnauthorized: readEnvString(process.env.DATABASE_SSL_REJECT_UNAUTHORIZED),
+      databaseSslRejectUnauthorized: readEnvString(
+        process.env.DATABASE_SSL_REJECT_UNAUTHORIZED
+      ),
       oAuthServerUrl: readEnvString(process.env.OAUTH_SERVER_URL),
       authLoginProvider: readEnvString(process.env.AUTH_LOGIN_PROVIDER),
       googleClientId: readEnvString(process.env.GOOGLE_CLIENT_ID),
@@ -703,11 +711,17 @@ var init_env = __esm({
       imileFallbackBaseUrls: process.env.IMILE_FALLBACK_BASE_URLS ?? "",
       imileCaptureUploadToken: process.env.IMILE_CAPTURE_UPLOAD_TOKEN ?? "",
       osrmEnabled: process.env.VITEST === "true" ? false : process.env.OSRM_ENABLED !== "false",
-      osrmBaseUrl: process.env.OSRM_BASE_URL ?? "https://router.project-osrm.org",
-      osrmRequestTimeoutMs: Number(process.env.OSRM_REQUEST_TIMEOUT_MS || 8e3),
-      osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3e3),
+      osrmBaseUrl: readEnvString(process.env.OSRM_BASE_URL),
+      osrmProfile: readEnvString(process.env.OSRM_PROFILE) || "driving",
+      osrmRequestTimeoutMs: readPositiveInt(
+        process.env.OSRM_REQUEST_TIMEOUT_MS,
+        8e3
+      ),
+      osrmHealthTimeoutMs: readPositiveInt(
+        process.env.OSRM_HEALTH_TIMEOUT_MS,
+        3e3
+      ),
       osrmRequired: process.env.OSRM_REQUIRED === "true",
-      osrmRequiredMinStops: readPositiveInt(process.env.OSRM_REQUIRED_MIN_STOPS, 101),
       maxSyncStops: Math.min(
         readAtLeastOptimizedRouteStopLimit(process.env.MAX_SYNC_STOPS),
         OPTIMIZED_ROUTE_STOP_LIMIT
@@ -717,20 +731,315 @@ var init_env = __esm({
         OPTIMIZED_ROUTE_STOP_LIMIT
       ),
       maxGeographicFallbackStops: Math.min(
-        readAtLeastOptimizedRouteStopLimit(process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS),
+        readAtLeastOptimizedRouteStopLimit(
+          process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS
+        ),
         OPTIMIZED_ROUTE_STOP_LIMIT
       ),
       bullmqRedisUrl: firstEnvString(
         process.env.BULLMQ_REDIS_URL,
         process.env.ECONOROTAS_REDIS_URL,
+        process.env.KV_URL,
         process.env.REDIS_URL
       ),
       backupLastCompletedAt: process.env.BACKUP_LAST_COMPLETED_AT ?? "",
       backupStatus: process.env.BACKUP_STATUS ?? "",
       restoreTestLastPassedAt: process.env.RESTORE_TEST_LAST_PASSED_AT ?? "",
       restoreTestPassed: process.env.RESTORE_TEST_PASSED === "true",
-      integrationCredentialsSecret: firstEnvString(process.env.INTEGRATION_CREDENTIALS_SECRET, process.env.JWT_SECRET)
+      drRpoHours: readPositiveInt(process.env.DR_RPO_HOURS, 24),
+      drRtoHours: readPositiveInt(process.env.DR_RTO_HOURS, 4),
+      drRestoreMaxAgeHours: readPositiveInt(
+        process.env.DR_RESTORE_MAX_AGE_HOURS,
+        168
+      ),
+      drRetentionDays: readPositiveInt(process.env.DR_RETENTION_DAYS, 14),
+      drScheduleEnabled: process.env.DR_SCHEDULE_ENABLED === "true",
+      drPolicyMissingVariables: DR_POLICY_ENV_NAMES.filter(
+        (name) => !readEnvString(process.env[name])
+      ),
+      drPolicyInvalidVariables: DR_POLICY_ENV_NAMES.filter((name) => {
+        const value = readEnvString(process.env[name]);
+        if (!value) return false;
+        const parsed = Number(value);
+        return !Number.isFinite(parsed) || parsed <= 0;
+      }),
+      integrationCredentialsSecret: firstEnvString(
+        process.env.INTEGRATION_CREDENTIALS_SECRET,
+        process.env.JWT_SECRET
+      )
     };
+  }
+});
+
+// server/disasterReadiness.ts
+function ageHours(date, now) {
+  if (!date) return null;
+  return Math.max(
+    0,
+    Math.round((now.getTime() - date.getTime()) / 36e5 * 10)
+  ) / 10;
+}
+function statusRank(status) {
+  if (status === "no-go") return 4;
+  if (status === "warning") return 3;
+  if (status === "attention") return 2;
+  return 1;
+}
+function evaluateDisasterReadiness(input) {
+  const now = input.now ?? /* @__PURE__ */ new Date();
+  const backupAgeHours = ageHours(input.lastBackupAt, now);
+  const restoreAgeHours = ageHours(input.restoreTestAt, now);
+  const restoreDurationHours = input.restoreDurationMs === null ? null : Math.round(input.restoreDurationMs / 36e5 * 100) / 100;
+  const recurringEvidence = input.history.backupCompleted >= 2 && input.history.restorePassed >= 2;
+  const issues = [];
+  if (!input.lastBackupAt) {
+    issues.push({
+      type: "backup_missing",
+      level: "no-go",
+      title: "Backup sem evidencia",
+      message: "Nenhum backup concluido foi encontrado.",
+      action: "Executar a rotina de backup e confirmar o evento backup_completed.",
+      metadata: { rpoTargetHours: input.rpoTargetHours }
+    });
+  } else if (input.backupStatus === "failed") {
+    issues.push({
+      type: "backup_failed",
+      level: "no-go",
+      title: "Ultimo backup falhou",
+      message: "A evidencia mais recente de backup indica falha.",
+      action: "Corrigir a causa da falha e executar um novo backup completo.",
+      metadata: { backupAgeHours }
+    });
+  } else if ((backupAgeHours ?? 0) > input.rpoTargetHours) {
+    issues.push({
+      type: "backup_stale",
+      level: "warning",
+      title: "Backup fora do RPO",
+      message: `Ultimo backup tem ${backupAgeHours}h; a meta e ${input.rpoTargetHours}h.`,
+      action: "Executar o backup agora e revisar a recorrencia do agendamento.",
+      metadata: {
+        backupAgeHours,
+        rpoTargetHours: input.rpoTargetHours
+      }
+    });
+  }
+  if (input.restoreStatus === "failed") {
+    issues.push({
+      type: "restore_test_failed",
+      level: "no-go",
+      title: "Ultimo restore drill falhou",
+      message: "A evidencia mais recente de restore indica falha.",
+      action: "Corrigir o restore em banco descartavel e repetir o drill antes de liberar operacao."
+    });
+  } else if (input.restoreStatus === "missing" || !input.restoreTestAt) {
+    issues.push({
+      type: "restore_test_missing",
+      level: "no-go",
+      title: "Restore drill sem evidencia",
+      message: "Nao existe restore drill aprovado e verificavel.",
+      action: "Executar restore drill somente em banco descartavel e validar as tabelas."
+    });
+  } else {
+    if ((restoreAgeHours ?? 0) > input.restoreMaxAgeHours) {
+      issues.push({
+        type: "restore_test_stale",
+        level: "warning",
+        title: "Restore drill vencido",
+        message: `Ultimo restore aprovado tem ${restoreAgeHours}h; a janela e ${input.restoreMaxAgeHours}h.`,
+        action: "Executar um novo restore drill no banco descartavel.",
+        metadata: {
+          restoreAgeHours,
+          restoreMaxAgeHours: input.restoreMaxAgeHours
+        }
+      });
+    }
+    if (restoreDurationHours === null) {
+      issues.push({
+        type: "restore_rto_unverified",
+        level: "attention",
+        title: "RTO sem duracao comprovada",
+        message: "O restore foi aprovado, mas sua duracao nao esta registrada.",
+        action: "Executar um novo drill que registre restore.durationMs.",
+        metadata: { rtoTargetHours: input.rtoTargetHours }
+      });
+    } else if (restoreDurationHours > input.rtoTargetHours) {
+      issues.push({
+        type: "restore_rto_missed",
+        level: "warning",
+        title: "Restore acima do RTO",
+        message: `Restore levou ${restoreDurationHours}h; a meta e ${input.rtoTargetHours}h.`,
+        action: "Otimizar o procedimento de restore e repetir a medicao.",
+        metadata: {
+          restoreDurationHours,
+          rtoTargetHours: input.rtoTargetHours
+        }
+      });
+    }
+  }
+  for (const table of input.tableErrors) {
+    issues.push({
+      type: "restore_table_unavailable",
+      level: "no-go",
+      title: `Tabela critica inacessivel: ${table.table}`,
+      message: table.error ?? "Tabela critica nao respondeu a verificacao.",
+      action: "Restaurar acesso a tabela critica e repetir a verificacao.",
+      metadata: { table: table.table, status: table.status }
+    });
+  }
+  if (!input.policyExplicit) {
+    issues.push({
+      type: "dr_policy_defaulted",
+      level: "attention",
+      title: "Politica DR usa valores padrao",
+      message: "RPO, RTO, validade do restore ou retencao nao foram explicitados.",
+      action: "Configurar DR_RPO_HOURS, DR_RTO_HOURS, DR_RESTORE_MAX_AGE_HOURS e DR_RETENTION_DAYS."
+    });
+  }
+  if (!input.scheduleEnabled) {
+    issues.push({
+      type: "dr_schedule_unconfirmed",
+      level: "attention",
+      title: "Agendamento DR nao confirmado",
+      message: "DR_SCHEDULE_ENABLED nao confirma uma rotina recorrente ativa.",
+      action: "Validar o agendador operacional e definir DR_SCHEDULE_ENABLED=true."
+    });
+  }
+  if (!recurringEvidence) {
+    issues.push({
+      type: "dr_recurrence_unproven",
+      level: "attention",
+      title: "Recorrencia DR ainda nao comprovada",
+      message: "O historico ainda nao possui dois backups e dois restores aprovados.",
+      action: "Manter a rotina ativa ate formar evidencia recorrente.",
+      metadata: input.history
+    });
+  }
+  if (input.retentionDays < 7) {
+    issues.push({
+      type: "dr_retention_insufficient",
+      level: "warning",
+      title: "Retencao abaixo do minimo",
+      message: `Retencao configurada em ${input.retentionDays} dias; o minimo beta e 7 dias.`,
+      action: "Configurar DR_RETENTION_DAYS entre 7 e 14 dias ou mais.",
+      metadata: { retentionDays: input.retentionDays }
+    });
+  }
+  const status = issues.reduce(
+    (current, issue) => statusRank(issue.level) > statusRank(current) ? issue.level : current,
+    "ok"
+  );
+  const orderedIssues = [...issues].sort(
+    (left, right) => statusRank(right.level) - statusRank(left.level)
+  );
+  return {
+    status,
+    backupAgeHours,
+    backupWithinRpo: backupAgeHours !== null && backupAgeHours <= input.rpoTargetHours,
+    restoreAgeHours,
+    restoreWithinWindow: restoreAgeHours !== null && restoreAgeHours <= input.restoreMaxAgeHours && input.restoreStatus === "passed",
+    restoreDurationMs: input.restoreDurationMs,
+    restoreDurationHours,
+    rtoMet: restoreDurationHours !== null && restoreDurationHours <= input.rtoTargetHours,
+    recurringEvidence,
+    reason: orderedIssues[0]?.message ?? "Backup e restore estao dentro das metas configuradas.",
+    reasons: orderedIssues.map((issue) => issue.message),
+    nextAction: orderedIssues[0]?.action ?? "Manter backup diario, restore semanal e revisar as evidencias.",
+    issues: orderedIssues
+  };
+}
+var init_disasterReadiness = __esm({
+  "server/disasterReadiness.ts"() {
+    "use strict";
+  }
+});
+
+// server/performanceBenchmarkPolicy.ts
+function evaluatePerformanceBenchmarkRun(evidence) {
+  const targetMs = PERFORMANCE_BENCHMARK_TARGETS[evidence.stopCount] ?? null;
+  const osrmFailureRate = evidence.osrmCalls > 0 ? Math.round(evidence.osrmFailures / evidence.osrmCalls * 1e3) / 10 : 0;
+  const failureReasons = [];
+  if (!evidence.success) {
+    failureReasons.push("A otimizacao nao produziu uma rota valida.");
+  }
+  if (evidence.runtimeMs <= 0) {
+    failureReasons.push("Runtime ausente ou invalido.");
+  } else if (targetMs !== null && evidence.runtimeMs >= targetMs) {
+    failureReasons.push(
+      `Runtime ${evidence.runtimeMs}ms excede a meta de ${targetMs}ms.`
+    );
+  }
+  if (evidence.osrmFailures > 0) {
+    failureReasons.push(
+      `OSRM falhou em ${evidence.osrmFailures}/${evidence.osrmCalls} chamada(s) (${osrmFailureRate}%).`
+    );
+  }
+  if (osrmFailureRate >= PERFORMANCE_BENCHMARK_MAX_OSRM_FAILURE_RATE) {
+    failureReasons.push(
+      `Taxa de falha OSRM precisa ficar abaixo de ${PERFORMANCE_BENCHMARK_MAX_OSRM_FAILURE_RATE}%.`
+    );
+  }
+  if (evidence.osrmCalls <= 0) {
+    failureReasons.push("Uso do OSRM nao foi comprovado.");
+  }
+  if (evidence.providerType !== "self_hosted") {
+    failureReasons.push("Benchmark oficial exige OSRM proprio.");
+  }
+  if (evidence.matrixCacheMiss <= 0) {
+    failureReasons.push("Execucao cold-cache nao foi comprovada.");
+  } else if (evidence.matrixCacheHit > 0) {
+    failureReasons.push(
+      `Execucao mista nao comprova cold cache: ${evidence.matrixCacheHit} cache hit(s).`
+    );
+  }
+  if (evidence.qualityScore === null || evidence.qualityStatus === null) {
+    failureReasons.push("Qualidade da rota nao foi auditada.");
+  } else if (evidence.qualityScore < PERFORMANCE_BENCHMARK_MIN_QUALITY_SCORE || evidence.qualityStatus === "critical" || evidence.qualityStatus === "blocked") {
+    failureReasons.push(
+      `Qualidade da rota reprovada: score ${evidence.qualityScore}, status ${evidence.qualityStatus}.`
+    );
+  }
+  if (evidence.duplicateAddressCount === null) {
+    failureReasons.push("Dataset nao informou enderecos repetidos.");
+  } else if (evidence.duplicateAddressCount > 0) {
+    failureReasons.push(
+      `Dataset possui ${evidence.duplicateAddressCount} endereco(s) repetido(s).`
+    );
+  }
+  if (evidence.duplicateCoordinateCount === null) {
+    failureReasons.push("Dataset nao informou coordenadas repetidas.");
+  } else if (evidence.duplicateCoordinateCount > 0) {
+    failureReasons.push(
+      `Dataset possui ${evidence.duplicateCoordinateCount} coordenada(s) repetida(s).`
+    );
+  }
+  if (evidence.payloadBytes === null || evidence.payloadBytes <= 0) {
+    failureReasons.push("Tamanho do payload nao foi registrado.");
+  }
+  return {
+    criteriaVersion: 3,
+    targetMs,
+    runtimeWithinTarget: targetMs === null ? evidence.runtimeMs > 0 : evidence.runtimeMs > 0 && evidence.runtimeMs < targetMs,
+    osrmFailureRate,
+    passed: failureReasons.length === 0,
+    failureReasons,
+    recommendedAction: failureReasons[0] ?? "Repetir o benchmark ate completar a amostra minima."
+  };
+}
+var PERFORMANCE_BENCHMARK_TARGETS, PERFORMANCE_BENCHMARK_SAMPLE_SIZE, PERFORMANCE_BENCHMARK_MIN_QUALITY_SCORE, PERFORMANCE_BENCHMARK_MAX_OSRM_FAILURE_RATE;
+var init_performanceBenchmarkPolicy = __esm({
+  "server/performanceBenchmarkPolicy.ts"() {
+    "use strict";
+    PERFORMANCE_BENCHMARK_TARGETS = {
+      50: 5e3,
+      150: 1e4,
+      250: 15e3,
+      500: 3e4,
+      1e3: 6e4,
+      2e3: 18e4
+    };
+    PERFORMANCE_BENCHMARK_SAMPLE_SIZE = 3;
+    PERFORMANCE_BENCHMARK_MIN_QUALITY_SCORE = 70;
+    PERFORMANCE_BENCHMARK_MAX_OSRM_FAILURE_RATE = 1;
   }
 });
 
@@ -1970,10 +2279,7 @@ async function countUsersRegisteredFromIpSince(ip, since) {
     requireConfiguredDatabase();
   }
   const result = await db.select({ count: sql`COUNT(*)` }).from(users).where(
-    and(
-      eq(users.registrationIp, normalizedIp),
-      gte(users.createdAt, since)
-    )
+    and(eq(users.registrationIp, normalizedIp), gte(users.createdAt, since))
   );
   return Number(result[0]?.count || 0);
 }
@@ -2054,7 +2360,10 @@ async function getAccessRequestsDashboard(input = {}) {
         total: filtered.length,
         summary: buildAccessSummary(allRows, settings),
         settings,
-        users: sortByDateDesc(filtered, "createdAt").slice(offset, offset + safeLimit)
+        users: sortByDateDesc(filtered, "createdAt").slice(
+          offset,
+          offset + safeLimit
+        )
       };
     }
     requireConfiguredDatabase();
@@ -2066,16 +2375,15 @@ async function getAccessRequestsDashboard(input = {}) {
     params.push(status);
   }
   if (search) {
-    where.push("(LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(u.email, '')) LIKE ? OR LOWER(COALESCE(u.phone, '')) LIKE ? OR LOWER(COALESCE(u.city, '')) LIKE ? OR LOWER(COALESCE(u.state, '')) LIKE ?)");
+    where.push(
+      "(LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(u.email, '')) LIKE ? OR LOWER(COALESCE(u.phone, '')) LIKE ? OR LOWER(COALESCE(u.city, '')) LIKE ? OR LOWER(COALESCE(u.state, '')) LIKE ?)"
+    );
     const like = `%${search}%`;
     params.push(like, like, like, like, like);
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const [countRows, rows, summaryRows] = await Promise.all([
-    _pool.query(
-      `SELECT COUNT(*) AS total FROM users u ${whereSql}`,
-      params
-    ).then(([result]) => result),
+    _pool.query(`SELECT COUNT(*) AS total FROM users u ${whereSql}`, params).then(([result]) => result),
     _pool.query(
       `
         SELECT
@@ -2266,7 +2574,9 @@ async function reviewUserAccess(input) {
   const db = await getDb();
   if (!db) {
     if (await shouldUseMemoryDb()) {
-      const existing = memory.users.find((item) => Number(item.id) === input.userId);
+      const existing = memory.users.find(
+        (item) => Number(item.id) === input.userId
+      );
       if (!existing) return null;
       Object.assign(existing, updateValues);
       const review = {
@@ -3211,11 +3521,17 @@ async function getQueueIntegrityDashboard(days = 30) {
       const runningJobs2 = memory.optimizationJobs.filter(
         (job) => job.status === "running"
       );
+      const queuedJobs2 = memory.optimizationJobs.filter(
+        (job) => job.status === "queued" && new Date(job.createdAt).getTime() >= cutoff
+      );
       return buildQueueIntegrityDashboard(
         events2,
         failedJobs2,
         runningJobs2,
-        safeDays
+        safeDays,
+        6e4,
+        buildLongRunningJobAlerts(runningJobs2, 6e4),
+        queuedJobs2
       );
     }
     requireConfiguredDatabase();
@@ -3240,6 +3556,18 @@ async function getQueueIntegrityDashboard(days = 30) {
       WHERE status = 'failed'
         AND created_at >= ?
       ORDER BY created_at DESC
+      LIMIT 2000
+    `,
+    [cutoffDate]
+  );
+  const [queuedJobs] = await _pool.query(
+    `
+      SELECT id, route_id AS routeId, user_id AS userId, provider_job_id AS providerJobId,
+        created_at AS createdAt
+      FROM optimization_jobs
+      WHERE status = 'queued'
+        AND created_at >= ?
+      ORDER BY created_at ASC
       LIMIT 2000
     `,
     [cutoffDate]
@@ -3280,7 +3608,8 @@ async function getQueueIntegrityDashboard(days = 30) {
     runningJobs,
     safeDays,
     averageRuntimeMs,
-    runningAlerts
+    runningAlerts,
+    queuedJobs
   );
 }
 function countEventsByType(events, type) {
@@ -3340,12 +3669,15 @@ function parseOptionalDate(value) {
   const date = value instanceof Date ? value : new Date(String(value));
   return Number.isNaN(date.getTime()) ? null : date;
 }
-function dateAgeHours(date) {
-  if (!date) return null;
-  return Math.max(
-    0,
-    Math.round((Date.now() - date.getTime()) / 36e5 * 10) / 10
+function latestDate(...dates) {
+  return dates.reduce(
+    (latest, date) => date && (!latest || date.getTime() > latest.getTime()) ? date : latest,
+    null
   );
+}
+function parseRuntimeMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 async function hasRecentDisasterReadinessEvent(type, title, minutes = 360) {
   const db = await getDb();
@@ -3393,18 +3725,18 @@ async function getLatestDisasterEvents() {
   const db = await getDb();
   if (!db) {
     if (await shouldUseMemoryDb()) {
-      return DISASTER_EVENT_TYPES.map(
-        (type) => sortByDateDesc(
-          memory.operationalEvents.filter((event) => event.type === type),
-          "createdAt"
-        )[0] ?? null
-      ).filter(Boolean);
+      return sortByDateDesc(
+        memory.operationalEvents.filter(
+          (event) => DISASTER_EVENT_TYPES.includes(event.type)
+        ),
+        "createdAt"
+      ).slice(0, 100);
     }
     requireConfiguredDatabase();
   }
   const [rows] = await _pool.query(
     `
-      SELECT id, type, severity, title, message, metadata, createdAt
+      SELECT id, type, severity, title, message, runtime, metadata, createdAt
       FROM operationalEvents FORCE INDEX (operationalEvents_type_createdAt_idx)
       WHERE type IN (${DISASTER_EVENT_TYPES.map(() => "?").join(",")})
       ORDER BY createdAt DESC
@@ -3456,8 +3788,10 @@ async function getCriticalTableReadiness() {
   return counts;
 }
 async function getDisasterReadinessDashboard() {
-  const rpoTargetHours = 24;
-  const rtoTargetHours = 4;
+  const rpoTargetHours = ENV.drRpoHours;
+  const rtoTargetHours = ENV.drRtoHours;
+  const restoreMaxAgeHours = ENV.drRestoreMaxAgeHours;
+  const retentionDays = ENV.drRetentionDays;
   const events = await getLatestDisasterEvents();
   const lastBackupEvent = latestEventByType(events, "backup_completed");
   const backupFailedEvent = latestEventByType(events, "backup_failed");
@@ -3465,94 +3799,81 @@ async function getDisasterReadinessDashboard() {
   const restoreFailedEvent = latestEventByType(events, "restore_test_failed");
   const envBackupAt = parseOptionalDate(ENV.backupLastCompletedAt);
   const eventBackupAt = parseOptionalDate(lastBackupEvent?.createdAt);
-  const lastBackupAt = envBackupAt ?? eventBackupAt;
+  const lastBackupAt = latestDate(envBackupAt, eventBackupAt);
   const backupFailedAt = parseOptionalDate(backupFailedEvent?.createdAt);
-  const backupAgeHours = dateAgeHours(lastBackupAt);
-  const backupStatus = (ENV.backupStatus || (backupFailedAt && (!lastBackupAt || backupFailedAt >= lastBackupAt) ? "failed" : lastBackupAt ? "completed" : "unknown")).trim().toLowerCase();
-  const envRestoreAt = parseOptionalDate(ENV.restoreTestLastPassedAt);
+  const envBackupStatus = ENV.backupStatus.trim().toLowerCase();
+  const envFailureActive = envBackupStatus === "failed" && (!eventBackupAt || !envBackupAt || envBackupAt.getTime() >= eventBackupAt.getTime());
+  const backupStatus = envFailureActive || backupFailedAt && (!lastBackupAt || backupFailedAt.getTime() >= lastBackupAt.getTime()) ? "failed" : lastBackupAt ? "completed" : envBackupStatus === "failed" ? "failed" : "unknown";
+  const envRestoreAt = ENV.restoreTestPassed ? parseOptionalDate(ENV.restoreTestLastPassedAt) : null;
   const eventRestoreAt = parseOptionalDate(restorePassedEvent?.createdAt);
-  const restoreTestAt = envRestoreAt ?? eventRestoreAt;
-  const restoreTestPassed = ENV.restoreTestPassed || Boolean(
-    restoreTestAt && (!restoreFailedEvent || restoreTestAt >= new Date(restoreFailedEvent.createdAt))
-  );
+  const restoreTestAt = latestDate(envRestoreAt, eventRestoreAt);
+  const restoreFailedAt = parseOptionalDate(restoreFailedEvent?.createdAt);
+  const restoreStatus = restoreFailedAt && (!restoreTestAt || restoreFailedAt.getTime() >= restoreTestAt.getTime()) ? "failed" : restoreTestAt ? "passed" : "missing";
+  const restoreTestPassed = restoreStatus === "passed";
+  const restoreDurationMs = eventRestoreAt && restoreTestAt && eventRestoreAt.getTime() === restoreTestAt.getTime() ? parseRuntimeMs(restorePassedEvent?.runtime) : null;
   const criticalTables = await getCriticalTableReadiness();
   const tableErrors = criticalTables.filter((table) => table.status !== "ok");
-  const alerts = [];
-  if (!lastBackupAt) {
-    alerts.push({
-      type: "backup_missing",
-      severity: "fatal",
-      severityLabel: "critical",
-      title: "Backup sem evidencia registrada",
-      message: "Nenhuma evidencia de backup foi encontrada em variaveis ou eventos operacionais.",
-      metadata: { rpoTargetHours, backupAgeHours: null }
-    });
-  } else if ((backupAgeHours ?? 0) > 72) {
-    alerts.push({
-      type: "backup_missing",
-      severity: "fatal",
-      severityLabel: "critical",
-      title: "Backup acima de 72 horas",
-      message: `Ultimo backup tem ${backupAgeHours}h. Meta RPO: ${rpoTargetHours}h.`,
-      metadata: { rpoTargetHours, backupAgeHours, thresholdHours: 72 }
-    });
-  } else if ((backupAgeHours ?? 0) > 24) {
-    alerts.push({
-      type: "backup_missing",
-      severity: "warning",
-      severityLabel: "warning",
-      title: "Backup acima de 24 horas",
-      message: `Ultimo backup tem ${backupAgeHours}h. Meta RPO: ${rpoTargetHours}h.`,
-      metadata: { rpoTargetHours, backupAgeHours, thresholdHours: 24 }
-    });
-  }
-  if (backupStatus === "failed") {
-    alerts.push({
-      type: "backup_failed",
-      severity: "fatal",
-      severityLabel: "critical",
-      title: "Falha de backup registrada",
-      message: "A ultima evidencia de backup indica falha.",
-      metadata: {
-        backupStatus,
-        backupFailedAt: backupFailedAt?.toISOString() ?? null
-      }
-    });
-  }
-  if (!restoreTestPassed) {
-    alerts.push({
-      type: "restore_test_failed",
-      severity: "warning",
-      severityLabel: "warning",
-      title: "Restore test nao aprovado",
-      message: "Nenhuma evidencia de teste de restore aprovado foi encontrada.",
-      metadata: {
-        rtoTargetHours,
-        restoreTestAt: restoreTestAt?.toISOString() ?? null
-      }
-    });
-  }
-  for (const table of tableErrors) {
-    alerts.push({
-      type: "restore_test_failed",
-      severity: "fatal",
-      severityLabel: "critical",
-      title: `Tabela critica inacessivel: ${table.table}`,
-      message: table.error ?? "Tabela critica nao respondeu a consulta de prontidao.",
-      metadata: { table: table.table, status: table.status }
-    });
-  }
-  await persistDisasterReadinessAlerts(alerts);
-  const status = alerts.some((alert) => alert.severity === "fatal") ? "critical" : alerts.length > 0 ? "warning" : "healthy";
-  return {
-    status,
+  const history = {
+    backupCompleted: events.filter((event) => event.type === "backup_completed").length,
+    backupFailed: events.filter((event) => event.type === "backup_failed").length,
+    restorePassed: events.filter((event) => event.type === "restore_test_passed").length,
+    restoreFailed: events.filter((event) => event.type === "restore_test_failed").length
+  };
+  const evaluation = evaluateDisasterReadiness({
     rpoTargetHours,
     rtoTargetHours,
+    restoreMaxAgeHours,
+    retentionDays,
+    policyExplicit: ENV.drPolicyMissingVariables.length === 0 && ENV.drPolicyInvalidVariables.length === 0,
+    scheduleEnabled: ENV.drScheduleEnabled,
+    lastBackupAt,
+    backupStatus,
+    restoreTestAt,
+    restoreStatus,
+    restoreDurationMs,
+    history,
+    tableErrors
+  });
+  const alerts = evaluation.issues.map((issue) => ({
+    type: issue.type,
+    level: issue.level,
+    severity: issue.level === "no-go" ? "fatal" : issue.level === "warning" ? "warning" : "warning",
+    severityLabel: issue.level,
+    title: issue.title,
+    message: issue.message,
+    action: issue.action,
+    metadata: issue.metadata
+  }));
+  await persistDisasterReadinessAlerts(alerts);
+  return {
+    status: evaluation.status,
+    reason: evaluation.reason,
+    reasons: evaluation.reasons,
+    nextAction: evaluation.nextAction,
+    rpoTargetHours,
+    rtoTargetHours,
+    restoreMaxAgeHours,
+    retentionDays,
     lastBackupAt: lastBackupAt?.toISOString() ?? null,
-    backupAgeHours,
-    backupStatus: backupStatus || "unknown",
+    backupAgeHours: evaluation.backupAgeHours,
+    backupWithinRpo: evaluation.backupWithinRpo,
+    backupStatus,
     restoreTestAt: restoreTestAt?.toISOString() ?? null,
+    restoreAgeHours: evaluation.restoreAgeHours,
+    restoreWithinWindow: evaluation.restoreWithinWindow,
+    restoreStatus,
     restoreTestPassed,
+    restoreDurationMs: evaluation.restoreDurationMs,
+    restoreDurationHours: evaluation.restoreDurationHours,
+    rtoMet: evaluation.rtoMet,
+    recurringEvidence: evaluation.recurringEvidence,
+    configuration: {
+      policyExplicit: ENV.drPolicyMissingVariables.length === 0 && ENV.drPolicyInvalidVariables.length === 0,
+      missingVariables: ENV.drPolicyMissingVariables,
+      invalidVariables: ENV.drPolicyInvalidVariables,
+      scheduleEnabled: ENV.drScheduleEnabled
+    },
+    history,
     criticalTables,
     alerts,
     events: {
@@ -3596,7 +3917,25 @@ async function persistLongRunningJobAlerts(alerts) {
     });
   }
 }
-function buildQueueIntegrityDashboard(events, failedJobs, runningJobs, days, averageRuntimeMs = 6e4, runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs)) {
+function buildQueueIntegrityDashboard(events, failedJobs, runningJobs, days, averageRuntimeMs = 6e4, runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs), queuedJobs = []) {
+  const now = Date.now();
+  const staleQueuedThresholdMs = Math.max(15 * 6e4, averageRuntimeMs * 3);
+  const queuedJobAges = queuedJobs.map((job) => {
+    const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
+    return Number.isFinite(createdAt) ? Math.max(0, now - createdAt) : 0;
+  }).filter((ageMs) => ageMs > 0);
+  const staleQueuedJobs = queuedJobs.map((job) => {
+    const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
+    const queuedMs = Number.isFinite(createdAt) ? Math.max(0, now - createdAt) : 0;
+    return {
+      id: Number(job.id),
+      routeId: Number(job.routeId ?? job.route_id ?? 0),
+      userId: job.userId ?? job.user_id ?? null,
+      providerJobId: job.providerJobId ?? job.provider_job_id ?? null,
+      createdAt: job.createdAt ?? job.created_at ?? null,
+      queuedMs
+    };
+  }).filter((job) => job.queuedMs >= staleQueuedThresholdMs);
   const duplicateJobs = countEventsByType(events, "duplicate_job_detected");
   const jobRecoveredAfterCrash = countEventsByType(
     events,
@@ -3612,11 +3951,18 @@ function buildQueueIntegrityDashboard(events, failedJobs, runningJobs, days, ave
     events,
     "redis_reconnect_detected"
   );
-  const failedRecoveries = failedJobs.filter((job) => {
+  const failedRecoveryJobs = failedJobs.filter((job) => {
     const attemptCount = Number(job.attemptCount ?? job.attempt_count ?? 0);
     const maxAttempts = Number(job.maxAttempts ?? job.max_attempts ?? 3);
     return attemptCount >= maxAttempts;
-  }).length;
+  });
+  const recentFailedRecoveryCutoff = now - 7 * 24 * 60 * 60 * 1e3;
+  const recentFailedRecoveryJobs = failedRecoveryJobs.filter((job) => {
+    const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
+    return Number.isFinite(createdAt) && createdAt >= recentFailedRecoveryCutoff;
+  });
+  const failedRecoveries = failedRecoveryJobs.length;
+  const recentFailedRecoveries = recentFailedRecoveryJobs.length;
   const lastEvent = events[0];
   return {
     periodDays: days,
@@ -3629,16 +3975,24 @@ function buildQueueIntegrityDashboard(events, failedJobs, runningJobs, days, ave
     stalledRecoveredCount,
     runningStalledJobs: runningAlerts.length,
     stalledJobs: stalledCount + runningAlerts.length,
+    queuedJobs: queuedJobs.length,
+    staleQueuedJobs: staleQueuedJobs.length,
+    oldestQueuedMs: queuedJobAges.length ? Math.max(...queuedJobAges) : 0,
+    staleQueuedThresholdMs,
+    staleQueuedJobDetails: staleQueuedJobs.slice(0, 20),
     averageRuntimeMs,
     longRunningJobs: runningAlerts,
     failedRecoveries,
+    recentFailedRecoveries,
+    failedRecoveryWindowDays: 7,
     redisReconnectCount,
     lastIntegrityCheck: lastEvent?.createdAt ?? null,
-    status: duplicateJobs === 0 && failedRecoveries === 0 && stalledCount === 0 && runningAlerts.length === 0 ? "healthy" : "attention",
+    status: duplicateJobs === 0 && recentFailedRecoveries === 0 && stalledCount === 0 && runningAlerts.length === 0 && staleQueuedJobs.length === 0 ? "healthy" : "attention",
     target: {
       duplicateJobs: 0,
-      failedRecoveries: 0,
+      recentFailedRecoveries: 0,
       stalledJobs: 0,
+      staleQueuedJobs: 0,
       recoveryAfterFailure: "100%"
     },
     recentEvents: events.slice(0, 20)
@@ -3794,29 +4148,115 @@ function roundMetric(value, digits = 1) {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
 }
-function buildPerformanceBenchmarkDashboard(rows, days, tableAvailable = true) {
-  const scenarioTargets = [250, 500, 1e3, 2e3].map((stopCount) => {
+function parsePerformanceBenchmarkMetadata(value) {
+  if (!value) return {};
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === "object" ? value : {};
+}
+function benchmarkProviderType(metadata) {
+  if (metadata.providerType) return String(metadata.providerType);
+  try {
+    const hostname = new URL(
+      String(metadata.osrmBaseUrl || "")
+    ).hostname.toLowerCase();
+    return hostname === "router.project-osrm.org" || hostname.endsWith(".project-osrm.org") ? "public" : "self_hosted";
+  } catch {
+    return null;
+  }
+}
+function evaluatePersistedBenchmark(row) {
+  const metadata = parsePerformanceBenchmarkMetadata(row?.metadata);
+  return evaluatePerformanceBenchmarkRun({
+    stopCount: Number(row?.stopCount ?? row?.stop_count ?? 0),
+    runtimeMs: Number(row?.runtimeMs ?? row?.runtime_ms ?? 0),
+    success: Boolean(row?.success),
+    osrmCalls: Number(row?.osrmCalls ?? row?.osrm_calls ?? 0),
+    osrmFailures: Number(row?.osrmFailures ?? row?.osrm_failures ?? 0),
+    matrixCacheHit: Number(row?.matrixCacheHit ?? row?.matrix_cache_hit ?? 0),
+    matrixCacheMiss: Number(
+      row?.matrixCacheMiss ?? row?.matrix_cache_miss ?? 0
+    ),
+    providerType: benchmarkProviderType(metadata),
+    qualityScore: metadata.qualityScore == null ? null : Number(metadata.qualityScore),
+    qualityStatus: metadata.qualityStatus == null ? null : String(metadata.qualityStatus),
+    duplicateAddressCount: metadata.duplicateAddressCount == null ? null : Number(metadata.duplicateAddressCount),
+    duplicateCoordinateCount: metadata.duplicateCoordinateCount == null ? null : Number(metadata.duplicateCoordinateCount),
+    payloadBytes: metadata.payloadBytes == null ? null : Number(metadata.payloadBytes)
+  });
+}
+function buildPerformanceBenchmarkDashboard(rows, days, tableAvailable = true, historicalRows = rows) {
+  const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1e3;
+  const scenarioTargets = Object.keys(PERFORMANCE_BENCHMARK_TARGETS).map(Number).map((stopCount) => {
     const values = rows.filter(
+      (row) => Number(row.stopCount ?? row.stop_count) === stopCount
+    );
+    const historicalValues = historicalRows.filter(
       (row) => Number(row.stopCount ?? row.stop_count) === stopCount
     );
     const runtimes = values.map(
       (row) => Number(row.runtimeMs ?? row.runtime_ms ?? 0)
     );
-    const latest = values.slice().sort(
+    const latest = historicalValues.slice().sort(
       (a, b) => new Date(b.createdAt ?? b.created_at ?? 0).getTime() - new Date(a.createdAt ?? a.created_at ?? 0).getTime()
     )[0];
+    const latestAt = latest?.createdAt ?? latest?.created_at ?? null;
+    const latestAtMs = latestAt ? new Date(latestAt).getTime() : 0;
+    const fresh = Boolean(latest && latestAtMs >= cutoffMs);
     const latestRuntimeMs = Number(
       latest?.runtimeMs ?? latest?.runtime_ms ?? 0
     );
-    const targetMs = PERFORMANCE_BENCHMARK_TARGETS[stopCount];
-    const latestCriteriaMet = Boolean(
-      latest?.criteriaMet ?? latest?.criteria_met ?? false
+    const latestMetadata = parsePerformanceBenchmarkMetadata(
+      latest?.metadata
     );
+    const latestEvaluation = latest ? evaluatePersistedBenchmark(latest) : null;
+    const validRuns = values.filter(
+      (row) => evaluatePersistedBenchmark(row).passed
+    ).length;
+    const failureReasons = latestEvaluation ? [...latestEvaluation.failureReasons] : [`Sem benchmark persistido para ${stopCount} paradas.`];
+    if (latest && !fresh) {
+      failureReasons.unshift(
+        `Ultimo benchmark expirou da janela de ${days} dias.`
+      );
+    }
+    if (validRuns < PERFORMANCE_BENCHMARK_SAMPLE_SIZE) {
+      failureReasons.push(
+        `Amostra valida ${validRuns}/${PERFORMANCE_BENCHMARK_SAMPLE_SIZE} na janela.`
+      );
+    }
+    const uniqueFailureReasons = Array.from(new Set(failureReasons));
+    const status = !latest ? "missing" : !fresh ? "expired" : latestEvaluation?.passed && validRuns >= PERFORMANCE_BENCHMARK_SAMPLE_SIZE ? "ready" : "no-go";
     return {
       stopCount,
-      targetMs,
+      targetMs: PERFORMANCE_BENCHMARK_TARGETS[stopCount],
+      minimumSampleSize: PERFORMANCE_BENCHMARK_SAMPLE_SIZE,
       runs: values.length,
+      historicalRuns: historicalValues.length,
+      validRuns,
+      fresh,
       latestRuntimeMs,
+      latestSuccess: Boolean(latest?.success),
+      latestStoredCriteriaMet: Boolean(
+        latest?.criteriaMet ?? latest?.criteria_met ?? false
+      ),
+      latestCriteriaMet: Boolean(latestEvaluation?.passed),
+      latestRuntimeWithinTarget: Boolean(
+        latestEvaluation?.runtimeWithinTarget
+      ),
+      latestOsrmFailureRate: latestEvaluation?.osrmFailureRate ?? null,
+      latestProviderType: benchmarkProviderType(latestMetadata),
+      latestQualityScore: latestMetadata.qualityScore == null ? null : Number(latestMetadata.qualityScore),
+      latestQualityStatus: latestMetadata.qualityStatus ?? null,
+      latestPayloadBytes: latestMetadata.payloadBytes == null ? null : Number(latestMetadata.payloadBytes),
+      latestExecutionMode: latestMetadata.executionMode ?? "unknown",
+      latestWorkerUsed: Boolean(latestMetadata.workerUsed),
+      latestWorkerHostname: latestMetadata.workerHostname ?? null,
+      latestQueueUsed: Boolean(latestMetadata.queueUsed),
       latestPeakMemoryMb: Number(
         latest?.peakMemoryMb ?? latest?.peak_memory_mb ?? 0
       ),
@@ -3826,24 +4266,38 @@ function buildPerformanceBenchmarkDashboard(rows, days, tableAvailable = true) {
       latestOsrmLatencyMs: Number(
         latest?.osrmLatencyMs ?? latest?.osrm_latency_ms ?? 0
       ),
+      latestOsrmCalls: Number(latest?.osrmCalls ?? latest?.osrm_calls ?? 0),
+      latestOsrmFailures: Number(
+        latest?.osrmFailures ?? latest?.osrm_failures ?? 0
+      ),
+      latestMatrixCacheHit: Number(
+        latest?.matrixCacheHit ?? latest?.matrix_cache_hit ?? 0
+      ),
+      latestMatrixCacheMiss: Number(
+        latest?.matrixCacheMiss ?? latest?.matrix_cache_miss ?? 0
+      ),
       latestAuditCycles: Number(
         latest?.auditCycles ?? latest?.audit_cycles ?? 0
       ),
       latestMicroClusterCount: Number(
         latest?.microClusterCount ?? latest?.micro_cluster_count ?? 0
       ),
-      latestCriteriaMet,
+      failureReasons: uniqueFailureReasons,
+      recommendedAction: uniqueFailureReasons[0] ?? `Executar mais benchmarks ate completar ${PERFORMANCE_BENCHMARK_SAMPLE_SIZE} amostras.`,
       averageRuntimeMs: Math.round(metricAverage(runtimes)),
       p95RuntimeMs: Math.round(metricPercentile(runtimes, 95)),
       p99RuntimeMs: Math.round(metricPercentile(runtimes, 99)),
-      status: !latest ? "missing" : latestCriteriaMet && latestRuntimeMs > 0 && latestRuntimeMs < targetMs ? "ready" : "no-go",
-      latestAt: latest?.createdAt ?? latest?.created_at ?? null
+      status,
+      latestAt
     };
   });
   const totalRuns = rows.length;
   const successfulRuns = rows.filter((row) => Boolean(row.success)).length;
-  const criteriaMetRuns = rows.filter(
+  const storedCriteriaMetRuns = rows.filter(
     (row) => Boolean(row.criteriaMet ?? row.criteria_met)
+  ).length;
+  const criteriaMetRuns = rows.filter(
+    (row) => evaluatePersistedBenchmark(row).passed
   ).length;
   const osrmCalls = rows.reduce(
     (total, row) => total + Number(row.osrmCalls ?? row.osrm_calls ?? 0),
@@ -3858,6 +4312,7 @@ function buildPerformanceBenchmarkDashboard(rows, days, tableAvailable = true) {
     days,
     totalRuns,
     successfulRuns,
+    storedCriteriaMetRuns,
     criteriaMetRuns,
     successRate: roundMetric(metricPercent(successfulRuns, totalRuns)),
     criteriaMetRate: roundMetric(metricPercent(criteriaMetRuns, totalRuns)),
@@ -3865,6 +4320,17 @@ function buildPerformanceBenchmarkDashboard(rows, days, tableAvailable = true) {
     osrmFailures,
     osrmFailureRate: roundMetric(metricPercent(osrmFailures, osrmCalls)),
     targets: scenarioTargets,
+    commercialLimits: {
+      betaControlledStops: 150,
+      initialProductionStops: 150,
+      increaseTo250Requires: "benchmark250 ready",
+      increaseTo500Requires: "benchmark250 e benchmark500 ready",
+      highScaleBenchmarkEvidenceReady: scenarioTargets.filter(
+        (target) => target.stopCount === 1e3 || target.stopCount === 2e3
+      ).every((target) => target.status === "ready"),
+      highScalePromiseAllowed: false,
+      highScaleRequires: "benchmarks 1000/2000 ready, OSRM proprio, DR ok e workers em hosts independentes"
+    },
     status: !tableAvailable ? "unavailable" : scenarioTargets.every((target) => target.status === "ready") ? "ready" : scenarioTargets.some((target) => target.status === "no-go") ? "no-go" : "partial",
     generatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
@@ -3878,13 +4344,26 @@ async function getPerformanceBenchmarkDashboard(days = 30) {
       const rows = memory.performanceBenchmarks.filter(
         (row) => new Date(row.createdAt).getTime() >= cutoffDate.getTime()
       );
-      return buildPerformanceBenchmarkDashboard(rows, safeDays);
+      return buildPerformanceBenchmarkDashboard(
+        rows,
+        safeDays,
+        true,
+        memory.performanceBenchmarks
+      );
     }
     requireConfiguredDatabase();
   }
   try {
-    const rows = await db.select().from(performanceBenchmarks).where(gte(performanceBenchmarks.createdAt, cutoffDate)).orderBy(desc(performanceBenchmarks.createdAt)).limit(500);
-    return buildPerformanceBenchmarkDashboard(rows, safeDays);
+    const [rows, historicalRows] = await Promise.all([
+      db.select().from(performanceBenchmarks).where(gte(performanceBenchmarks.createdAt, cutoffDate)).orderBy(desc(performanceBenchmarks.createdAt)).limit(500),
+      db.select().from(performanceBenchmarks).orderBy(desc(performanceBenchmarks.createdAt)).limit(500)
+    ]);
+    return buildPerformanceBenchmarkDashboard(
+      rows,
+      safeDays,
+      true,
+      historicalRows
+    );
   } catch (error) {
     return {
       ...buildPerformanceBenchmarkDashboard([], safeDays, false),
@@ -3947,7 +4426,7 @@ function buildGoLive500Dashboard(args) {
   } else if (benchmark500Status !== "ready") {
     issues.push({
       severity: "critical",
-      message: `Benchmark oficial de ${maxRouteStops} paradas nao atingiu a meta de 30 segundos.`
+      message: `Benchmark oficial de ${maxRouteStops} paradas nao liberado: ${benchmark500?.failureReasons?.[0] ?? "evidencia insuficiente"}.`
     });
   }
   if (runtimeP95Ms > 6e4) {
@@ -4021,6 +4500,12 @@ function buildGoLive500Dashboard(args) {
       latestRuntimeMs: benchmark500.latestRuntimeMs,
       latestPeakMemoryMb: benchmark500.latestPeakMemoryMb,
       latestOsrmLatencyMs: benchmark500.latestOsrmLatencyMs,
+      latestSuccess: benchmark500.latestSuccess,
+      latestCriteriaMet: benchmark500.latestCriteriaMet,
+      validRuns: benchmark500.validRuns,
+      minimumSampleSize: benchmark500.minimumSampleSize,
+      failureReasons: benchmark500.failureReasons,
+      recommendedAction: benchmark500.recommendedAction,
       runs: benchmark500.runs,
       latestAt: benchmark500.latestAt
     } : {
@@ -5781,13 +6266,15 @@ async function getRouteStatsOverTime(userId, days = 30) {
     and(eq(routeHistory.userId, userId), sql`executedDate >= ${startDate}`)
   ).groupBy(sql`DATE(executedDate)`).orderBy(asc(sql`DATE(executedDate)`));
 }
-var _db, _pool, _dbConnectPromise, _lastDbConnectAttempt, _lastDbConnectionError, _schemaHealthCache, DB_CONNECT_RETRY_MS, DB_SCHEMA_HEALTH_CACHE_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, FALLBACK_DB_KEY, FALLBACK_KV_PREFIX, localDbLoaded, remoteDbLoaded, remoteDbLoadPromise, lastRemoteFallbackError, memory, REQUIRED_SCHEMA_COLUMNS, BETA_ACCESS_SETTINGS_ID, DEFAULT_BETA_ACCESS_SETTINGS, QUEUE_INTEGRITY_EVENT_TYPES, DISASTER_CRITICAL_TABLES, DISASTER_EVENT_TYPES, PERFORMANCE_BENCHMARK_TARGETS, EXECUTIVE_OBSERVABILITY_EVENT_TYPES;
+var _db, _pool, _dbConnectPromise, _lastDbConnectAttempt, _lastDbConnectionError, _schemaHealthCache, DB_CONNECT_RETRY_MS, DB_SCHEMA_HEALTH_CACHE_MS, LOCAL_DB_DIR, LOCAL_DB_FILE, FALLBACK_DB_KEY, FALLBACK_KV_PREFIX, localDbLoaded, remoteDbLoaded, remoteDbLoadPromise, lastRemoteFallbackError, memory, REQUIRED_SCHEMA_COLUMNS, BETA_ACCESS_SETTINGS_ID, DEFAULT_BETA_ACCESS_SETTINGS, QUEUE_INTEGRITY_EVENT_TYPES, DISASTER_CRITICAL_TABLES, DISASTER_EVENT_TYPES, EXECUTIVE_OBSERVABILITY_EVENT_TYPES;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
     init_schema();
     init_accountAccess();
     init_env();
+    init_disasterReadiness();
+    init_performanceBenchmarkPolicy();
     init_geocodingConfidence();
     init_stopMetadata();
     _db = null;
@@ -6013,12 +6500,6 @@ var init_db = __esm({
       "restore_test_passed",
       "restore_test_failed"
     ];
-    PERFORMANCE_BENCHMARK_TARGETS = {
-      250: 15e3,
-      500: 3e4,
-      1e3: 6e4,
-      2e3: 18e4
-    };
     EXECUTIVE_OBSERVABILITY_EVENT_TYPES = [
       "route_optimization_attention_strong",
       "route_stop_delivered",
@@ -7049,16 +7530,21 @@ var DATABASE_CACHE_TTL_MS = Math.max(
 var RATE_LIMIT_WINDOW_MS = 60 * 1e3;
 var RATE_LIMIT_MAX_REQUESTS = Math.max(
   1,
-  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 240)
+  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 60)
 );
 var EXTERNAL_MIN_INTERVAL_MS = Math.max(
   0,
-  Number(process.env.GEOCODING_EXTERNAL_MIN_INTERVAL_MS || 350)
+  Number(process.env.GEOCODING_EXTERNAL_MIN_INTERVAL_MS || 1100)
+);
+var EXTERNAL_PROVIDER_COOLDOWN_MS = Math.max(
+  3e4,
+  Number(process.env.GEOCODING_PROVIDER_COOLDOWN_MS || 12e4)
 );
 var cache = /* @__PURE__ */ new Map();
 var rateLimiter = /* @__PURE__ */ new Map();
 var inFlightSearches = /* @__PURE__ */ new Map();
 var lastExternalSearchAt = 0;
+var externalProviderCooldownUntil = 0;
 function normalizeSearchQuery(query) {
   return query.replace(/\s+/g, " ").trim();
 }
@@ -7212,6 +7698,13 @@ async function fetchExternalSearch(cacheKey, url) {
   const existing = inFlightSearches.get(cacheKey);
   if (existing) return existing;
   const request = (async () => {
+    const cooldownMs = externalProviderCooldownUntil - Date.now();
+    if (cooldownMs > 0) {
+      const error = new Error("Nominatim em cooldown apos rate limit.");
+      error.status = 429;
+      error.retryAfter = String(Math.ceil(cooldownMs / 1e3));
+      throw error;
+    }
     await waitForExternalSearchSlot();
     const response = await fetch(url, {
       headers: {
@@ -7224,6 +7717,13 @@ async function fetchExternalSearch(cacheKey, url) {
       const error = new Error(body.slice(0, 200));
       error.status = response.status;
       error.retryAfter = response.headers.get("retry-after") || void 0;
+      if (response.status === 429) {
+        const retryAfterSeconds = Number(response.headers.get("retry-after"));
+        externalProviderCooldownUntil = Date.now() + Math.max(
+          EXTERNAL_PROVIDER_COOLDOWN_MS,
+          Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1e3 : 0
+        );
+      }
       throw error;
     }
     return response.json();
@@ -7362,7 +7862,8 @@ function registerGeocodingProxy(app2) {
           provider_used: "nominatim",
           fallbackProvider: null,
           status: status ?? null,
-          error: error instanceof Error ? error.message.slice(0, 200) : "unknown"
+          error: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+          providerCooldownUntil: externalProviderCooldownUntil > Date.now() ? new Date(externalProviderCooldownUntil).toISOString() : null
         }
       });
       if (status === 429) {
@@ -8332,17 +8833,82 @@ function readPositiveIntegerEnv2(name, fallback) {
   const parsed = Number(process.env[name]);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
-function isPublicOsrmProvider() {
+function sanitizeBaseUrlForDisplay(value) {
   try {
-    return new URL(ENV.osrmBaseUrl).hostname.toLowerCase() === "router.project-osrm.org";
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
   } catch {
-    return false;
+    return null;
+  }
+}
+function getOsrmConfiguration() {
+  const rawBaseUrl = ENV.osrmBaseUrl.trim().replace(/\/+$/, "");
+  const profile = ENV.osrmProfile.trim();
+  if (!rawBaseUrl) {
+    return {
+      configured: false,
+      configurationValid: false,
+      providerType: "unconfigured",
+      isPublic: false,
+      baseUrl: null,
+      profile,
+      productionEligible: false,
+      routingAllowed: false,
+      configurationError: "OSRM_BASE_URL nao configurado."
+    };
+  }
+  try {
+    const url = new URL(rawBaseUrl);
+    const protocolValid = url.protocol === "http:" || url.protocol === "https:";
+    const profileValid = /^[a-z0-9_-]+$/i.test(profile);
+    const hostname = url.hostname.toLowerCase();
+    const isPublic = hostname === "router.project-osrm.org" || hostname.endsWith(".project-osrm.org");
+    const configurationValid = protocolValid && profileValid;
+    const productionEligible = configurationValid && url.protocol === "https:" && !isPublic;
+    let configurationError = null;
+    if (!protocolValid) {
+      configurationError = "OSRM_BASE_URL deve usar protocolo http ou https.";
+    } else if (!profileValid) {
+      configurationError = "OSRM_PROFILE invalido. Use apenas letras, numeros, hifen ou sublinhado.";
+    } else if (ENV.isProduction && ENV.osrmRequired && isPublic) {
+      configurationError = "OSRM_REQUIRED=true nao permite router.project-osrm.org em producao.";
+    } else if (ENV.isProduction && ENV.osrmRequired && url.protocol !== "https:") {
+      configurationError = "OSRM_REQUIRED=true exige OSRM_BASE_URL com HTTPS em producao.";
+    }
+    return {
+      configured: true,
+      configurationValid,
+      providerType: configurationValid ? isPublic ? "public" : "self_hosted" : "invalid",
+      isPublic,
+      baseUrl: sanitizeBaseUrlForDisplay(rawBaseUrl),
+      profile,
+      productionEligible,
+      routingAllowed: configurationValid && !(ENV.isProduction && ENV.osrmRequired && !productionEligible),
+      configurationError
+    };
+  } catch {
+    return {
+      configured: true,
+      configurationValid: false,
+      providerType: "invalid",
+      isPublic: false,
+      baseUrl: null,
+      profile,
+      productionEligible: false,
+      routingAllowed: false,
+      configurationError: "OSRM_BASE_URL invalido."
+    };
   }
 }
 function getRoadMatrixMaxNodes() {
+  const configuration = getOsrmConfiguration();
   return readPositiveIntegerEnv2(
     "OSRM_MAX_TABLE_NODES",
-    isPublicOsrmProvider() ? 50 : 100
+    configuration.isPublic ? 50 : 100
   );
 }
 function getRoadMatrixPartitionSize(options = {}) {
@@ -8413,8 +8979,9 @@ function buildNodes(locations, options = {}) {
 }
 function buildOsrmTableUrl(nodes) {
   const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const profile = ENV.osrmProfile;
   const coordinates = nodes.map(({ location }) => `${location.longitude},${location.latitude}`).join(";");
-  return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
+  return `${baseUrl}/table/v1/${profile}/${coordinates}?annotations=duration,distance`;
 }
 function hashText(value) {
   return createHash4("sha256").update(value).digest("hex");
@@ -8438,8 +9005,10 @@ function buildMatrixHashes(nodes) {
   ).sort().join("|");
   const providerKey = ENV.osrmBaseUrl.replace(/\/+$/, "");
   return {
-    matrixHash: hashText(["driving", providerKey, orderedCoordinates].join("|")),
-    clusterHash: hashText(["driving", unorderedCoordinates].join("|"))
+    matrixHash: hashText(
+      [ENV.osrmProfile, providerKey, orderedCoordinates].join("|")
+    ),
+    clusterHash: hashText([ENV.osrmProfile, unorderedCoordinates].join("|"))
   };
 }
 function isMatrixValue(value, expectedSize) {
@@ -8447,10 +9016,17 @@ function isMatrixValue(value, expectedSize) {
     (row) => Array.isArray(row) && row.length === expectedSize && row.every((item) => typeof item === "number" && Number.isFinite(item))
   );
 }
-function buildOsrmHealthUrl() {
+function buildOsrmRouteHealthUrl() {
   const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const profile = ENV.osrmProfile;
   const coordinates = "-51.407,-22.121;-51.406,-22.122";
-  return `${baseUrl}/route/v1/driving/${coordinates}?overview=false&alternatives=false&steps=false`;
+  return `${baseUrl}/route/v1/${profile}/${coordinates}?overview=false&alternatives=false&steps=false`;
+}
+function buildOsrmTableHealthUrl() {
+  const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const profile = ENV.osrmProfile;
+  const coordinates = "-51.407,-22.121;-51.406,-22.122";
+  return `${baseUrl}/table/v1/${profile}/${coordinates}?annotations=duration,distance`;
 }
 function normalizeMatrix(values, factor) {
   if (!values?.length) return null;
@@ -8462,13 +9038,19 @@ function normalizeMatrix(values, factor) {
   return normalized.some((row) => row.some((value) => !Number.isFinite(value))) ? null : normalized;
 }
 async function fetchRoadMatrix(locations, options = {}) {
-  if (!ENV.osrmEnabled || locations.length === 0) return null;
-  const { nodes, startNodeIndex, endNodeIndex } = buildNodes(locations, options);
+  const configuration = getOsrmConfiguration();
+  if (!ENV.osrmEnabled || !configuration.configurationValid || !configuration.routingAllowed || locations.length === 0) {
+    return null;
+  }
+  const { nodes, startNodeIndex, endNodeIndex } = buildNodes(
+    locations,
+    options
+  );
   if (nodes.length < 2 || nodes.some((node) => !isValidCoordinate(node.location))) {
     return null;
   }
   const startedAt = Date.now();
-  const provider = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const provider = configuration.baseUrl ?? "osrm-configured-with-invalid-display-url";
   const record = (success, failureReason = null, cacheHit = false) => {
     const durationMs = Date.now() - startedAt;
     if (!cacheHit) {
@@ -8504,7 +9086,10 @@ async function fetchRoadMatrix(locations, options = {}) {
     };
   }
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    ENV.osrmRequestTimeoutMs
+  );
   try {
     const response = await fetch(buildOsrmTableUrl(nodes), {
       signal: controller.signal,
@@ -8543,64 +9128,144 @@ async function fetchRoadMatrix(locations, options = {}) {
       endNodeIndex
     };
   } catch (error) {
-    record(false, error instanceof Error ? error.name || error.message : "fetch_error");
+    record(
+      false,
+      error instanceof Error ? error.name || error.message : "fetch_error"
+    );
     return null;
   } finally {
     clearTimeout(timeout);
   }
 }
 async function getOsrmHealth() {
-  const baseUrl = ENV.osrmBaseUrl.trim().replace(/\/+$/, "");
-  const configured = Boolean(baseUrl);
+  const configuration = getOsrmConfiguration();
+  const fallbackPolicy = ENV.osrmRequired ? "blocked" : "geographic_allowed";
   const baseHealth = {
     enabled: ENV.osrmEnabled,
     required: ENV.osrmRequired,
-    configured,
+    configured: configuration.configured,
+    configurationValid: configuration.configurationValid,
     reachable: false,
-    baseUrl: configured ? baseUrl : null,
+    baseUrl: configuration.baseUrl,
+    profile: configuration.profile,
+    providerType: configuration.providerType,
+    isPublic: configuration.isPublic,
+    productionEligible: configuration.productionEligible,
+    productionReady: false,
+    usable: false,
+    fallbackPolicy,
+    status: "attention",
+    reason: "",
     timeoutMs: ENV.osrmHealthTimeoutMs,
+    requestTimeoutMs: ENV.osrmRequestTimeoutMs,
+    maxTableNodes: getRoadMatrixMaxNodes(),
+    retries: 0,
+    services: ["route", "table"],
+    healthCheckSkipped: false,
     error: null
   };
   if (!ENV.osrmEnabled) {
+    const reason = ENV.osrmRequired ? "OSRM obrigatorio esta desativado por OSRM_ENABLED=false." : "OSRM esta desativado; fallback geografico permanece permitido.";
     return {
       ...baseHealth,
-      error: ENV.osrmRequired ? "OSRM_REQUIRED=true, mas OSRM_ENABLED=false." : null
+      status: ENV.osrmRequired ? "no-go" : "attention",
+      reason,
+      healthCheckSkipped: true,
+      error: ENV.osrmRequired ? reason : null
     };
   }
-  if (!configured) {
+  if (!configuration.configured || !configuration.configurationValid) {
+    const reason = configuration.configurationError ?? "Configuracao OSRM invalida.";
     return {
       ...baseHealth,
-      error: "OSRM_BASE_URL nao configurado."
+      status: ENV.osrmRequired ? "no-go" : "attention",
+      reason,
+      healthCheckSkipped: true,
+      error: reason
+    };
+  }
+  if (!configuration.routingAllowed) {
+    const reason = configuration.configurationError ?? "Configuracao OSRM bloqueada pela politica de producao.";
+    return {
+      ...baseHealth,
+      status: "no-go",
+      reason,
+      healthCheckSkipped: true,
+      error: reason
     };
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ENV.osrmHealthTimeoutMs);
+  const startedAt = Date.now();
   try {
-    const response = await fetch(buildOsrmHealthUrl(), {
-      signal: controller.signal,
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) {
+    const [routeResponse, tableResponse] = await Promise.all([
+      fetch(buildOsrmRouteHealthUrl(), {
+        signal: controller.signal,
+        headers: { Accept: "application/json" }
+      }),
+      fetch(buildOsrmTableHealthUrl(), {
+        signal: controller.signal,
+        headers: { Accept: "application/json" }
+      })
+    ]);
+    if (!routeResponse.ok || !tableResponse.ok) {
+      const service = !routeResponse.ok ? "route" : "table";
+      const status2 = !routeResponse.ok ? routeResponse.status : tableResponse.status;
+      const reason2 = `OSRM ${service} respondeu HTTP ${status2}.`;
       return {
         ...baseHealth,
-        error: `OSRM respondeu HTTP ${response.status}.`
+        status: ENV.osrmRequired ? "no-go" : "attention",
+        reason: reason2,
+        error: reason2
       };
     }
-    const data = await response.json();
-    if (data.code !== "Ok") {
+    const [routeData, tableData] = await Promise.all([
+      routeResponse.json(),
+      tableResponse.json()
+    ]);
+    if (routeData.code !== "Ok" || tableData.code !== "Ok") {
+      const service = routeData.code !== "Ok" ? "route" : "table";
+      const code = routeData.code !== "Ok" ? routeData.code : tableData.code;
+      const reason2 = `OSRM ${service} respondeu code=${code ?? "indefinido"}.`;
       return {
         ...baseHealth,
-        error: `OSRM respondeu code=${data.code ?? "indefinido"}.`
+        status: ENV.osrmRequired ? "no-go" : "attention",
+        reason: reason2,
+        error: reason2
       };
     }
+    const healthDistances = normalizeMatrix(tableData.distances, 1e3);
+    const healthDurations = normalizeMatrix(tableData.durations, 60);
+    if (!healthDistances || !healthDurations || !isMatrixValue(healthDistances, 2) || !isMatrixValue(healthDurations, 2)) {
+      const reason2 = "OSRM table respondeu sem matriz valida de distancia/duracao.";
+      return {
+        ...baseHealth,
+        status: ENV.osrmRequired ? "no-go" : "attention",
+        reason: reason2,
+        error: reason2
+      };
+    }
+    const usable = true;
+    const productionReady = configuration.productionEligible && ENV.osrmRequired;
+    const status = ENV.isProduction && !productionReady ? "attention" : configuration.isPublic ? "attention" : "ok";
+    const reason = ENV.isProduction && configuration.isPublic ? "OSRM publico esta alcancavel, mas nao e escalavel nem possui SLA do EconoRotas." : ENV.isProduction && !ENV.osrmRequired ? "OSRM proprio esta saudavel, mas OSRM_REQUIRED=false permite fallback geografico." : configuration.isPublic ? "OSRM publico foi configurado explicitamente para este ambiente." : "OSRM proprio esta configurado e saudavel.";
     return {
       ...baseHealth,
-      reachable: true
+      reachable: true,
+      productionReady,
+      usable,
+      status,
+      reason,
+      latencyMs: Date.now() - startedAt
     };
   } catch (error) {
+    const detail = error instanceof Error ? error.message : "Falha ao consultar OSRM.";
+    const reason = `OSRM indisponivel: ${detail}`;
     return {
       ...baseHealth,
-      error: error instanceof Error ? error.message : "Falha ao consultar OSRM."
+      status: ENV.osrmRequired ? "no-go" : "attention",
+      reason,
+      error: detail
     };
   } finally {
     clearTimeout(timeout);
@@ -8628,7 +9293,12 @@ function calculateSequenceMetric(matrix, sequence, mode, startNodeIndex, endNode
     total += getMetric(matrix, mode, sequence[index2], sequence[index2 + 1]);
   }
   if (endNodeIndex !== void 0) {
-    total += getMetric(matrix, mode, sequence[sequence.length - 1], endNodeIndex);
+    total += getMetric(
+      matrix,
+      mode,
+      sequence[sequence.length - 1],
+      endNodeIndex
+    );
   }
   return total;
 }
@@ -8651,12 +9321,26 @@ function calculateSequenceObjective2(matrix, sequence, objective, startNodeIndex
 }
 function buildRoadRoute(matrix, sequence, startNodeIndex, endNodeIndex) {
   return {
-    sequence: sequence.map((nodeIndex) => matrix.nodes[nodeIndex].deliveryIndex ?? nodeIndex),
+    sequence: sequence.map(
+      (nodeIndex) => matrix.nodes[nodeIndex].deliveryIndex ?? nodeIndex
+    ),
     totalDistance: Math.round(
-      calculateSequenceMetric(matrix, sequence, "distance", startNodeIndex, endNodeIndex) * 100
+      calculateSequenceMetric(
+        matrix,
+        sequence,
+        "distance",
+        startNodeIndex,
+        endNodeIndex
+      ) * 100
     ) / 100,
     totalTime: Math.round(
-      calculateSequenceMetric(matrix, sequence, "duration", startNodeIndex, endNodeIndex)
+      calculateSequenceMetric(
+        matrix,
+        sequence,
+        "duration",
+        startNodeIndex,
+        endNodeIndex
+      )
     ),
     waypoints: sequence.map((nodeIndex, sequenceIndex) => ({
       ...matrix.nodes[nodeIndex].location,
@@ -8676,7 +9360,12 @@ function buildNearestSequence(matrix, deliveryNodeIndexes, startIndex, objective
     let nearestIndex = -1;
     let nearestMetric = Infinity;
     for (const candidateIndex of Array.from(available)) {
-      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(
+        matrix,
+        objective,
+        currentNodeIndex,
+        candidateIndex
+      );
       if (metric < nearestMetric) {
         nearestMetric = metric;
         nearestIndex = candidateIndex;
@@ -8734,18 +9423,35 @@ function enforceLocalNearestRoadSequence(matrix, initialSequence, objective, sta
   let currentNodeIndex = startNodeIndex ?? initialSequence[0];
   const localitySettings = getLocalitySettings2(localityMode);
   while (remaining.size > 0) {
-    const plannedNext = initialSequence.find((nodeIndex) => remaining.has(nodeIndex));
+    const plannedNext = initialSequence.find(
+      (nodeIndex) => remaining.has(nodeIndex)
+    );
     if (plannedNext === void 0) break;
     let nearestIndex = plannedNext;
-    let nearestMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
+    let nearestMetric = getObjectiveMetric(
+      matrix,
+      objective,
+      currentNodeIndex,
+      plannedNext
+    );
     for (const candidateIndex of Array.from(remaining)) {
-      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(
+        matrix,
+        objective,
+        currentNodeIndex,
+        candidateIndex
+      );
       if (metric < nearestMetric) {
         nearestMetric = metric;
         nearestIndex = candidateIndex;
       }
     }
-    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const plannedMetric = getObjectiveMetric(
+      matrix,
+      objective,
+      currentNodeIndex,
+      plannedNext
+    );
     const jumpIsOperationallyBad = nearestIndex !== plannedNext && isAvoidableLocalJump2(nearestMetric, plannedMetric, localitySettings);
     const nextIndex = jumpIsOperationallyBad ? nearestIndex : plannedNext;
     remaining.delete(nextIndex);
@@ -8761,10 +9467,20 @@ function calculateAvoidableJumpPenalty2(matrix, sequence, objective, startNodeIn
   let penalty = 0;
   for (const plannedNext of sequence) {
     remaining.delete(plannedNext);
-    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const plannedMetric = getObjectiveMetric(
+      matrix,
+      objective,
+      currentNodeIndex,
+      plannedNext
+    );
     let nearestMetric = plannedMetric;
     for (const candidateIndex of [plannedNext, ...Array.from(remaining)]) {
-      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      const metric = getObjectiveMetric(
+        matrix,
+        objective,
+        currentNodeIndex,
+        candidateIndex
+      );
       if (metric < nearestMetric) {
         nearestMetric = metric;
       }
@@ -8812,7 +9528,9 @@ function calculateClusterSwitchPenalty(matrix, locations, sequence, localityMode
     if (!previousCluster || !currentCluster || previousCluster === currentCluster) {
       continue;
     }
-    const pendingInPreviousCluster = sequence.slice(sequenceIndex + 1).filter((nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster);
+    const pendingInPreviousCluster = sequence.slice(sequenceIndex + 1).filter(
+      (nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster
+    );
     if (pendingInPreviousCluster.length > 0) {
       const fromNode = sequence[sequenceIndex - 1];
       const toNode = sequence[sequenceIndex];
@@ -8859,7 +9577,9 @@ async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options 
     const partitionIndex = chooseNextPartition(remaining, currentLocation);
     const [partition] = remaining.splice(partitionIndex, 1);
     const isLastPartition = remaining.length === 0;
-    const partitionLocations = partition.stops.map(({ originalIndex, ...stop }) => stop);
+    const partitionLocations = partition.stops.map(
+      ({ originalIndex, ...stop }) => stop
+    );
     const optimizedPartition = await optimizeRouteWithRoadMetrics(
       partitionLocations,
       mode,
@@ -8928,7 +9648,12 @@ async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startI
     deliveryNodeIndexes,
     options
   );
-  const startCandidates = result.startNodeIndex !== void 0 || deliveryNodeIndexes.length > 40 ? [Math.min(Math.max(startIndex, 0), Math.max(deliveryNodeIndexes.length - 1, 0))] : deliveryNodeIndexes.map((_, index2) => index2);
+  const startCandidates = result.startNodeIndex !== void 0 || deliveryNodeIndexes.length > 40 ? [
+    Math.min(
+      Math.max(startIndex, 0),
+      Math.max(deliveryNodeIndexes.length - 1, 0)
+    )
+  ] : deliveryNodeIndexes.map((_, index2) => index2);
   let bestSequence = null;
   let bestScore = Infinity;
   for (const candidateStartIndex of startCandidates) {
@@ -10457,12 +11182,14 @@ async function getOptimizationQueueHealth() {
     const workerHeartbeats = await getRecentWorkerHeartbeats().catch(() => []);
     const workerHeartbeatCount = workerHeartbeats.length;
     const workerCount = Math.max(workers.length, workerHeartbeatCount);
+    const redis = await getRedisPolicyHealth();
     await recordWorkerUnderReplicatedAlert(workerCount).catch(() => void 0);
     return {
       configured: true,
       reachable: true,
       queueName: OPTIMIZATION_QUEUE_NAME,
       counts,
+      redis,
       workerCount,
       workerHeartbeatCount,
       minimumWorkerCount: MIN_WORKER_COUNT,
@@ -10503,6 +11230,31 @@ function parseWorkerHeartbeat(member, score) {
       status: "online",
       startedAt: null,
       lastHeartbeat
+    };
+  }
+}
+async function getRedisMaxmemoryPolicy() {
+  const redis = getHeartbeatRedis();
+  if (!redis) return null;
+  const info = await redis.info("memory");
+  const line = info.split(/\r?\n/).find((entry) => entry.toLowerCase().startsWith("maxmemory_policy:"));
+  return line?.split(":")[1]?.trim() || null;
+}
+async function getRedisPolicyHealth() {
+  try {
+    const maxmemoryPolicy = await getRedisMaxmemoryPolicy();
+    return {
+      maxmemoryPolicy,
+      policyTarget: "noeviction",
+      policyCompliant: maxmemoryPolicy ? maxmemoryPolicy === "noeviction" : null,
+      error: null
+    };
+  } catch (error) {
+    return {
+      maxmemoryPolicy: null,
+      policyTarget: "noeviction",
+      policyCompliant: null,
+      error: sanitizeQueueError(error)
     };
   }
 }
@@ -10632,7 +11384,10 @@ async function safeRead(reader, fallback, timeoutMs = 12e3) {
     return await Promise.race([
       reader(),
       new Promise(
-        (_, reject) => setTimeout(() => reject(new Error(`Timeout apos ${timeoutMs}ms.`)), timeoutMs)
+        (_, reject) => setTimeout(
+          () => reject(new Error(`Timeout apos ${timeoutMs}ms.`)),
+          timeoutMs
+        )
       )
     ]);
   } catch (error) {
@@ -10640,15 +11395,6 @@ async function safeRead(reader, fallback, timeoutMs = 12e3) {
       ...fallback,
       error: error instanceof Error ? error.message : String(error)
     };
-  }
-}
-function isEnterpriseOsrm(baseUrl) {
-  if (!baseUrl) return false;
-  try {
-    const url = new URL(baseUrl);
-    return url.protocol === "https:" && url.hostname === "osrm.econorotas.com";
-  } catch {
-    return false;
   }
 }
 function benchmarkItem(performanceBenchmarks2, stopCount) {
@@ -10659,31 +11405,47 @@ function benchmarkItem(performanceBenchmarks2, stopCount) {
   if (!target) {
     blockers.push(`Sem benchmark persistido para ${stopCount} paradas.`);
   } else {
-    if (target.status !== "ready") {
-      blockers.push(
-        `Benchmark ${stopCount} paradas nao atingiu a meta comprovada.`
-      );
-    }
-    if (Number(target.latestRuntimeMs || 0) <= 0) {
-      blockers.push(`Benchmark ${stopCount} paradas sem runtime valido.`);
-    }
+    blockers.push(...target.failureReasons ?? []);
   }
+  const actions = blockers.length ? [
+    target?.recommendedAction ?? `Executar benchmark controlado de ${stopCount} paradas com OSRM proprio.`
+  ] : [`Manter ao menos ${target.minimumSampleSize ?? 3} amostras validas.`];
   return {
     status: blockers.length ? "NO-GO" : "READY",
     evidence: {
       stopCount,
       targetMs: target?.targetMs ?? null,
       latestRuntimeMs: target?.latestRuntimeMs ?? null,
+      runtimeWithinTarget: target?.latestRuntimeWithinTarget ?? false,
+      latestSuccess: target?.latestSuccess ?? false,
+      latestStoredCriteriaMet: target?.latestStoredCriteriaMet ?? false,
       latestQueueWaitMs: target?.latestQueueWaitMs ?? null,
       latestPeakMemoryMb: target?.latestPeakMemoryMb ?? null,
       latestOsrmLatencyMs: target?.latestOsrmLatencyMs ?? null,
       latestMicroClusterCount: target?.latestMicroClusterCount ?? null,
       latestCriteriaMet: target?.latestCriteriaMet ?? false,
+      latestOsrmCalls: target?.latestOsrmCalls ?? 0,
+      latestOsrmFailures: target?.latestOsrmFailures ?? 0,
+      latestOsrmFailureRate: target?.latestOsrmFailureRate ?? null,
+      latestMatrixCacheHit: target?.latestMatrixCacheHit ?? 0,
+      latestMatrixCacheMiss: target?.latestMatrixCacheMiss ?? 0,
+      latestProviderType: target?.latestProviderType ?? null,
+      latestQualityScore: target?.latestQualityScore ?? null,
+      latestQualityStatus: target?.latestQualityStatus ?? null,
+      latestPayloadBytes: target?.latestPayloadBytes ?? null,
+      latestExecutionMode: target?.latestExecutionMode ?? null,
+      latestQueueUsed: target?.latestQueueUsed ?? false,
+      latestWorkerUsed: target?.latestWorkerUsed ?? false,
+      latestWorkerHostname: target?.latestWorkerHostname ?? null,
       latestAt: target?.latestAt ?? null,
       runs: target?.runs ?? 0,
+      validRuns: target?.validRuns ?? 0,
+      minimumSampleSize: target?.minimumSampleSize ?? 3,
+      failureReasons: blockers,
       status: target?.status ?? "missing"
     },
-    blockers
+    blockers,
+    actions
   };
 }
 function readinessStatus(items) {
@@ -10691,30 +11453,93 @@ function readinessStatus(items) {
   if (items.some((item) => item.status === "PARTIAL")) return "PARTIAL";
   return "READY";
 }
-async function getMultiVehicleReadinessDashboard() {
-  const disasterRecovery = await safeRead(
-    () => getDisasterReadinessDashboard(),
-    {
-      status: "critical",
-      lastBackupAt: null,
-      backupAgeHours: null,
-      backupStatus: "unknown",
-      restoreTestAt: null,
-      restoreTestPassed: false,
-      rpoTargetHours: 24,
-      rtoTargetHours: 4,
-      alerts: []
-    },
-    25e3
+function evaluateWorkerRedundancy(workers) {
+  const workerCount = Number(workers.workerCount || 0);
+  const minimumWorkerCount = Number(workers.minimumWorkerCount || 2);
+  const workerHostnames = (workers.workers ?? []).map((worker) => worker.hostname ?? worker.workerHostname ?? null).filter(
+    (hostname) => Boolean(typeof hostname === "string" && hostname.trim())
   );
-  const [osrm, queue2, workers, queueIntegrity, performanceBenchmarks2] = await Promise.all([
+  const distinctWorkerHosts = new Set(workerHostnames).size;
+  const blockers = [];
+  if (workerCount < minimumWorkerCount) {
+    blockers.push(
+      `Apenas ${workerCount} worker(s) online; minimo exigido: ${minimumWorkerCount}.`
+    );
+  } else if (distinctWorkerHosts < minimumWorkerCount) {
+    blockers.push(
+      `${workerCount} workers online, mas em apenas ${distinctWorkerHosts} host(s); sem redundancia de host.`
+    );
+  }
+  return {
+    workerCount,
+    minimumWorkerCount,
+    workerHostnames,
+    distinctWorkerHosts,
+    blockers
+  };
+}
+async function getMultiVehicleReadinessDashboard() {
+  const osrmConfiguration = getOsrmConfiguration();
+  const [
+    disasterRecovery,
+    database,
+    osrm,
+    queue2,
+    workers,
+    queueIntegrity,
+    performanceBenchmarks2
+  ] = await Promise.all([
+    safeRead(
+      () => getDisasterReadinessDashboard(),
+      {
+        status: "no-go",
+        reason: "Falha ao consultar Disaster Recovery.",
+        nextAction: "Restaurar a consulta de evidencias DR.",
+        lastBackupAt: null,
+        backupAgeHours: null,
+        backupStatus: "unknown",
+        restoreTestAt: null,
+        restoreAgeHours: null,
+        restoreStatus: "missing",
+        restoreTestPassed: false,
+        rpoTargetHours: 24,
+        rtoTargetHours: 4,
+        restoreMaxAgeHours: 168,
+        retentionDays: 14,
+        recurringEvidence: false,
+        alerts: []
+      },
+      25e3
+    ),
+    safeRead(() => getDatabaseHealth(), {
+      configured: false,
+      reachable: false,
+      connected: false,
+      schema: null,
+      error: "Falha ao consultar banco."
+    }),
     safeRead(() => getOsrmHealth(), {
       enabled: ENV.osrmEnabled,
       required: ENV.osrmRequired,
-      configured: Boolean(ENV.osrmBaseUrl),
+      configured: osrmConfiguration.configured,
+      configurationValid: false,
       reachable: false,
-      baseUrl: ENV.osrmBaseUrl || null,
+      baseUrl: osrmConfiguration.baseUrl,
+      profile: ENV.osrmProfile,
+      providerType: "invalid",
+      isPublic: false,
+      productionEligible: false,
+      productionReady: false,
+      usable: false,
+      fallbackPolicy: ENV.osrmRequired ? "blocked" : "geographic_allowed",
+      status: "no-go",
+      reason: "Falha ao consultar OSRM.",
       timeoutMs: ENV.osrmHealthTimeoutMs,
+      requestTimeoutMs: ENV.osrmRequestTimeoutMs,
+      maxTableNodes: 0,
+      retries: 0,
+      services: ["route", "table"],
+      healthCheckSkipped: false,
       error: "Falha ao consultar OSRM."
     }),
     safeRead(() => getOptimizationQueueHealth(), {
@@ -10722,6 +11547,12 @@ async function getMultiVehicleReadinessDashboard() {
       reachable: false,
       queueName: "econorota-optimization",
       counts: null,
+      redis: {
+        maxmemoryPolicy: null,
+        policyTarget: "noeviction",
+        policyCompliant: null,
+        error: null
+      },
       error: "Falha ao consultar fila."
     }),
     safeRead(() => getOptimizationWorkersDashboard(), {
@@ -10755,61 +11586,136 @@ async function getMultiVehicleReadinessDashboard() {
     )
   ]);
   const osrmBlockers = [];
-  const enterprise = isEnterpriseOsrm(osrm.baseUrl);
   if (!osrm.enabled) osrmBlockers.push("OSRM desativado.");
   if (!osrm.configured) osrmBlockers.push("OSRM_BASE_URL nao configurado.");
+  if (!osrm.configurationValid)
+    osrmBlockers.push("Configuracao OSRM invalida.");
   if (!osrm.reachable) osrmBlockers.push("OSRM nao respondeu ao health.");
-  if (!enterprise) {
-    osrmBlockers.push("OSRM_BASE_URL ainda nao aponta para https://osrm.econorotas.com.");
+  if (osrm.providerType !== "self_hosted") {
+    osrmBlockers.push("OSRM ainda nao aponta para uma instancia propria.");
+  }
+  if (!osrm.productionEligible) {
+    osrmBlockers.push(
+      "OSRM nao atende a politica de producao propria com HTTPS."
+    );
   }
   if (!osrm.required) {
     osrmBlockers.push("OSRM_REQUIRED ainda nao esta ativo.");
   }
   const osrmEnterprise = {
-    status: osrmBlockers.length === 0 ? "READY" : osrm.reachable && osrm.enabled ? "PARTIAL" : "NO-GO",
+    status: osrmBlockers.length === 0 ? "READY" : osrm.status === "no-go" ? "NO-GO" : osrm.reachable && osrm.enabled ? "PARTIAL" : "NO-GO",
     evidence: {
       enabled: osrm.enabled,
       required: osrm.required,
       configured: osrm.configured,
       reachable: osrm.reachable,
       baseUrl: osrm.baseUrl,
+      profile: osrm.profile,
+      providerType: osrm.providerType,
+      isPublic: osrm.isPublic,
       timeoutMs: osrm.timeoutMs,
-      requiredMinStops: ENV.osrmRequiredMinStops,
-      enterprise,
+      productionEligible: osrm.productionEligible,
+      productionReady: osrm.productionReady,
+      fallbackPolicy: osrm.fallbackPolicy,
+      status: osrm.status,
+      reason: osrm.reason,
       error: osrm.error
     },
-    blockers: osrmBlockers
+    blockers: osrmBlockers,
+    actions: osrmBlockers.length > 0 ? [
+      "Configurar OSRM_BASE_URL proprio com HTTPS, validar health e ativar OSRM_REQUIRED=true."
+    ] : ["Manter health do OSRM proprio monitorado."]
   };
-  const workerBlockers = [];
-  if (!queue2.configured) workerBlockers.push("Redis/BullMQ nao configurado.");
-  if (!queue2.reachable) workerBlockers.push("Fila BullMQ nao esta acessivel.");
-  if (Number(workers.workerCount || 0) < Number(workers.minimumWorkerCount || 2)) {
-    workerBlockers.push(
-      `Apenas ${workers.workerCount || 0} worker(s) online; minimo exigido: ${workers.minimumWorkerCount || 2}.`
+  const redisPolicy = queue2.redis;
+  const queueBlockers = [];
+  if (!queue2.configured) queueBlockers.push("Redis/BullMQ nao configurado.");
+  if (!queue2.reachable) queueBlockers.push("Fila BullMQ nao esta acessivel.");
+  if (redisPolicy?.policyCompliant === false) {
+    queueBlockers.push(
+      `Redis maxmemory-policy esta ${redisPolicy.maxmemoryPolicy}; alvo operacional: ${redisPolicy.policyTarget}.`
     );
   }
   if (queueIntegrity.status !== "healthy") {
-    workerBlockers.push("Integridade da fila nao esta saudavel.");
+    queueBlockers.push("Integridade da fila nao esta saudavel.");
   }
+  if (Number(queueIntegrity.staleQueuedJobs || 0) > 0) {
+    queueBlockers.push(
+      `${queueIntegrity.staleQueuedJobs} job(s) antigo(s) ficaram em queued sem execucao.`
+    );
+  }
+  const queueInfrastructure = {
+    status: queueBlockers.length === 0 ? "READY" : queue2.configured && queue2.reachable ? "PARTIAL" : "NO-GO",
+    evidence: {
+      configured: queue2.configured,
+      reachable: queue2.reachable,
+      queueName: queue2.queueName,
+      counts: queue2.counts,
+      redisMaxmemoryPolicy: redisPolicy?.maxmemoryPolicy ?? null,
+      redisPolicyTarget: redisPolicy?.policyTarget ?? "noeviction",
+      redisPolicyCompliant: redisPolicy?.policyCompliant ?? null,
+      redisPolicyError: redisPolicy?.error ?? null,
+      integrityStatus: queueIntegrity.status,
+      duplicateJobs: queueIntegrity.duplicateJobs,
+      failedRecoveries: queueIntegrity.failedRecoveries,
+      recentFailedRecoveries: queueIntegrity.recentFailedRecoveries ?? null,
+      stalledJobs: queueIntegrity.stalledJobs,
+      queuedJobs: queueIntegrity.queuedJobs ?? 0,
+      staleQueuedJobs: queueIntegrity.staleQueuedJobs ?? 0,
+      oldestQueuedMs: queueIntegrity.oldestQueuedMs ?? 0,
+      error: queue2.error ?? null
+    },
+    blockers: queueBlockers,
+    actions: queueBlockers.length > 0 ? [
+      "Corrigir conectividade/politica Redis e zerar alertas de integridade da fila."
+    ] : ["Manter fila e politica noeviction monitoradas."]
+  };
+  const workerEvaluation = evaluateWorkerRedundancy(workers);
+  const workerBlockers = workerEvaluation.blockers;
   const workerRedundancy = {
-    status: workerBlockers.length === 0 ? "READY" : queue2.reachable ? "PARTIAL" : "NO-GO",
+    status: workerBlockers.length === 0 ? "READY" : "NO-GO",
     evidence: {
       queueConfigured: queue2.configured,
       queueReachable: queue2.reachable,
       workerCount: workers.workerCount,
       minimumWorkerCount: workers.minimumWorkerCount,
       workerHeartbeatCount: queue2.workerHeartbeatCount ?? null,
-      queueIntegrityStatus: queueIntegrity.status,
-      duplicateJobs: queueIntegrity.duplicateJobs,
-      failedRecoveries: queueIntegrity.failedRecoveries,
-      stalledJobs: queueIntegrity.stalledJobs,
+      workerHostnames: workerEvaluation.workerHostnames,
+      distinctWorkerHosts: workerEvaluation.distinctWorkerHosts,
       workers: workers.workers
     },
-    blockers: workerBlockers
+    blockers: workerBlockers,
+    actions: workerBlockers.length > 0 ? [
+      "Executar pelo menos dois workers em hosts independentes e validar os heartbeats."
+    ] : ["Manter dois ou mais workers em hosts independentes."]
+  };
+  const databaseBlockers = [];
+  if (!database.configured)
+    databaseBlockers.push("DATABASE_URL nao configurada.");
+  if (!database.reachable) databaseBlockers.push("Banco nao esta acessivel.");
+  if (!database.connected) {
+    databaseBlockers.push("Banco ou schema obrigatorio nao esta saudavel.");
+  }
+  const databasePersistence = {
+    status: databaseBlockers.length === 0 ? "READY" : "NO-GO",
+    evidence: {
+      configured: database.configured,
+      reachable: database.reachable ?? false,
+      connected: database.connected,
+      ssl: database.ssl ?? null,
+      pool: database.pool ?? null,
+      schema: database.schema ?? null,
+      error: database.error ?? null
+    },
+    blockers: databaseBlockers,
+    actions: databaseBlockers.length > 0 ? [
+      "Restaurar conexao MySQL e validar o schema antes de liberar escala."
+    ] : ["Manter conexao, schema e pool MySQL monitorados."]
   };
   const disasterBlockers = [];
-  if (disasterRecovery.status !== "healthy") {
-    disasterBlockers.push("Disaster Recovery nao esta healthy.");
+  if (disasterRecovery.status !== "ok") {
+    disasterBlockers.push(
+      disasterRecovery.reason ?? "Disaster Recovery nao esta pronto."
+    );
   }
   if (!disasterRecovery.lastBackupAt) {
     disasterBlockers.push("Sem evidencia de backup real.");
@@ -10818,29 +11724,51 @@ async function getMultiVehicleReadinessDashboard() {
     disasterBlockers.push("Sem evidencia de restore real aprovado.");
   }
   const disasterRecoveryItem = {
-    status: disasterBlockers.length === 0 ? "READY" : "NO-GO",
+    status: disasterRecovery.status === "ok" ? "READY" : disasterRecovery.status === "no-go" ? "NO-GO" : "PARTIAL",
     evidence: {
       status: disasterRecovery.status,
+      reason: disasterRecovery.reason,
+      nextAction: disasterRecovery.nextAction,
       lastBackupAt: disasterRecovery.lastBackupAt,
       backupAgeHours: disasterRecovery.backupAgeHours,
+      backupWithinRpo: disasterRecovery.backupWithinRpo,
       backupStatus: disasterRecovery.backupStatus,
       restoreTestAt: disasterRecovery.restoreTestAt,
+      restoreAgeHours: disasterRecovery.restoreAgeHours,
+      restoreStatus: disasterRecovery.restoreStatus,
+      restoreWithinWindow: disasterRecovery.restoreWithinWindow,
       restoreTestPassed: disasterRecovery.restoreTestPassed,
+      restoreDurationMs: disasterRecovery.restoreDurationMs,
+      rtoMet: disasterRecovery.rtoMet,
       rpoTargetHours: disasterRecovery.rpoTargetHours,
       rtoTargetHours: disasterRecovery.rtoTargetHours,
+      restoreMaxAgeHours: disasterRecovery.restoreMaxAgeHours,
+      retentionDays: disasterRecovery.retentionDays,
+      recurringEvidence: disasterRecovery.recurringEvidence,
+      configuration: disasterRecovery.configuration,
+      history: disasterRecovery.history,
       alertCount: disasterRecovery.alerts?.length ?? 0,
       error: disasterRecovery.error ?? null
     },
-    blockers: disasterBlockers
+    blockers: disasterBlockers,
+    actions: disasterBlockers.length ? [
+      disasterRecovery.nextAction ?? "Executar backup e restore drill dentro das janelas definidas."
+    ] : ["Manter backup diario e restore drill semanal."]
   };
+  const benchmark50 = benchmarkItem(performanceBenchmarks2, 50);
+  const benchmark150 = benchmarkItem(performanceBenchmarks2, 150);
   const benchmark250 = benchmarkItem(performanceBenchmarks2, 250);
   const benchmark500 = benchmarkItem(performanceBenchmarks2, 500);
   const benchmark1000 = benchmarkItem(performanceBenchmarks2, 1e3);
   const benchmark2000 = benchmarkItem(performanceBenchmarks2, 2e3);
   const items = {
+    databasePersistence,
+    queueInfrastructure,
     osrmEnterprise,
     workerRedundancy,
     disasterRecovery: disasterRecoveryItem,
+    benchmark50,
+    benchmark150,
     benchmark250,
     benchmark500,
     benchmark1000,
@@ -10851,9 +11779,18 @@ async function getMultiVehicleReadinessDashboard() {
     status: readinessStatus(itemList),
     evidence: {
       requiredReadyItems: Object.keys(items),
+      failedItems: Object.entries(items).filter(([, item]) => item.status !== "READY").map(([key, item]) => ({
+        key,
+        status: item.status,
+        blockers: item.blockers,
+        actions: item.actions
+      })),
       checkedAt: (/* @__PURE__ */ new Date()).toISOString()
     },
-    blockers: itemList.flatMap((item) => item.blockers)
+    blockers: Object.entries(items).flatMap(
+      ([key, item]) => item.blockers.map((blocker) => `${key}: ${blocker}`)
+    ),
+    actions: Array.from(new Set(itemList.flatMap((item) => item.actions)))
   };
   return {
     status: multiVehicle.status,
@@ -12048,6 +12985,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     });
   }
   const mode = requestedMode || route.mode;
+  const osrmBaseUrl = getOsrmConfiguration().baseUrl;
   const clusteringStartedAt = Date.now();
   clusterStops(locations, { localityMode: options?.localityMode });
   runtimeBreakdown.clusteringMs = Date.now() - clusteringStartedAt;
@@ -12087,7 +13025,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
             failureRate: runtimeBreakdown.osrmFailureCount / Math.max(1, runtimeBreakdown.osrmCallCount),
             minCalls: OSRM_CIRCUIT_MIN_CALLS,
             threshold: OSRM_CIRCUIT_FAILURE_RATE,
-            osrmBaseUrl: ENV.osrmBaseUrl
+            osrmBaseUrl
           }
         }).catch((error) => {
           console.warn("[Routes] Failed to record OSRM circuit event:", error);
@@ -12135,7 +13073,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         metadata: {
           stopCount: attemptLocations.length,
           maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
-          osrmBaseUrl: ENV.osrmBaseUrl,
+          osrmBaseUrl,
           auditSource: auditSource2
         }
       }).catch((error) => {
@@ -12157,7 +13095,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         metadata: {
           stopCount: attemptLocations.length,
           maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
-          osrmBaseUrl: ENV.osrmBaseUrl
+          osrmBaseUrl
         }
       }).catch((error) => {
         console.warn("[Routes] Failed to record OSRM required event:", error);
@@ -12184,7 +13122,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         metadata: {
           stopCount: attemptLocations.length,
           maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
-          osrmBaseUrl: ENV.osrmBaseUrl,
+          osrmBaseUrl,
           auditSource: auditSource2,
           allowLargeSync: true
         }
@@ -12209,7 +13147,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         metadata: {
           stopCount: attemptLocations.length,
           maxGeographicFallbackStops: ENV.maxGeographicFallbackStops,
-          osrmBaseUrl: ENV.osrmBaseUrl,
+          osrmBaseUrl,
           auditSource: auditSource2,
           auditPolicy,
           routingStrategy: getRoutingStrategy(auditPolicy),
@@ -12725,8 +13663,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     });
   }
   const { optimized, audit, auditSource } = optimizationAttempt;
-  const osrmRequiredForRoute = ENV.osrmRequired && routeStops.length >= ENV.osrmRequiredMinStops;
-  const osrmRequiredBlocked = osrmRequiredForRoute && !optimizationAttempt.usedRoadMetrics && optimizationAttempt.auditPolicy !== SHOPEE_STOP_AUDIT_POLICY;
+  const osrmRequiredBlocked = ENV.osrmRequired && !optimizationAttempt.usedRoadMetrics;
   if (osrmRequiredBlocked) {
     const osrmFallbackIssue = audit.issues.find((issue) => issue.type === "osrm_fallback") ?? {
       type: "osrm_fallback",
@@ -12758,8 +13695,8 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         issueCount: audit.issueCount,
         totalDistanceKm: audit.totalDistanceKm,
         osrmRequired: ENV.osrmRequired,
-        osrmRequiredMinStops: ENV.osrmRequiredMinStops,
-        osrmBaseUrl: ENV.osrmBaseUrl,
+        osrmRequiredForAllRoutes: true,
+        osrmBaseUrl,
         blockingIssue: osrmBlockingReason.issue
       }
     }).catch((error) => {
@@ -12767,7 +13704,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     });
     await recordRouteMetricForAttempt(osrmBlockingReason);
     throw new TRPCError3({
-      code: "BAD_REQUEST",
+      code: "PRECONDITION_FAILED",
       message: osrmBlockingReason.message
     });
   }
@@ -14327,6 +15264,9 @@ function buildIssueKey(input) {
     dbError,
     fallbackError,
     osrmState,
+    input.osrm?.status ?? "",
+    input.osrm?.providerType ?? "",
+    input.osrm?.required ? "required" : "optional",
     osrmError
   ].join("|");
 }
@@ -14352,9 +15292,19 @@ function buildMetadata(input) {
       enabled: Boolean(input.osrm.enabled),
       required: Boolean(input.osrm.required),
       configured: Boolean(input.osrm.configured),
+      configurationValid: Boolean(input.osrm.configurationValid),
       reachable: Boolean(input.osrm.reachable),
+      usable: Boolean(input.osrm.usable),
+      productionReady: Boolean(input.osrm.productionReady),
+      providerType: input.osrm.providerType ?? "unconfigured",
+      isPublic: Boolean(input.osrm.isPublic),
       baseUrl: input.osrm.baseUrl ?? null,
+      profile: input.osrm.profile ?? null,
+      status: input.osrm.status ?? null,
+      reason: input.osrm.reason ?? null,
+      fallbackPolicy: input.osrm.fallbackPolicy ?? null,
       timeoutMs: input.osrm.timeoutMs ?? null,
+      requestTimeoutMs: input.osrm.requestTimeoutMs ?? null,
       error: input.osrm.error ?? null
     } : null
   };
@@ -14561,53 +15511,28 @@ function buildOperationalReadiness(args) {
     args.storageAvailable ? `Armazenamento operacional em modo ${args.mode}.` : "Armazenamento indisponivel para operacao real.",
     { mode: args.mode }
   );
-  if (!args.osrm?.enabled) {
-    addCheck(
-      "osrm",
-      args.osrm?.required ? "critical" : "attention",
-      args.osrm?.required ? "OSRM obrigatorio esta desativado." : "OSRM esta desativado; rotas dependerao de estimativa geografica.",
-      { required: Boolean(args.osrm?.required), baseUrl: args.osrm?.baseUrl ?? null }
-    );
-  } else if (args.osrm.required && !args.osrm.reachable) {
-    addCheck(
-      "osrm",
-      "critical",
-      "OSRM obrigatorio esta indisponivel.",
-      {
-        baseUrl: args.osrm.baseUrl ?? null,
-        latencyMs: args.osrm.latencyMs ?? null,
-        error: args.osrm.error ?? null
-      }
-    );
-  } else if (!args.osrm.reachable) {
-    addCheck(
-      "osrm",
-      "attention",
-      "OSRM indisponivel; rotas pequenas podem usar fallback e rotas grandes podem ser bloqueadas.",
-      {
-        baseUrl: args.osrm.baseUrl ?? null,
-        latencyMs: args.osrm.latencyMs ?? null,
-        error: args.osrm.error ?? null
-      }
-    );
-  } else if (String(args.osrm.baseUrl || "").includes("router.project-osrm.org")) {
-    addCheck(
-      "osrm",
-      "attention",
-      "OSRM usa endpoint publico. Funciona, mas nao e infra propria de producao.",
-      {
-        baseUrl: args.osrm.baseUrl,
-        latencyMs: args.osrm.latencyMs ?? null,
-        required: Boolean(args.osrm.required)
-      }
-    );
-  } else {
-    addCheck("osrm", "ready", "OSRM operacional.", {
-      baseUrl: args.osrm.baseUrl ?? null,
-      latencyMs: args.osrm.latencyMs ?? null,
-      required: Boolean(args.osrm.required)
-    });
-  }
+  const osrmStatus = args.osrm?.status === "no-go" ? "critical" : args.osrm?.status === "ok" ? "ready" : "attention";
+  addCheck(
+    "osrm",
+    osrmStatus,
+    args.osrm?.reason ?? "Estado do OSRM indisponivel.",
+    {
+      enabled: Boolean(args.osrm?.enabled),
+      required: Boolean(args.osrm?.required),
+      configured: Boolean(args.osrm?.configured),
+      configurationValid: Boolean(args.osrm?.configurationValid),
+      reachable: Boolean(args.osrm?.reachable),
+      usable: Boolean(args.osrm?.usable),
+      productionReady: Boolean(args.osrm?.productionReady),
+      providerType: args.osrm?.providerType ?? "unconfigured",
+      isPublic: Boolean(args.osrm?.isPublic),
+      baseUrl: args.osrm?.baseUrl ?? null,
+      profile: args.osrm?.profile ?? null,
+      fallbackPolicy: args.osrm?.fallbackPolicy ?? null,
+      latencyMs: args.osrm?.latencyMs ?? null,
+      error: args.osrm?.error ?? null
+    }
+  );
   if (!args.queue?.configured) {
     addCheck(
       "queue",
@@ -14615,25 +15540,43 @@ function buildOperationalReadiness(args) {
       "Fila assincrona nao configurada; otimizacoes ficam limitadas ao modo sincrono."
     );
   } else if (!args.queue.reachable) {
-    addCheck("queue", "critical", "Fila Redis/BullMQ configurada, mas indisponivel.", {
-      error: args.queue.error ?? null
-    });
-  } else if (Number(args.queue.workerCount ?? 0) < Number(args.queue.minimumWorkerCount ?? 0)) {
     addCheck(
-      "workers",
-      "attention",
-      `Workers online abaixo do minimo (${args.queue.workerCount}/${args.queue.minimumWorkerCount}).`,
+      "queue",
+      "critical",
+      "Fila Redis/BullMQ configurada, mas indisponivel.",
       {
-        workerCount: args.queue.workerCount ?? 0,
-        minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
-        alert: args.queue.alert ?? null
+        error: args.queue.error ?? null
       }
     );
   } else {
-    addCheck("workers", "ready", "Workers operacionais.", {
-      workerCount: args.queue.workerCount ?? 0,
-      minimumWorkerCount: args.queue.minimumWorkerCount ?? 0
-    });
+    if (args.queue.redis?.policyCompliant === false) {
+      addCheck(
+        "queueRedisPolicy",
+        "attention",
+        "Redis esta com politica de memoria inadequada para BullMQ.",
+        {
+          maxmemoryPolicy: args.queue.redis.maxmemoryPolicy ?? null,
+          policyTarget: args.queue.redis.policyTarget ?? "noeviction"
+        }
+      );
+    }
+    if (Number(args.queue.workerCount ?? 0) < Number(args.queue.minimumWorkerCount ?? 0)) {
+      addCheck(
+        "workers",
+        "attention",
+        `Workers online abaixo do minimo (${args.queue.workerCount}/${args.queue.minimumWorkerCount}).`,
+        {
+          workerCount: args.queue.workerCount ?? 0,
+          minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
+          alert: args.queue.alert ?? null
+        }
+      );
+    } else {
+      addCheck("workers", "ready", "Workers operacionais.", {
+        workerCount: args.queue.workerCount ?? 0,
+        minimumWorkerCount: args.queue.minimumWorkerCount ?? 0
+      });
+    }
   }
   if (args.queueIntegrity) {
     const healthy = args.queueIntegrity.status === "healthy";
@@ -14645,22 +15588,41 @@ function buildOperationalReadiness(args) {
         status: args.queueIntegrity.status,
         duplicateJobs: args.queueIntegrity.duplicateJobs ?? 0,
         stalledJobs: args.queueIntegrity.stalledJobs ?? 0,
-        failedRecoveries: args.queueIntegrity.failedRecoveries ?? 0
+        failedRecoveries: args.queueIntegrity.failedRecoveries ?? 0,
+        recentFailedRecoveries: args.queueIntegrity.recentFailedRecoveries ?? 0,
+        queuedJobs: args.queueIntegrity.queuedJobs ?? 0,
+        staleQueuedJobs: args.queueIntegrity.staleQueuedJobs ?? 0
       }
     );
   }
   if (args.disasterReadiness) {
-    const status2 = args.disasterReadiness.status === "healthy" ? "ready" : args.disasterReadiness.status === "critical" ? "critical" : "attention";
+    const status2 = args.disasterReadiness.status === "ok" ? "ready" : args.disasterReadiness.status === "no-go" ? "critical" : "attention";
     addCheck(
       "disasterRecovery",
       status2,
-      status2 === "ready" ? "Backup e restore com evidencias validas." : "Backup/restore ainda nao esta pronto para operacao comercial.",
+      args.disasterReadiness.reason ?? (status2 === "ready" ? "Backup e restore com evidencias validas." : "Backup/restore ainda nao esta pronto para operacao comercial."),
       {
         status: args.disasterReadiness.status,
         lastBackupAt: args.disasterReadiness.lastBackupAt ?? null,
         backupAgeHours: args.disasterReadiness.backupAgeHours ?? null,
+        backupStatus: args.disasterReadiness.backupStatus ?? "unknown",
+        backupWithinRpo: Boolean(args.disasterReadiness.backupWithinRpo),
         restoreTestAt: args.disasterReadiness.restoreTestAt ?? null,
+        restoreAgeHours: args.disasterReadiness.restoreAgeHours ?? null,
+        restoreStatus: args.disasterReadiness.restoreStatus ?? "missing",
+        restoreWithinWindow: Boolean(
+          args.disasterReadiness.restoreWithinWindow
+        ),
         restoreTestPassed: Boolean(args.disasterReadiness.restoreTestPassed),
+        restoreDurationMs: args.disasterReadiness.restoreDurationMs ?? null,
+        rpoTargetHours: args.disasterReadiness.rpoTargetHours ?? null,
+        rtoTargetHours: args.disasterReadiness.rtoTargetHours ?? null,
+        restoreMaxAgeHours: args.disasterReadiness.restoreMaxAgeHours ?? null,
+        retentionDays: args.disasterReadiness.retentionDays ?? null,
+        recurringEvidence: Boolean(
+          args.disasterReadiness.recurringEvidence
+        ),
+        nextAction: args.disasterReadiness.nextAction ?? null,
         alerts: args.disasterReadiness.alerts ?? []
       }
     );
@@ -14691,7 +15653,7 @@ async function getStorageHealthSnapshot(source) {
   const fallbackStore = getPersistentFallbackDbHealth();
   const canUseLocalFallback = !ENV.isProduction || ENV.allowEphemeralDb && !ENV.hasInvalidProductionDatabaseUrl;
   const storageAvailable = ENV.requireManagedDatabase ? database.connected : database.connected || fallbackStore.loaded || canUseLocalFallback;
-  const osrmAvailable = !osrm.required || osrm.enabled && osrm.reachable;
+  const osrmAvailable = !osrm.required || osrm.usable;
   const systemAvailable = storageAvailable && osrmAvailable;
   const mode = database.connected ? "persistent" : fallbackStore.configured ? "redis-fallback" : "local-fallback";
   const operationalReadiness = buildOperationalReadiness({

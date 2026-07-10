@@ -141,11 +141,14 @@ O sistema expoe saude do OSRM em `/api/health` e `/api/monitor/ping`.
 Enquanto `OSRM_REQUIRED=false`, a aplicacao continua operando com fallback
 geografico quando o OSRM falha. Para operacao em escala, configure
 `OSRM_BASE_URL` com uma instancia propria e ligue `OSRM_REQUIRED=true`.
+Nao existe URL publica implicita: o uso de `router.project-osrm.org` exige
+configuracao explicita e nunca e aceito quando o OSRM e obrigatorio em producao.
 
 Com `OSRM_REQUIRED=true`:
 
 - health/monitor retornam falha quando o OSRM nao responde;
-- otimizacao de rota e bloqueada quando nao houver matriz real por ruas;
+- toda otimizacao de rota, inclusive sequencia STOP preservada, e bloqueada
+  quando nao houver matriz real por ruas;
 - o painel Operacao continua medindo `osrmFallbackRate`.
 
 Runbook de infraestrutura: `ops/osrm/README.md`.
@@ -158,6 +161,10 @@ Recovery esta comprovado. Evidencia aceita:
 - `backup_completed`: backup logico concluido.
 - `restore_test_passed`: backup restaurado e validado em banco descartavel.
 - `backup_failed` ou `restore_test_failed`: falhas preservadas para auditoria.
+
+O monitor classifica DR como `ok`, `attention`, `warning` ou `no-go` usando
+idade do backup, validade e duracao do restore, recorrencia e politica
+configurada. Falhas posteriores sempre vencem flags estaticas de ambiente.
 
 Falhas antigas nao prendem o status quando existe sucesso mais recente. O
 runbook operacional esta em `ops/disaster-recovery/README.md`.
