@@ -1,4 +1,5 @@
 import {
+  getStopPackageNumbers,
   normalizeStopSourceProvider,
   type StopMetadata,
   type StopSourceProvider,
@@ -14,6 +15,8 @@ export type ImportedStop = {
   sourceProvider?: StopSourceProvider;
   originalStop?: number | null;
   isUnsequencedStop?: boolean;
+  rawStop?: string;
+  stopValueStatus?: "sequenced" | "unsequenced" | "invalid" | "not_applicable";
   metadata?: StopMetadata;
   notes?: string;
   sourceRow: number;
@@ -24,6 +27,12 @@ export type ImportedRoute = {
   stops: ImportedStop[];
   sourceProvider: StopSourceProvider;
   hasStopSequence: boolean;
+  stopColumnDetected?: boolean;
+  stopColumnIgnored?: boolean;
+  stopSummary?: {
+    numberedCount: number;
+    unsequencedCount: number;
+  };
   totalRows: number;
   totalDeliveries?: number;
   groupedDeliveries?: number;
@@ -44,6 +53,8 @@ type ParsedRouteRow = {
   sourceProvider?: StopSourceProvider;
   originalStop?: number | null;
   isUnsequencedStop?: boolean;
+  rawStop?: string;
+  stopValueStatus?: ImportedStop["stopValueStatus"];
 };
 
 type ImileScreenRow = {
@@ -58,8 +69,45 @@ type ImileScreenRow = {
 
 const HEADER_ALIASES = {
   routeId: ["at id", "route id", "rota", "codigo rota", "codigo da rota"],
-  stop: ["stop"],
-  tracking: ["spx tn", "tracking", "codigo", "pedido", "encomenda", "pacote"],
+  stop: [
+    "stop",
+    "stop no",
+    "stop number",
+    "numero stop",
+    "numero do stop",
+    "n stop",
+    "ordem stop",
+    "sequencia stop",
+  ],
+  tracking: [
+    "spx tn",
+    "tracking",
+    "tracking number",
+    "numero tracking",
+    "numero de tracking",
+    "codigo pacote",
+    "codigo do pacote",
+    "numero pacote",
+    "numero do pacote",
+    "numero de pacote",
+    "id pacote",
+    "id do pacote",
+    "package number",
+    "package no",
+    "package id",
+    "package",
+    "parcel number",
+    "parcel id",
+    "codigo rastreio",
+    "codigo de rastreio",
+    "numero rastreio",
+    "numero de rastreio",
+    "pedido",
+    "numero pedido",
+    "numero do pedido",
+    "encomenda",
+    "pacote",
+  ],
   address: [
     "destination address",
     "address",
@@ -87,6 +135,11 @@ const HEADER_ALIASES = {
   longitude: ["longitude", "lng", "long", "lon"],
 } as const;
 
+const SHOPEE_TRACKING_ALIASES = [
+  ...HEADER_ALIASES.tracking,
+  "codigo",
+] as const;
+
 function normalizeHeader(value: string) {
   return value
     .normalize("NFD")
@@ -98,6 +151,19 @@ function normalizeHeader(value: string) {
 
 function normalizeImportedAddressKey(value: string) {
   return normalizeHeader(value);
+}
+
+function normalizeStopLocationKey(value: string) {
+  const parts = value
+    .split(",")
+    .map(normalizeHeader)
+    .filter(Boolean);
+
+  if (parts.length >= 2 && /^\d{1,6}[a-z]?$/.test(parts[1])) {
+    return `${parts[0]}|${parts[1]}`;
+  }
+
+  return normalizeImportedAddressKey(value);
 }
 
 function getImportedDeliveryCount(stop: Pick<ImportedStop, "deliveryCount">) {
@@ -126,12 +192,7 @@ function summarizeValues(values: string[], limit = 8) {
 }
 
 function getImportedPackageNumber(stop: ImportedStop) {
-  return (
-    stop.packageNumber ||
-    stop.metadata?.packageNumber ||
-    stop.metadata?.trackingNumber ||
-    ""
-  );
+  return getStopPackageNumbers(stop.metadata, stop.packageNumber)[0] || "";
 }
 
 function getImportedStopLabel(stop: ImportedStop) {
@@ -219,10 +280,14 @@ function mergeImportedStopsByAddress(stops: ImportedStop[]) {
       group.stop.originalStop = Math.round(incomingStopNumber);
       group.stop.routingStop = Math.round(incomingStopNumber);
       group.stop.isUnsequencedStop = false;
+      group.stop.rawStop = stop.rawStop;
+      group.stop.stopValueStatus = "sequenced";
     } else if (!currentHasPositiveStop && (stop.isUnsequencedStop || incomingStopNumber === 0)) {
       group.stop.originalStop = 0;
       group.stop.routingStop = 0;
       group.stop.isUnsequencedStop = true;
+      group.stop.rawStop = stop.rawStop;
+      group.stop.stopValueStatus = stop.stopValueStatus;
     }
   });
 
@@ -234,6 +299,11 @@ function mergeImportedStopsByAddress(stops: ImportedStop[]) {
       deliveryCount: deliveryCount > 1 ? deliveryCount : group.stop.deliveryCount,
       metadata: {
         ...group.stop.metadata,
+        packageNumber:
+          group.packageNumbers[0] || group.stop.metadata?.packageNumber,
+        packageNumbers: group.packageNumbers.length
+          ? group.packageNumbers
+          : group.stop.metadata?.packageNumbers,
         groupedDeliveryCount:
           deliveryCount > 1
             ? deliveryCount
@@ -322,6 +392,22 @@ function getCell(
     .find(Boolean);
 
   return originalHeader ? row[originalHeader] : undefined;
+}
+
+function getFirstPopulatedCell(
+  row: RawSpreadsheetRow,
+  headerMap: Record<string, string>,
+  aliases: readonly string[]
+) {
+  for (const alias of aliases) {
+    const originalHeader = headerMap[normalizeHeader(alias)];
+    if (!originalHeader) continue;
+
+    const value = row[originalHeader];
+    if (cleanText(value)) return value;
+  }
+
+  return undefined;
 }
 
 function findHeaderByToken(headerMap: Record<string, string>, tokens: string[]) {
@@ -436,7 +522,13 @@ function buildMetadata(
   headerMap: Record<string, string>,
   sourceProvider: StopSourceProvider
 ): StopMetadata {
-  const tracking = cleanText(getCell(row, headerMap, HEADER_ALIASES.tracking));
+  const trackingAliases =
+    sourceProvider === "shopee"
+      ? SHOPEE_TRACKING_ALIASES
+      : HEADER_ALIASES.tracking;
+  const tracking = cleanText(
+    getFirstPopulatedCell(row, headerMap, trackingAliases)
+  );
   const routeId = cleanText(getCell(row, headerMap, HEADER_ALIASES.routeId));
   const metadata: StopMetadata = {
     importedFrom: sourceProvider,
@@ -445,6 +537,7 @@ function buildMetadata(
   if (tracking) {
     metadata.trackingNumber = tracking;
     metadata.packageNumber = tracking;
+    metadata.packageNumbers = [tracking];
   }
   if (routeId) {
     metadata.sourceRouteId = routeId;
@@ -737,44 +830,100 @@ function calculateImileGroupedDeliveries(input: string) {
 }
 
 function hasStopColumn(headerMap: Record<string, string>) {
-  return Boolean(headerMap[normalizeHeader(HEADER_ALIASES.stop[0])]);
-}
-
-function hasShopeeRouteEvidence(
-  rows: RawSpreadsheetRow[],
-  headerMap: Record<string, string>
-) {
-  return rows.some((row) => {
-    const routeId = cleanText(getCell(row, headerMap, HEADER_ALIASES.routeId));
-    const tracking = cleanText(getCell(row, headerMap, HEADER_ALIASES.tracking));
-
-    return (
-      /^AT\d{8,}/i.test(routeId) ||
-      /^BR[A-Z0-9]{8,}$/i.test(tracking)
-    );
-  });
+  return HEADER_ALIASES.stop.some(
+    (alias) => Boolean(headerMap[normalizeHeader(alias)])
+  );
 }
 
 function resolveImportSourceProvider(
   requestedProvider: StopSourceProvider,
-  rows: RawSpreadsheetRow[],
   headerMap: Record<string, string>
 ) {
   const stopColumnExists = hasStopColumn(headerMap);
   const canAutoDetectShopee =
     requestedProvider === "generic" || requestedProvider === "manual";
 
-  if (canAutoDetectShopee && stopColumnExists && hasShopeeRouteEvidence(rows, headerMap)) {
+  if (canAutoDetectShopee && stopColumnExists) {
     return "shopee";
   }
 
   return requestedProvider;
 }
 
-function getStopSequence(row: RawSpreadsheetRow, headerMap: Record<string, string>) {
-  const stop = cleanText(getCell(row, headerMap, HEADER_ALIASES.stop));
-  const parsed = Number(stop.replace(",", "."));
-  return Number.isFinite(parsed) ? parsed : 0;
+function parseStopValue(row: RawSpreadsheetRow, headerMap: Record<string, string>) {
+  const raw = cleanText(getCell(row, headerMap, HEADER_ALIASES.stop));
+  if (!raw || raw === "-") {
+    return {
+      raw,
+      value: 0,
+      status: "unsequenced" as const,
+    };
+  }
+
+  if (!/^\d+(?:[.,]0+)?$/.test(raw)) {
+    return {
+      raw,
+      value: 0,
+      status: "invalid" as const,
+    };
+  }
+
+  const parsed = Number(raw.replace(",", "."));
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    return {
+      raw,
+      value: 0,
+      status: "invalid" as const,
+    };
+  }
+
+  return {
+    raw,
+    value: parsed,
+    status: parsed > 0 ? ("sequenced" as const) : ("unsequenced" as const),
+  };
+}
+
+function formatSourceRows(rows: number[]) {
+  const visible = rows.slice(0, 8).join(", ");
+  return rows.length > 8 ? `${visible} e mais ${rows.length - 8}` : visible;
+}
+
+function assertValidStopValues(rows: ParsedRouteRow[]) {
+  const invalidRows = rows
+    .filter((row) => row.stopValueStatus === "invalid")
+    .map((row) => row.sourceRow);
+
+  if (invalidRows.length > 0) {
+    throw new Error(
+      `Coluna STOP com valor invalido nas linhas ${formatSourceRows(invalidRows)}. Use numero inteiro positivo, 0, "-" ou vazio.`
+    );
+  }
+
+  const addressesByStop = new Map<number, Map<string, number[]>>();
+  rows.forEach((row) => {
+    if (row.stopValueStatus !== "sequenced" || !row.originalStop) return;
+    const addressKey = normalizeStopLocationKey(row.address);
+    const addressRows = addressesByStop.get(row.originalStop) ?? new Map<string, number[]>();
+    addressRows.set(addressKey, [...(addressRows.get(addressKey) ?? []), row.sourceRow]);
+    addressesByStop.set(row.originalStop, addressRows);
+  });
+
+  const conflicts = Array.from(addressesByStop.entries()).filter(
+    ([, addressRows]) => addressRows.size > 1
+  );
+  if (conflicts.length > 0) {
+    const details = conflicts
+      .slice(0, 5)
+      .map(([stop, addressRows]) => {
+        const sourceRows = Array.from(addressRows.values()).flat();
+        return `STOP ${stop} (linhas ${formatSourceRows(sourceRows)})`;
+      })
+      .join("; ");
+    throw new Error(
+      `STOP repetido em enderecos diferentes: ${details}. Corrija a planilha antes de criar a rota.`
+    );
+  }
 }
 
 function getRouteName(rows: RawSpreadsheetRow[], headerMap: Record<string, string>, fileName: string) {
@@ -801,7 +950,6 @@ export function parseRouteRows(
   const headerMap = createHeaderMap(rows[0]);
   const normalizedSourceProvider = resolveImportSourceProvider(
     normalizeStopSourceProvider(sourceProvider),
-    rows,
     headerMap
   );
   const stopColumnExists = hasStopColumn(headerMap);
@@ -811,7 +959,14 @@ export function parseRouteRows(
       const address = buildAddress(row, headerMap);
       const latitude = parseCoordinate(getCell(row, headerMap, HEADER_ALIASES.latitude));
       const longitude = parseCoordinate(getCell(row, headerMap, HEADER_ALIASES.longitude));
-      const sequence = useShopeeStop ? getStopSequence(row, headerMap) : undefined;
+      const parsedStop = useShopeeStop
+        ? parseStopValue(row, headerMap)
+        : {
+            raw: "",
+            value: 0,
+            status: "not_applicable" as const,
+          };
+      const sequence = useShopeeStop ? parsedStop.value : undefined;
       const metadata = buildMetadata(row, headerMap, normalizedSourceProvider);
 
       return {
@@ -824,12 +979,24 @@ export function parseRouteRows(
         sourceProvider: normalizedSourceProvider,
         originalStop: useShopeeStop ? sequence ?? 0 : null,
         isUnsequencedStop: useShopeeStop ? Number(sequence) <= 0 : false,
+        rawStop: useShopeeStop ? parsedStop.raw : undefined,
+        stopValueStatus: parsedStop.status,
         packageNumber: metadata.packageNumber,
       };
     })
     .filter((stop) => stop.address);
 
-  const hasStopSequence = useShopeeStop;
+  if (useShopeeStop) {
+    assertValidStopValues(parsedRows);
+  }
+
+  const stopSummary = {
+    numberedCount: parsedRows.filter((stop) => stop.stopValueStatus === "sequenced").length,
+    unsequencedCount: parsedRows.filter(
+      (stop) => stop.stopValueStatus === "unsequenced"
+    ).length,
+  };
+  const hasStopSequence = useShopeeStop && stopSummary.numberedCount > 0;
   const importedStops = parsedRows.map(({ sequence, ...stop }) => ({
     ...stop,
     routingStop: useShopeeStop ? sequence : undefined,
@@ -846,6 +1013,9 @@ export function parseRouteRows(
     stops,
     sourceProvider: normalizedSourceProvider,
     hasStopSequence,
+    stopColumnDetected: stopColumnExists,
+    stopColumnIgnored: stopColumnExists && !useShopeeStop,
+    stopSummary,
     totalRows: rows.length,
     totalDeliveries: grouped.totalDeliveries,
     groupedDeliveries: grouped.groupedDeliveries,

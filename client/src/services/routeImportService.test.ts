@@ -337,7 +337,7 @@ describe("parseRouteRows", () => {
     ]);
   });
 
-  it("does not activate Shopee STOP rules for a generic CSV even when a stop column exists", () => {
+  it("activates STOP rules for an explicit STOP column even when the source was left generic", () => {
     const route = parseRouteRows(
       [
         {
@@ -357,12 +357,178 @@ describe("parseRouteRows", () => {
       "generic"
     );
 
-    expect(route.sourceProvider).toBe("generic");
-    expect(route.hasStopSequence).toBe(false);
-    expect(route.stops.map((stop) => stop.routingStop)).toEqual([undefined, undefined]);
+    expect(route.sourceProvider).toBe("shopee");
+    expect(route.hasStopSequence).toBe(true);
+    expect(route.stopColumnDetected).toBe(true);
+    expect(route.stopColumnIgnored).toBe(false);
+    expect(route.stopSummary).toEqual({ numberedCount: 2, unsequencedCount: 0 });
+    expect(route.stops.map((stop) => stop.routingStop)).toEqual([2, 1]);
     expect(route.stops.map((stop) => stop.address)).toEqual([
       "Rua B, 20, Centro, Presidente Prudente",
       "Rua A, 10, Centro, Presidente Prudente",
+    ]);
+  });
+
+  it("recognizes common Shopee STOP and package number headers", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua B, 20, Presidente Prudente, SP",
+          "Numero do STOP": 2,
+          "SPX TN": "",
+          "Numero do pacote": "BR-PACOTE-002",
+        },
+        {
+          "Destination Address": "Rua A, 10, Presidente Prudente, SP",
+          "Numero do STOP": 1,
+          "SPX TN": "",
+          "Numero do pacote": "BR-PACOTE-001",
+        },
+      ],
+      "shopee-cabecalhos.xlsx",
+      "generic"
+    );
+
+    expect(route.sourceProvider).toBe("shopee");
+    expect(route.stopSummary).toEqual({
+      numberedCount: 2,
+      unsequencedCount: 0,
+    });
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([2, 1]);
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      "BR-PACOTE-002",
+      "BR-PACOTE-001",
+    ]);
+  });
+
+  it("uses a Codigo column as package identity only when STOP identifies Shopee", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua A, 10, Presidente Prudente, SP",
+          STOP: 1,
+          Codigo: "BR-CODIGO-001",
+        },
+        {
+          "Destination Address": "Rua B, 20, Presidente Prudente, SP",
+          STOP: 2,
+          Codigo: "BR-CODIGO-002",
+        },
+      ],
+      "shopee-codigo.xlsx",
+      "generic"
+    );
+
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      "BR-CODIGO-001",
+      "BR-CODIGO-002",
+    ]);
+  });
+
+  it("reports an ignored STOP column when another provider was selected explicitly", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua B, 20, Centro, Presidente Prudente",
+          STOP: 2,
+          Latitude: -22.13,
+          Longitude: -51.39,
+        },
+        {
+          "Destination Address": "Rua A, 10, Centro, Presidente Prudente",
+          STOP: 1,
+          Latitude: -22.11,
+          Longitude: -51.37,
+        },
+      ],
+      "mercado-livre-stop.csv",
+      "mercado_livre"
+    );
+
+    expect(route.sourceProvider).toBe("mercado_livre");
+    expect(route.hasStopSequence).toBe(false);
+    expect(route.stopColumnDetected).toBe(true);
+    expect(route.stopColumnIgnored).toBe(true);
+    expect(route.stops.map((stop) => stop.routingStop)).toEqual([undefined, undefined]);
+  });
+
+  it("rejects invalid STOP values instead of silently treating them as unsequenced", () => {
+    expect(() =>
+      parseRouteRows(
+        [
+          {
+            "Destination Address": "Rua A, 10, Presidente Prudente",
+            STOP: 1,
+          },
+          {
+            "Destination Address": "Rua B, 20, Presidente Prudente",
+            STOP: "proximo",
+          },
+        ],
+        "stop-invalido.xlsx",
+        "shopee"
+      )
+    ).toThrow("Coluna STOP com valor invalido nas linhas 3");
+  });
+
+  it("rejects the same numbered STOP assigned to different addresses", () => {
+    expect(() =>
+      parseRouteRows(
+        [
+          {
+            "Destination Address": "Rua A, 10, Presidente Prudente",
+            STOP: 7,
+          },
+          {
+            "Destination Address": "Rua B, 20, Presidente Prudente",
+            STOP: 7,
+          },
+        ],
+        "stop-duplicado.xlsx",
+        "shopee"
+      )
+    ).toThrow("STOP repetido em enderecos diferentes: STOP 7");
+  });
+
+  it("allows the same STOP for units at the same street number", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua A, 10, apartamento 1, Presidente Prudente",
+          STOP: 7,
+        },
+        {
+          "Destination Address": "Rua A, 10, apartamento 2, Presidente Prudente",
+          STOP: 7,
+        },
+      ],
+      "stop-mesmo-predio.xlsx",
+      "shopee"
+    );
+
+    expect(route.stops).toHaveLength(2);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([7, 7]);
+  });
+
+  it("does not treat a generic Codigo column as a package number", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua A, 10, Presidente Prudente",
+          Codigo: "CLIENTE-001",
+        },
+        {
+          "Destination Address": "Rua B, 20, Presidente Prudente",
+          Codigo: "CLIENTE-002",
+        },
+      ],
+      "codigo-generico.csv",
+      "generic"
+    );
+
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      undefined,
+      undefined,
     ]);
   });
 
@@ -400,6 +566,10 @@ describe("parseRouteRows", () => {
     expect(route.stops[0].address).toBe(sameAddress);
     expect(route.stops[0].deliveryCount).toBe(2);
     expect(route.stops[0].metadata?.groupedDeliveryCount).toBe(2);
+    expect(route.stops[0].metadata?.packageNumbers).toEqual([
+      "BR260000000001A",
+      "BR260000000002A",
+    ]);
     expect(route.stops[0].notes).toContain("2x entregas neste endereco");
     expect(route.stops[0].notes).toContain(
       "Pacotes: BR260000000001A, BR260000000002A"

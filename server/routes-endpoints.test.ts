@@ -1526,6 +1526,59 @@ describe("Route endpoints", () => {
     ]);
   });
 
+  it("preserves STOP and every grouped package identity after route optimization", async () => {
+    const caller = appRouter.createCaller(createAuthContext(8330));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Shopee com identidades persistidas",
+      mode: "balanced",
+      respectInputSequence: true,
+      stops: [
+        {
+          address: "Rua Pacotes Agrupados, 10, Presidente Prudente, SP",
+          latitude: -22.1207,
+          longitude: -51.3889,
+          sequence: 0,
+          sourceProvider: "shopee",
+          originalStop: 7,
+          isUnsequencedStop: false,
+          metadata: {
+            packageNumber: "BR-PKG-001",
+            packageNumbers: ["BR-PKG-001", "BR-PKG-002"],
+            groupedDeliveryCount: 2,
+          },
+        },
+        {
+          address: "Rua Pacote Unico, 20, Presidente Prudente, SP",
+          latitude: -22.1217,
+          longitude: -51.3899,
+          sequence: 1,
+          sourceProvider: "shopee",
+          originalStop: 8,
+          isUnsequencedStop: false,
+          metadata: {
+            packageNumber: "BR-PKG-003",
+          },
+        },
+      ],
+    });
+
+    const savedStops = await caller.stops.list({ routeId: result.route.id });
+
+    expect(savedStops.map((stop: any) => Number(stop.originalStop))).toEqual([
+      7, 8,
+    ]);
+    expect(savedStops[0].metadata).toMatchObject({
+      packageNumber: "BR-PKG-001",
+      packageNumbers: ["BR-PKG-001", "BR-PKG-002"],
+      groupedDeliveryCount: 2,
+    });
+    expect(savedStops[1].metadata).toMatchObject({
+      packageNumber: "BR-PKG-003",
+      packageNumbers: ["BR-PKG-003"],
+    });
+  });
+
   it("does not block Shopee preserved STOP routes when road metrics are unavailable above fallback limit", async () => {
     ENV.maxGeographicFallbackStops = 2;
     const caller = appRouter.createCaller(createAuthContext(8218));

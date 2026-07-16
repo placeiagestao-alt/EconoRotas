@@ -4,6 +4,7 @@ import markerIcon from "leaflet/dist/images/marker-icon.png";
 import markerShadow from "leaflet/dist/images/marker-shadow.png";
 import type { Coordinate, LatLngTuple } from "./locationService";
 import { isValidCoordinate } from "./locationService";
+import { buildRouteStopMarkerTitle } from "./routeStopMarkerTitle";
 
 export type MapMarker = {
   id: string;
@@ -17,6 +18,14 @@ export type RouteStop = Coordinate & {
   address: string;
   packageNumber?: string;
   sequence?: number;
+  sourceProvider?: string;
+  originalStop?: number | null;
+  isUnsequencedStop?: boolean;
+  metadata?: {
+    packageNumber?: string;
+    packageNumbers?: string[];
+    trackingNumber?: string;
+  };
 };
 
 export function configureLeafletDefaultIcons() {
@@ -57,7 +66,7 @@ export function createMarkersFromStops(stops: RouteStop[]) {
     return createMapMarker(
       String(index),
       stop,
-      `Pacote ${(stop.packageNumber ?? "").trim() || String(index + 1)}`,
+      buildRouteStopMarkerTitle(stop, index),
       stop.address,
       isStart ? "start" : isEnd ? "end" : "stop"
     );

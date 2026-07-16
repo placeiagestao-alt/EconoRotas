@@ -42,6 +42,7 @@ import {
   parseVoiceStop,
 } from "./createRouteVoiceStops";
 import {
+  getStopPackageNumbers,
   normalizeStopMetadata,
   normalizeStopSourceProvider,
   parseLegacyStopNotes,
@@ -107,6 +108,8 @@ type RouteStop = Pick<ImportedStop, "address" | "latitude" | "longitude"> & {
   sourceProvider?: StopSourceProvider;
   originalStop?: number | null;
   isUnsequencedStop?: boolean;
+  rawStop?: string;
+  stopValueStatus?: ImportedStop["stopValueStatus"];
   metadata?: StopMetadata;
   notes?: string;
   sourceRow?: number;
@@ -278,6 +281,27 @@ function buildStopMetadata(stop: RouteStop) {
     packageNumber: stop.packageNumber || stop.metadata?.packageNumber,
     groupedDeliveryCount: stop.deliveryCount || stop.metadata?.groupedDeliveryCount,
   });
+}
+
+function getImportedStopLabel(stop: RouteStop) {
+  if (stop.sourceProvider !== "shopee") return undefined;
+  if (Number(stop.originalStop) > 0) return `STOP ${Number(stop.originalStop)}`;
+  if (stop.isUnsequencedStop) return "Sem STOP";
+  return undefined;
+}
+
+function getImportedPackageLabel(stop: RouteStop) {
+  const packageNumbers = getStopPackageNumbers(
+    stop.metadata,
+    stop.packageNumber
+  );
+  if (!packageNumbers.length) return undefined;
+
+  const visible = packageNumbers.slice(0, 4).join(", ");
+  const remaining = packageNumbers.length - 4;
+  return `${packageNumbers.length > 1 ? "Pacotes" : "Pacote"}: ${visible}${
+    remaining > 0 ? ` +${remaining}` : ""
+  }`;
 }
 
 export default function CreateRoute() {
@@ -1089,6 +1113,8 @@ export default function CreateRoute() {
           sourceProvider: stop.sourceProvider,
           originalStop: stop.originalStop,
           isUnsequencedStop: stop.isUnsequencedStop,
+          rawStop: stop.rawStop,
+          stopValueStatus: stop.stopValueStatus,
           metadata: normalizeStopMetadata({
             ...stop.metadata,
             ...parseStopNotes(stop.notes).metadata,
@@ -1102,6 +1128,7 @@ export default function CreateRoute() {
       setStops(importedStops);
       setImportSummary(importedRoute);
       setRespectImportedStopSequence(false);
+      setImportSourceProvider(importedRoute.sourceProvider);
 
       if (!name.trim()) {
         setName(importedRoute.routeName);
@@ -1114,6 +1141,12 @@ export default function CreateRoute() {
       }
 
       toast.success(`${importedRoute.stops.length} paradas importadas.`);
+      if (
+        importSourceProvider !== importedRoute.sourceProvider &&
+        importedRoute.sourceProvider === "shopee"
+      ) {
+        toast.message("Origem Shopee reconhecida pela coluna STOP.");
+      }
       if ((importedRoute.groupedDeliveries ?? 0) > 0) {
         toast.message(
           `${importedRoute.groupedDeliveries} entregas agrupadas em enderecos ja importados.`
@@ -1123,7 +1156,18 @@ export default function CreateRoute() {
         toast.message(
           "Coluna STOP detectada: escolha se deseja seguir essa sequencia ou otimizar automaticamente."
         );
-      } else if (importSourceProvider !== "shopee") {
+      } else if (importedRoute.stopColumnIgnored) {
+        toast.warning(
+          "A coluna STOP foi encontrada, mas nao sera usada para a origem selecionada."
+        );
+      } else if (
+        importedRoute.stopColumnDetected &&
+        importedRoute.stopSummary?.numberedCount === 0
+      ) {
+        toast.warning(
+          "A coluna STOP nao tem numeros positivos. A rota sera otimizada normalmente."
+        );
+      } else if (importedRoute.sourceProvider !== "shopee") {
         toast.message("Origem sem regra STOP: a sequência será definida pela otimização da rota.");
       }
 
@@ -2223,7 +2267,40 @@ export default function CreateRoute() {
                           {importSummary.missingCoordinateRows} sem coordenadas
                         </span>
                       )}
+                      {importSummary.stopColumnDetected && !importSummary.stopColumnIgnored && (
+                        <span>
+                          {importSummary.stopSummary?.numberedCount ?? 0} com STOP
+                        </span>
+                      )}
+                      {importSummary.stopColumnDetected &&
+                        !importSummary.stopColumnIgnored &&
+                        (importSummary.stopSummary?.unsequencedCount ?? 0) > 0 && (
+                          <span>
+                            {importSummary.stopSummary?.unsequencedCount} sem STOP
+                          </span>
+                        )}
                     </div>
+
+                    {importSummary.stopColumnIgnored && (
+                      <Alert className="border-amber-300 bg-amber-50 text-amber-950">
+                        <AlertDescription>
+                          A tabela possui coluna STOP, mas a origem selecionada nao usa
+                          essa regra. Se a tabela for Shopee, selecione Shopee e importe
+                          novamente.
+                        </AlertDescription>
+                      </Alert>
+                    )}
+
+                    {importSummary.stopColumnDetected &&
+                      !importSummary.stopColumnIgnored &&
+                      !importSummary.hasStopSequence && (
+                        <Alert className="border-amber-300 bg-amber-50 text-amber-950">
+                          <AlertDescription>
+                            Nenhum STOP numerado foi encontrado. As paradas serao
+                            otimizadas por proximidade.
+                          </AlertDescription>
+                        </Alert>
+                      )}
 
                     {importSummary.hasStopSequence && (
                       <div className="rounded-xl border border-border/70 bg-white p-3 text-sm">
@@ -2345,7 +2422,19 @@ export default function CreateRoute() {
                 >
                   <div className="flex items-center justify-between">
                     <div>
-                      <span className="text-lg font-medium">Parada {index + 1}</span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-lg font-medium">Parada {index + 1}</span>
+                        {getImportedStopLabel(stop) && (
+                          <span className="rounded-md bg-orange-500 px-2 py-1 text-sm font-bold text-white">
+                            {getImportedStopLabel(stop)}
+                          </span>
+                        )}
+                        {getImportedPackageLabel(stop) && (
+                          <span className="rounded-md bg-primary/10 px-2 py-1 text-sm font-semibold text-primary">
+                            {getImportedPackageLabel(stop)}
+                          </span>
+                        )}
+                      </div>
                       {stop.sourceRow && (
                         <p className="text-xs text-muted-foreground">
                           Linha {stop.sourceRow} da planilha

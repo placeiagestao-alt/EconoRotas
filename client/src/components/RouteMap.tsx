@@ -11,6 +11,7 @@ import {
   type LatLngTuple,
 } from "@/services/maps/locationService";
 import { createMapMarker } from "@/services/maps/markerService";
+import { buildRouteStopMarkerTitle } from "@/services/maps/routeStopMarkerTitle";
 
 interface Stop {
   address: string;
@@ -18,6 +19,12 @@ interface Stop {
   longitude: number;
   packageNumber?: string;
   sequence?: number;
+  sourceProvider?: string;
+  originalStop?: number | null;
+  isUnsequencedStop?: boolean;
+  metadata?: {
+    packageNumber?: string;
+  };
 }
 
 type RouteMapAuditIssue = {
@@ -105,7 +112,7 @@ export default function RouteMap({
         createMapMarker(
           `route-stop-${index}`,
           stop,
-          `Sequência ${index + 1} · Pacote ${(stop.packageNumber ?? "").trim() || String(index + 1)}`,
+          buildRouteStopMarkerTitle(stop, index),
           stop.address,
           "stop"
         )

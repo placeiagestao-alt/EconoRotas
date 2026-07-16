@@ -12,6 +12,7 @@ export type StopSourceProvider = (typeof STOP_SOURCE_PROVIDERS)[number];
 
 export type StopMetadata = {
   packageNumber?: string;
+  packageNumbers?: string[];
   trackingNumber?: string;
   recipientName?: string;
   recipientPhone?: string;
@@ -35,6 +36,40 @@ function cleanMetadataValue(value: unknown) {
   return text ? text : undefined;
 }
 
+export function normalizePackageNumbers(...values: unknown[]) {
+  const packageNumbers: string[] = [];
+
+  const addValue = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(addValue);
+      return;
+    }
+
+    const text = cleanMetadataValue(value);
+    if (!text || text === "0") return;
+
+    const normalized = text.toLowerCase();
+    if (!packageNumbers.some((item) => item.toLowerCase() === normalized)) {
+      packageNumbers.push(text);
+    }
+  };
+
+  values.forEach(addValue);
+  return packageNumbers;
+}
+
+export function getStopPackageNumbers(
+  metadata: StopMetadata | null | undefined,
+  fallbackPackageNumber?: unknown
+) {
+  return normalizePackageNumbers(
+    metadata?.packageNumbers,
+    metadata?.packageNumber,
+    metadata?.trackingNumber,
+    fallbackPackageNumber
+  );
+}
+
 export function normalizeStopSourceProvider(
   value: unknown
 ): StopSourceProvider {
@@ -51,7 +86,9 @@ export function normalizeStopMetadata(value: unknown): StopMetadata {
       : {};
 
   const metadata: StopMetadata = {};
-  const stringKeys: Array<keyof Omit<StopMetadata, "groupedDeliveryCount">> = [
+  const stringKeys: Array<
+    keyof Omit<StopMetadata, "groupedDeliveryCount" | "packageNumbers">
+  > = [
     "packageNumber",
     "trackingNumber",
     "recipientName",
@@ -67,6 +104,16 @@ export function normalizeStopMetadata(value: unknown): StopMetadata {
     if (text) metadata[key] = text;
   });
 
+  const packageNumbers = normalizePackageNumbers(
+    input.packageNumbers,
+    metadata.packageNumber,
+    metadata.trackingNumber
+  );
+  if (packageNumbers.length) {
+    metadata.packageNumbers = packageNumbers;
+    metadata.packageNumber ??= packageNumbers[0];
+  }
+
   const groupedDeliveryCount = Number(input.groupedDeliveryCount);
   if (Number.isFinite(groupedDeliveryCount) && groupedDeliveryCount > 0) {
     metadata.groupedDeliveryCount = Math.round(groupedDeliveryCount);
@@ -80,9 +127,21 @@ export function mergeStopMetadata(
 ) {
   return values.reduce<StopMetadata>((acc, value) => {
     const normalized = normalizeStopMetadata(value);
-    return {
+    const merged = {
       ...acc,
       ...normalized,
+    };
+    const packageNumbers = normalizePackageNumbers(
+      acc.packageNumbers,
+      acc.packageNumber,
+      normalized.packageNumbers,
+      normalized.packageNumber
+    );
+
+    return {
+      ...merged,
+      packageNumber: merged.packageNumber ?? packageNumbers[0],
+      packageNumbers: packageNumbers.length ? packageNumbers : undefined,
     };
   }, {});
 }
@@ -114,6 +173,15 @@ export function parseLegacyStopNotes(
 
       if (key === "pacote") {
         metadata.packageNumber ??= value;
+        return;
+      }
+
+      if (key === "pacotes") {
+        metadata.packageNumbers = normalizePackageNumbers(
+          metadata.packageNumbers,
+          value.split(",")
+        );
+        metadata.packageNumber ??= metadata.packageNumbers[0];
         return;
       }
 

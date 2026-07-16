@@ -45,6 +45,7 @@ import {
 } from "@/services/maps/geocodingService";
 import type { GeocodingMethod } from "@shared/geocodingConfidence";
 import {
+  getStopPackageNumbers,
   normalizeStopMetadata,
   normalizeStopSourceProvider,
   parseLegacyStopNotes,
@@ -300,12 +301,17 @@ function getGroupedDeliveryLabel(stop?: Stop) {
 }
 
 function getPackageLabel(stop: Stop) {
-  const groupedDeliveryLabel = getGroupedDeliveryLabel(stop);
-  if (groupedDeliveryLabel) return groupedDeliveryLabel;
+  const packageNumbers = getStopPackageNumbers(
+    stop.metadata,
+    stop.packageNumber
+  );
+  if (!packageNumbers.length) return undefined;
 
-  const packageNumber = stop.metadata?.packageNumber || stop.packageNumber;
-  if (!packageNumber || packageNumber === "0") return undefined;
-  return `Pacote: ${packageNumber}`;
+  const visible = packageNumbers.slice(0, 6).join(", ");
+  const remaining = packageNumbers.length - 6;
+  return `${packageNumbers.length > 1 ? "Pacotes" : "Pacote"}: ${visible}${
+    remaining > 0 ? ` +${remaining}` : ""
+  }`;
 }
 
 function getStopIdentityDetails(stop: Stop, fallbackIndex: number) {
@@ -2736,7 +2742,13 @@ export default function RouteDetail() {
                             </p>
                           </div>
                           {currentStopIdentity?.shopeeStopLabel ? (
-                            <div className="rounded-2xl border border-orange-300 bg-orange-500 p-4 text-white shadow-sm">
+                            <div
+                              className={
+                                routeIsShopeeStopSequence
+                                  ? "rounded-2xl border border-orange-300 bg-orange-500 p-4 text-white shadow-sm"
+                                  : "rounded-2xl border border-border bg-secondary/70 p-4 text-foreground"
+                              }
+                            >
                               <p className="text-xs font-semibold uppercase opacity-90">
                                 STOP
                               </p>
@@ -2749,8 +2761,12 @@ export default function RouteDetail() {
                               <p className="mt-1 text-xs opacity-90">
                                 {currentStopIdentity.shopeeStopLabel ===
                                 "Sem STOP"
-                                  ? "Sem STOP na tabela"
-                                  : "Sequência da tabela"}
+                                  ? routeIsShopeeStopSequence
+                                    ? "Encaixar por proximidade"
+                                    : "Sem STOP na tabela"
+                                  : routeIsShopeeStopSequence
+                                    ? "Ordem da tabela ativa"
+                                    : "Referencia da tabela"}
                               </p>
                             </div>
                           ) : (
@@ -2768,13 +2784,11 @@ export default function RouteDetail() {
                           )}
                           <div className="rounded-2xl border border-primary/10 bg-primary/10 p-4 text-primary">
                             <p className="text-xs font-semibold uppercase">
-                              {currentStopGroupedDeliveryLabel
-                                ? "Entregas"
-                                : "Pacote"}
+                              Pacote
                             </p>
                             <p className="mt-1 break-words text-2xl font-black leading-tight">
                               {currentStopIdentity?.packageLabel?.replace(
-                                "Pacote: ",
+                                /^Pacotes?:\s*/,
                                 ""
                               ) || "Sem pacote"}
                             </p>
@@ -2877,7 +2891,18 @@ export default function RouteDetail() {
                                         nextStopIndex + 1}
                                     </Badge>
                                     {nextStopIdentity?.shopeeStopLabel ? (
-                                      <Badge className="bg-orange-500 text-white hover:bg-orange-500">
+                                      <Badge
+                                        variant={
+                                          routeIsShopeeStopSequence
+                                            ? "default"
+                                            : "outline"
+                                        }
+                                        className={
+                                          routeIsShopeeStopSequence
+                                            ? "bg-orange-500 text-white hover:bg-orange-500"
+                                            : undefined
+                                        }
+                                      >
                                         {nextStopIdentity.shopeeStopLabel}
                                       </Badge>
                                     ) : null}
@@ -3000,7 +3025,13 @@ export default function RouteDetail() {
                               </p>
                               <div className="flex flex-wrap gap-2">
                                 {identity.shopeeStopLabel && (
-                                  <p className="inline-flex max-w-full rounded-lg bg-orange-500 px-3 py-1 text-base font-black text-white">
+                                  <p
+                                    className={
+                                      routeIsShopeeStopSequence
+                                        ? "inline-flex max-w-full rounded-lg bg-orange-500 px-3 py-1 text-base font-black text-white"
+                                        : "inline-flex max-w-full rounded-md border border-border bg-secondary/70 px-2 py-0.5 text-sm font-semibold text-foreground"
+                                    }
+                                  >
                                     <span className="truncate">
                                       {identity.shopeeStopLabel}
                                     </span>
