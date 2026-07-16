@@ -401,6 +401,34 @@ describe("parseRouteRows", () => {
     ]);
   });
 
+  it("uses the populated STOP column when another recognized STOP column is blank", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua B, 20, Presidente Prudente, SP",
+          STOP: "",
+          "STOP No.": 2,
+          "SPX TN": "BR-PACOTE-002",
+        },
+        {
+          "Destination Address": "Rua A, 10, Presidente Prudente, SP",
+          STOP: "",
+          "STOP No.": 1,
+          "SPX TN": "BR-PACOTE-001",
+        },
+      ],
+      "shopee-duas-colunas-stop.xlsx",
+      "generic"
+    );
+
+    expect(route.hasStopSequence).toBe(true);
+    expect(route.stopSummary).toEqual({
+      numberedCount: 2,
+      unsequencedCount: 0,
+    });
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([2, 1]);
+  });
+
   it("uses a Codigo column as package identity only when STOP identifies Shopee", () => {
     const route = parseRouteRows(
       [

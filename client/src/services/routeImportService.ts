@@ -851,7 +851,9 @@ function resolveImportSourceProvider(
 }
 
 function parseStopValue(row: RawSpreadsheetRow, headerMap: Record<string, string>) {
-  const raw = cleanText(getCell(row, headerMap, HEADER_ALIASES.stop));
+  const raw = cleanText(
+    getFirstPopulatedCell(row, headerMap, HEADER_ALIASES.stop)
+  );
   if (!raw || raw === "-") {
     return {
       raw,
