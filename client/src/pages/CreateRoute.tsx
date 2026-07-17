@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import AddressInputSimple from "@/components/AddressInputSimple";
+import StopIdentityStrip from "@/components/StopIdentityStrip";
 import RouteMetrics from "@/components/RouteMetrics";
 import {
   calculateGeocodingConfidence,
@@ -1107,7 +1108,8 @@ export default function CreateRoute() {
           geocodingConfidenceScore: confidence.score,
           geocodingMethod: confidence.method,
           geocodingSuspect: confidence.suspect,
-          packageNumber: stop.packageNumber,
+          packageNumber:
+            stop.packageNumber || getStopPackageNumbers(stop.metadata)[0],
           deliveryCount: stop.deliveryCount,
           routingStop: stop.routingStop,
           sourceProvider: stop.sourceProvider,
@@ -2279,6 +2281,16 @@ export default function CreateRoute() {
                             {importSummary.stopSummary?.unsequencedCount} sem STOP
                           </span>
                         )}
+                      {importSummary.packageSummary && (
+                        <span>
+                          {importSummary.packageSummary.identifiedCount} com pacote
+                        </span>
+                      )}
+                      {(importSummary.packageSummary?.missingCount ?? 0) > 0 && (
+                        <span>
+                          {importSummary.packageSummary?.missingCount} sem pacote
+                        </span>
+                      )}
                     </div>
 
                     {importSummary.stopColumnIgnored && (
@@ -2298,6 +2310,17 @@ export default function CreateRoute() {
                           <AlertDescription>
                             Nenhum STOP numerado foi encontrado. As paradas serao
                             otimizadas por proximidade.
+                          </AlertDescription>
+                        </Alert>
+                      )}
+
+                    {importSummary.sourceProvider === "shopee" &&
+                      (importSummary.packageSummary?.identifiedCount ?? 0) === 0 && (
+                        <Alert className="border-red-300 bg-red-50 text-red-950">
+                          <AlertDescription>
+                            Nenhum número de pacote foi identificado. Confira se a
+                            planilha possui SPX TN, rastreio, pacote, waybill ou shipment
+                            antes de criar a rota.
                           </AlertDescription>
                         </Alert>
                       )}
@@ -2420,23 +2443,15 @@ export default function CreateRoute() {
                       "border-destructive bg-destructive/5"
                   )}
                 >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-lg font-medium">Parada {index + 1}</span>
-                        {getImportedStopLabel(stop) && (
-                          <span className="rounded-md bg-orange-500 px-2 py-1 text-sm font-bold text-white">
-                            {getImportedStopLabel(stop)}
-                          </span>
-                        )}
-                        {getImportedPackageLabel(stop) && (
-                          <span className="rounded-md bg-primary/10 px-2 py-1 text-sm font-semibold text-primary">
-                            {getImportedPackageLabel(stop)}
-                          </span>
-                        )}
-                      </div>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <StopIdentityStrip
+                        routePositionLabel={String(index + 1)}
+                        stopLabel={getImportedStopLabel(stop)}
+                        packageLabel={getImportedPackageLabel(stop)}
+                      />
                       {stop.sourceRow && (
-                        <p className="text-xs text-muted-foreground">
+                        <p className="mt-1 text-xs text-muted-foreground">
                           Linha {stop.sourceRow} da planilha
                         </p>
                       )}
@@ -2482,7 +2497,11 @@ export default function CreateRoute() {
                     <Label htmlFor={`package-number-${index}`}>Número do pacote</Label>
                     <Input
                       id={`package-number-${index}`}
-                      value={stop.packageNumber ?? ""}
+                      value={
+                        stop.packageNumber ??
+                        getStopPackageNumbers(stop.metadata)[0] ??
+                        ""
+                      }
                       onChange={(event) =>
                         handlePackageNumberChange(index, event.target.value)
                       }

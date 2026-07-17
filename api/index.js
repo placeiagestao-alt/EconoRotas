@@ -723,6 +723,7 @@ var init_env = __esm({
       bullmqRedisUrl: firstEnvString(
         process.env.BULLMQ_REDIS_URL,
         process.env.ECONOROTAS_REDIS_URL,
+        process.env.KV_URL,
         process.env.REDIS_URL
       ),
       backupLastCompletedAt: process.env.BACKUP_LAST_COMPLETED_AT ?? "",
@@ -827,12 +828,37 @@ function cleanMetadataValue(value) {
   const text2 = String(value).trim();
   return text2 ? text2 : void 0;
 }
+function normalizePackageNumbers(...values) {
+  const packageNumbers = [];
+  const addValue = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(addValue);
+      return;
+    }
+    const text2 = cleanMetadataValue(value);
+    if (!text2 || text2 === "0") return;
+    const normalized = text2.toLowerCase();
+    if (!packageNumbers.some((item) => item.toLowerCase() === normalized)) {
+      packageNumbers.push(text2);
+    }
+  };
+  values.forEach(addValue);
+  return packageNumbers;
+}
 function normalizeStopSourceProvider(value) {
   const normalized = String(value || "").trim().toLowerCase();
   return STOP_SOURCE_PROVIDERS.includes(normalized) ? normalized : "generic";
 }
 function normalizeStopMetadata(value) {
-  const input = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  let parsedValue = value;
+  if (typeof value === "string") {
+    try {
+      parsedValue = JSON.parse(value);
+    } catch {
+      parsedValue = {};
+    }
+  }
+  const input = parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue) ? parsedValue : {};
   const metadata = {};
   const stringKeys = [
     "packageNumber",
@@ -848,6 +874,15 @@ function normalizeStopMetadata(value) {
     const text2 = cleanMetadataValue(input[key]);
     if (text2) metadata[key] = text2;
   });
+  const packageNumbers = normalizePackageNumbers(
+    input.packageNumbers,
+    metadata.packageNumber,
+    metadata.trackingNumber
+  );
+  if (packageNumbers.length) {
+    metadata.packageNumbers = packageNumbers;
+    metadata.packageNumber ??= packageNumbers[0];
+  }
   const groupedDeliveryCount = Number(input.groupedDeliveryCount);
   if (Number.isFinite(groupedDeliveryCount) && groupedDeliveryCount > 0) {
     metadata.groupedDeliveryCount = Math.round(groupedDeliveryCount);
@@ -871,6 +906,14 @@ function parseLegacyStopNotes(notes) {
     }
     if (key === "pacote") {
       metadata.packageNumber ??= value;
+      return;
+    }
+    if (key === "pacotes") {
+      metadata.packageNumbers = normalizePackageNumbers(
+        metadata.packageNumbers,
+        value.split(",")
+      );
+      metadata.packageNumber ??= metadata.packageNumbers[0];
       return;
     }
     if (key === "stop") {
@@ -3211,11 +3254,17 @@ async function getQueueIntegrityDashboard(days = 30) {
       const runningJobs2 = memory.optimizationJobs.filter(
         (job) => job.status === "running"
       );
+      const queuedJobs2 = memory.optimizationJobs.filter(
+        (job) => job.status === "queued" && new Date(job.createdAt).getTime() >= cutoff
+      );
       return buildQueueIntegrityDashboard(
         events2,
         failedJobs2,
         runningJobs2,
-        safeDays
+        safeDays,
+        6e4,
+        buildLongRunningJobAlerts(runningJobs2, 6e4),
+        queuedJobs2
       );
     }
     requireConfiguredDatabase();
@@ -3240,6 +3289,18 @@ async function getQueueIntegrityDashboard(days = 30) {
       WHERE status = 'failed'
         AND created_at >= ?
       ORDER BY created_at DESC
+      LIMIT 2000
+    `,
+    [cutoffDate]
+  );
+  const [queuedJobs] = await _pool.query(
+    `
+      SELECT id, route_id AS routeId, user_id AS userId, provider_job_id AS providerJobId,
+        created_at AS createdAt
+      FROM optimization_jobs
+      WHERE status = 'queued'
+        AND created_at >= ?
+      ORDER BY created_at ASC
       LIMIT 2000
     `,
     [cutoffDate]
@@ -3280,7 +3341,8 @@ async function getQueueIntegrityDashboard(days = 30) {
     runningJobs,
     safeDays,
     averageRuntimeMs,
-    runningAlerts
+    runningAlerts,
+    queuedJobs
   );
 }
 function countEventsByType(events, type) {
@@ -3596,7 +3658,25 @@ async function persistLongRunningJobAlerts(alerts) {
     });
   }
 }
-function buildQueueIntegrityDashboard(events, failedJobs, runningJobs, days, averageRuntimeMs = 6e4, runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs)) {
+function buildQueueIntegrityDashboard(events, failedJobs, runningJobs, days, averageRuntimeMs = 6e4, runningAlerts = buildLongRunningJobAlerts(runningJobs, averageRuntimeMs), queuedJobs = []) {
+  const now = Date.now();
+  const staleQueuedThresholdMs = Math.max(15 * 6e4, averageRuntimeMs * 3);
+  const queuedJobAges = queuedJobs.map((job) => {
+    const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
+    return Number.isFinite(createdAt) ? Math.max(0, now - createdAt) : 0;
+  }).filter((ageMs) => ageMs > 0);
+  const staleQueuedJobs = queuedJobs.map((job) => {
+    const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
+    const queuedMs = Number.isFinite(createdAt) ? Math.max(0, now - createdAt) : 0;
+    return {
+      id: Number(job.id),
+      routeId: Number(job.routeId ?? job.route_id ?? 0),
+      userId: job.userId ?? job.user_id ?? null,
+      providerJobId: job.providerJobId ?? job.provider_job_id ?? null,
+      createdAt: job.createdAt ?? job.created_at ?? null,
+      queuedMs
+    };
+  }).filter((job) => job.queuedMs >= staleQueuedThresholdMs);
   const duplicateJobs = countEventsByType(events, "duplicate_job_detected");
   const jobRecoveredAfterCrash = countEventsByType(
     events,
@@ -3612,11 +3692,18 @@ function buildQueueIntegrityDashboard(events, failedJobs, runningJobs, days, ave
     events,
     "redis_reconnect_detected"
   );
-  const failedRecoveries = failedJobs.filter((job) => {
+  const failedRecoveryJobs = failedJobs.filter((job) => {
     const attemptCount = Number(job.attemptCount ?? job.attempt_count ?? 0);
     const maxAttempts = Number(job.maxAttempts ?? job.max_attempts ?? 3);
     return attemptCount >= maxAttempts;
-  }).length;
+  });
+  const recentFailedRecoveryCutoff = now - 7 * 24 * 60 * 60 * 1e3;
+  const recentFailedRecoveryJobs = failedRecoveryJobs.filter((job) => {
+    const createdAt = new Date(job.createdAt ?? job.created_at).getTime();
+    return Number.isFinite(createdAt) && createdAt >= recentFailedRecoveryCutoff;
+  });
+  const failedRecoveries = failedRecoveryJobs.length;
+  const recentFailedRecoveries = recentFailedRecoveryJobs.length;
   const lastEvent = events[0];
   return {
     periodDays: days,
@@ -3629,16 +3716,24 @@ function buildQueueIntegrityDashboard(events, failedJobs, runningJobs, days, ave
     stalledRecoveredCount,
     runningStalledJobs: runningAlerts.length,
     stalledJobs: stalledCount + runningAlerts.length,
+    queuedJobs: queuedJobs.length,
+    staleQueuedJobs: staleQueuedJobs.length,
+    oldestQueuedMs: queuedJobAges.length ? Math.max(...queuedJobAges) : 0,
+    staleQueuedThresholdMs,
+    staleQueuedJobDetails: staleQueuedJobs.slice(0, 20),
     averageRuntimeMs,
     longRunningJobs: runningAlerts,
     failedRecoveries,
+    recentFailedRecoveries,
+    failedRecoveryWindowDays: 7,
     redisReconnectCount,
     lastIntegrityCheck: lastEvent?.createdAt ?? null,
-    status: duplicateJobs === 0 && failedRecoveries === 0 && stalledCount === 0 && runningAlerts.length === 0 ? "healthy" : "attention",
+    status: duplicateJobs === 0 && recentFailedRecoveries === 0 && stalledCount === 0 && runningAlerts.length === 0 && staleQueuedJobs.length === 0 ? "healthy" : "attention",
     target: {
       duplicateJobs: 0,
-      failedRecoveries: 0,
+      recentFailedRecoveries: 0,
       stalledJobs: 0,
+      staleQueuedJobs: 0,
       recoveryAfterFailure: "100%"
     },
     recentEvents: events.slice(0, 20)
@@ -7049,16 +7144,21 @@ var DATABASE_CACHE_TTL_MS = Math.max(
 var RATE_LIMIT_WINDOW_MS = 60 * 1e3;
 var RATE_LIMIT_MAX_REQUESTS = Math.max(
   1,
-  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 240)
+  Number(process.env.GEOCODING_RATE_LIMIT_PER_MINUTE || 60)
 );
 var EXTERNAL_MIN_INTERVAL_MS = Math.max(
   0,
-  Number(process.env.GEOCODING_EXTERNAL_MIN_INTERVAL_MS || 350)
+  Number(process.env.GEOCODING_EXTERNAL_MIN_INTERVAL_MS || 1100)
+);
+var EXTERNAL_PROVIDER_COOLDOWN_MS = Math.max(
+  3e4,
+  Number(process.env.GEOCODING_PROVIDER_COOLDOWN_MS || 12e4)
 );
 var cache = /* @__PURE__ */ new Map();
 var rateLimiter = /* @__PURE__ */ new Map();
 var inFlightSearches = /* @__PURE__ */ new Map();
 var lastExternalSearchAt = 0;
+var externalProviderCooldownUntil = 0;
 function normalizeSearchQuery(query) {
   return query.replace(/\s+/g, " ").trim();
 }
@@ -7212,6 +7312,13 @@ async function fetchExternalSearch(cacheKey, url) {
   const existing = inFlightSearches.get(cacheKey);
   if (existing) return existing;
   const request = (async () => {
+    const cooldownMs = externalProviderCooldownUntil - Date.now();
+    if (cooldownMs > 0) {
+      const error = new Error("Nominatim em cooldown apos rate limit.");
+      error.status = 429;
+      error.retryAfter = String(Math.ceil(cooldownMs / 1e3));
+      throw error;
+    }
     await waitForExternalSearchSlot();
     const response = await fetch(url, {
       headers: {
@@ -7224,6 +7331,13 @@ async function fetchExternalSearch(cacheKey, url) {
       const error = new Error(body.slice(0, 200));
       error.status = response.status;
       error.retryAfter = response.headers.get("retry-after") || void 0;
+      if (response.status === 429) {
+        const retryAfterSeconds = Number(response.headers.get("retry-after"));
+        externalProviderCooldownUntil = Date.now() + Math.max(
+          EXTERNAL_PROVIDER_COOLDOWN_MS,
+          Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1e3 : 0
+        );
+      }
       throw error;
     }
     return response.json();
@@ -7362,7 +7476,8 @@ function registerGeocodingProxy(app2) {
           provider_used: "nominatim",
           fallbackProvider: null,
           status: status ?? null,
-          error: error instanceof Error ? error.message.slice(0, 200) : "unknown"
+          error: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+          providerCooldownUntil: externalProviderCooldownUntil > Date.now() ? new Date(externalProviderCooldownUntil).toISOString() : null
         }
       });
       if (status === 429) {
@@ -10457,12 +10572,14 @@ async function getOptimizationQueueHealth() {
     const workerHeartbeats = await getRecentWorkerHeartbeats().catch(() => []);
     const workerHeartbeatCount = workerHeartbeats.length;
     const workerCount = Math.max(workers.length, workerHeartbeatCount);
+    const redis = await getRedisPolicyHealth();
     await recordWorkerUnderReplicatedAlert(workerCount).catch(() => void 0);
     return {
       configured: true,
       reachable: true,
       queueName: OPTIMIZATION_QUEUE_NAME,
       counts,
+      redis,
       workerCount,
       workerHeartbeatCount,
       minimumWorkerCount: MIN_WORKER_COUNT,
@@ -10503,6 +10620,31 @@ function parseWorkerHeartbeat(member, score) {
       status: "online",
       startedAt: null,
       lastHeartbeat
+    };
+  }
+}
+async function getRedisMaxmemoryPolicy() {
+  const redis = getHeartbeatRedis();
+  if (!redis) return null;
+  const info = await redis.info("memory");
+  const line = info.split(/\r?\n/).find((entry) => entry.toLowerCase().startsWith("maxmemory_policy:"));
+  return line?.split(":")[1]?.trim() || null;
+}
+async function getRedisPolicyHealth() {
+  try {
+    const maxmemoryPolicy = await getRedisMaxmemoryPolicy();
+    return {
+      maxmemoryPolicy,
+      policyTarget: "noeviction",
+      policyCompliant: maxmemoryPolicy ? maxmemoryPolicy === "noeviction" : null,
+      error: null
+    };
+  } catch (error) {
+    return {
+      maxmemoryPolicy: null,
+      policyTarget: "noeviction",
+      policyCompliant: null,
+      error: sanitizeQueueError(error)
     };
   }
 }
@@ -10722,6 +10864,12 @@ async function getMultiVehicleReadinessDashboard() {
       reachable: false,
       queueName: "econorota-optimization",
       counts: null,
+      redis: {
+        maxmemoryPolicy: null,
+        policyTarget: "noeviction",
+        policyCompliant: null,
+        error: null
+      },
       error: "Falha ao consultar fila."
     }),
     safeRead(() => getOptimizationWorkersDashboard(), {
@@ -10781,8 +10929,14 @@ async function getMultiVehicleReadinessDashboard() {
     blockers: osrmBlockers
   };
   const workerBlockers = [];
+  const redisPolicy = queue2.redis;
   if (!queue2.configured) workerBlockers.push("Redis/BullMQ nao configurado.");
   if (!queue2.reachable) workerBlockers.push("Fila BullMQ nao esta acessivel.");
+  if (redisPolicy?.policyCompliant === false) {
+    workerBlockers.push(
+      `Redis maxmemory-policy esta ${redisPolicy.maxmemoryPolicy}; alvo operacional: ${redisPolicy.policyTarget}.`
+    );
+  }
   if (Number(workers.workerCount || 0) < Number(workers.minimumWorkerCount || 2)) {
     workerBlockers.push(
       `Apenas ${workers.workerCount || 0} worker(s) online; minimo exigido: ${workers.minimumWorkerCount || 2}.`
@@ -10790,6 +10944,11 @@ async function getMultiVehicleReadinessDashboard() {
   }
   if (queueIntegrity.status !== "healthy") {
     workerBlockers.push("Integridade da fila nao esta saudavel.");
+  }
+  if (Number(queueIntegrity.staleQueuedJobs || 0) > 0) {
+    workerBlockers.push(
+      `${queueIntegrity.staleQueuedJobs} job(s) antigo(s) ficaram em queued sem execucao.`
+    );
   }
   const workerRedundancy = {
     status: workerBlockers.length === 0 ? "READY" : queue2.reachable ? "PARTIAL" : "NO-GO",
@@ -10799,10 +10958,19 @@ async function getMultiVehicleReadinessDashboard() {
       workerCount: workers.workerCount,
       minimumWorkerCount: workers.minimumWorkerCount,
       workerHeartbeatCount: queue2.workerHeartbeatCount ?? null,
+      redisMaxmemoryPolicy: redisPolicy?.maxmemoryPolicy ?? null,
+      redisPolicyTarget: redisPolicy?.policyTarget ?? "noeviction",
+      redisPolicyCompliant: redisPolicy?.policyCompliant ?? null,
+      redisPolicyError: redisPolicy?.error ?? null,
       queueIntegrityStatus: queueIntegrity.status,
       duplicateJobs: queueIntegrity.duplicateJobs,
       failedRecoveries: queueIntegrity.failedRecoveries,
+      recentFailedRecoveries: queueIntegrity.recentFailedRecoveries ?? null,
+      failedRecoveryWindowDays: queueIntegrity.failedRecoveryWindowDays ?? null,
       stalledJobs: queueIntegrity.stalledJobs,
+      queuedJobs: queueIntegrity.queuedJobs ?? 0,
+      staleQueuedJobs: queueIntegrity.staleQueuedJobs ?? 0,
+      oldestQueuedMs: queueIntegrity.oldestQueuedMs ?? 0,
       workers: workers.workers
     },
     blockers: workerBlockers
@@ -14618,22 +14786,35 @@ function buildOperationalReadiness(args) {
     addCheck("queue", "critical", "Fila Redis/BullMQ configurada, mas indisponivel.", {
       error: args.queue.error ?? null
     });
-  } else if (Number(args.queue.workerCount ?? 0) < Number(args.queue.minimumWorkerCount ?? 0)) {
-    addCheck(
-      "workers",
-      "attention",
-      `Workers online abaixo do minimo (${args.queue.workerCount}/${args.queue.minimumWorkerCount}).`,
-      {
-        workerCount: args.queue.workerCount ?? 0,
-        minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
-        alert: args.queue.alert ?? null
-      }
-    );
   } else {
-    addCheck("workers", "ready", "Workers operacionais.", {
-      workerCount: args.queue.workerCount ?? 0,
-      minimumWorkerCount: args.queue.minimumWorkerCount ?? 0
-    });
+    if (args.queue.redis?.policyCompliant === false) {
+      addCheck(
+        "queueRedisPolicy",
+        "attention",
+        "Redis esta com politica de memoria inadequada para BullMQ.",
+        {
+          maxmemoryPolicy: args.queue.redis.maxmemoryPolicy ?? null,
+          policyTarget: args.queue.redis.policyTarget ?? "noeviction"
+        }
+      );
+    }
+    if (Number(args.queue.workerCount ?? 0) < Number(args.queue.minimumWorkerCount ?? 0)) {
+      addCheck(
+        "workers",
+        "attention",
+        `Workers online abaixo do minimo (${args.queue.workerCount}/${args.queue.minimumWorkerCount}).`,
+        {
+          workerCount: args.queue.workerCount ?? 0,
+          minimumWorkerCount: args.queue.minimumWorkerCount ?? 0,
+          alert: args.queue.alert ?? null
+        }
+      );
+    } else {
+      addCheck("workers", "ready", "Workers operacionais.", {
+        workerCount: args.queue.workerCount ?? 0,
+        minimumWorkerCount: args.queue.minimumWorkerCount ?? 0
+      });
+    }
   }
   if (args.queueIntegrity) {
     const healthy = args.queueIntegrity.status === "healthy";
@@ -14645,7 +14826,10 @@ function buildOperationalReadiness(args) {
         status: args.queueIntegrity.status,
         duplicateJobs: args.queueIntegrity.duplicateJobs ?? 0,
         stalledJobs: args.queueIntegrity.stalledJobs ?? 0,
-        failedRecoveries: args.queueIntegrity.failedRecoveries ?? 0
+        failedRecoveries: args.queueIntegrity.failedRecoveries ?? 0,
+        recentFailedRecoveries: args.queueIntegrity.recentFailedRecoveries ?? 0,
+        queuedJobs: args.queueIntegrity.queuedJobs ?? 0,
+        staleQueuedJobs: args.queueIntegrity.staleQueuedJobs ?? 0
       }
     );
   }

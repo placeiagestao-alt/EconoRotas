@@ -80,9 +80,18 @@ export function normalizeStopSourceProvider(
 }
 
 export function normalizeStopMetadata(value: unknown): StopMetadata {
+  let parsedValue = value;
+  if (typeof value === "string") {
+    try {
+      parsedValue = JSON.parse(value);
+    } catch {
+      parsedValue = {};
+    }
+  }
+
   const input =
-    value && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
+    parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue)
+      ? (parsedValue as Record<string, unknown>)
       : {};
 
   const metadata: StopMetadata = {};

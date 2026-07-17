@@ -33,6 +33,11 @@ export type ImportedRoute = {
     numberedCount: number;
     unsequencedCount: number;
   };
+  packageColumnDetected?: boolean;
+  packageSummary?: {
+    identifiedCount: number;
+    missingCount: number;
+  };
   totalRows: number;
   totalDeliveries?: number;
   groupedDeliveries?: number;
@@ -96,8 +101,23 @@ const HEADER_ALIASES = {
     "package no",
     "package id",
     "package",
+    "tracking id",
+    "tracking no",
+    "tracking code",
     "parcel number",
     "parcel id",
+    "parcel no",
+    "waybill",
+    "waybill number",
+    "waybill no",
+    "awb",
+    "awb number",
+    "shipment id",
+    "shipment number",
+    "shipment no",
+    "codigo remessa",
+    "numero remessa",
+    "numero da remessa",
     "codigo rastreio",
     "codigo de rastreio",
     "numero rastreio",
@@ -394,20 +414,79 @@ function getCell(
   return originalHeader ? row[originalHeader] : undefined;
 }
 
-function getFirstPopulatedCell(
-  row: RawSpreadsheetRow,
+function getHeaderCandidates(
   headerMap: Record<string, string>,
-  aliases: readonly string[]
+  aliases: readonly string[],
+  isFuzzyMatch: (normalizedHeader: string) => boolean
 ) {
-  for (const alias of aliases) {
-    const originalHeader = headerMap[normalizeHeader(alias)];
-    if (!originalHeader) continue;
+  const headers: string[] = [];
+  const seen = new Set<string>();
+  const addHeader = (header?: string) => {
+    if (!header || seen.has(header)) return;
+    seen.add(header);
+    headers.push(header);
+  };
 
-    const value = row[originalHeader];
+  aliases.forEach((alias) => addHeader(headerMap[normalizeHeader(alias)]));
+  Object.entries(headerMap).forEach(([normalizedHeader, originalHeader]) => {
+    if (isFuzzyMatch(normalizedHeader)) addHeader(originalHeader);
+  });
+
+  return headers;
+}
+
+function getFirstPopulatedHeaderValue(
+  row: RawSpreadsheetRow,
+  headers: string[]
+) {
+  for (const header of headers) {
+    const value = row[header];
     if (cleanText(value)) return value;
   }
 
   return undefined;
+}
+
+function isStopHeader(normalizedHeader: string) {
+  return (
+    /(?:^| )stop(?: |$)/.test(normalizedHeader) &&
+    !/(?:^| )(count|total|quantidade|qtd)(?: |$)/.test(normalizedHeader)
+  );
+}
+
+function getStopHeaderCandidates(headerMap: Record<string, string>) {
+  return getHeaderCandidates(headerMap, HEADER_ALIASES.stop, isStopHeader);
+}
+
+function isPackageIdentityHeader(normalizedHeader: string) {
+  if (
+    /(?:^| )(count|total|quantidade|qtd|peso|weight|volume|volumes|status)(?: |$)/.test(
+      normalizedHeader
+    )
+  ) {
+    return false;
+  }
+
+  return /(?:^| )(spx tn|tracking|rastreio|waybill|awb|shipment|remessa|package|pacote|parcel|encomenda)(?: |$)/.test(
+    normalizedHeader
+  );
+}
+
+function getPackageHeaderCandidates(
+  headerMap: Record<string, string>,
+  sourceProvider: StopSourceProvider
+) {
+  const aliases =
+    sourceProvider === "shopee"
+      ? SHOPEE_TRACKING_ALIASES
+      : HEADER_ALIASES.tracking;
+
+  return getHeaderCandidates(headerMap, aliases, (normalizedHeader) => {
+    if (sourceProvider === "shopee" && normalizedHeader === "codigo") {
+      return true;
+    }
+    return isPackageIdentityHeader(normalizedHeader);
+  });
 }
 
 function findHeaderByToken(headerMap: Record<string, string>, tokens: string[]) {
@@ -522,12 +601,11 @@ function buildMetadata(
   headerMap: Record<string, string>,
   sourceProvider: StopSourceProvider
 ): StopMetadata {
-  const trackingAliases =
-    sourceProvider === "shopee"
-      ? SHOPEE_TRACKING_ALIASES
-      : HEADER_ALIASES.tracking;
   const tracking = cleanText(
-    getFirstPopulatedCell(row, headerMap, trackingAliases)
+    getFirstPopulatedHeaderValue(
+      row,
+      getPackageHeaderCandidates(headerMap, sourceProvider)
+    )
   );
   const routeId = cleanText(getCell(row, headerMap, HEADER_ALIASES.routeId));
   const metadata: StopMetadata = {
@@ -830,9 +908,7 @@ function calculateImileGroupedDeliveries(input: string) {
 }
 
 function hasStopColumn(headerMap: Record<string, string>) {
-  return HEADER_ALIASES.stop.some(
-    (alias) => Boolean(headerMap[normalizeHeader(alias)])
-  );
+  return getStopHeaderCandidates(headerMap).length > 0;
 }
 
 function resolveImportSourceProvider(
@@ -852,7 +928,7 @@ function resolveImportSourceProvider(
 
 function parseStopValue(row: RawSpreadsheetRow, headerMap: Record<string, string>) {
   const raw = cleanText(
-    getFirstPopulatedCell(row, headerMap, HEADER_ALIASES.stop)
+    getFirstPopulatedHeaderValue(row, getStopHeaderCandidates(headerMap))
   );
   if (!raw || raw === "-") {
     return {
@@ -955,6 +1031,8 @@ export function parseRouteRows(
     headerMap
   );
   const stopColumnExists = hasStopColumn(headerMap);
+  const packageColumnDetected =
+    getPackageHeaderCandidates(headerMap, normalizedSourceProvider).length > 0;
   const useShopeeStop = normalizedSourceProvider === "shopee" && stopColumnExists;
   const parsedRows = rows
     .map((row, index) => {
@@ -998,6 +1076,14 @@ export function parseRouteRows(
       (stop) => stop.stopValueStatus === "unsequenced"
     ).length,
   };
+  const packageSummary = {
+    identifiedCount: parsedRows.filter(
+      (stop) => getStopPackageNumbers(stop.metadata, stop.packageNumber).length > 0
+    ).length,
+    missingCount: parsedRows.filter(
+      (stop) => getStopPackageNumbers(stop.metadata, stop.packageNumber).length === 0
+    ).length,
+  };
   const hasStopSequence = useShopeeStop && stopSummary.numberedCount > 0;
   const importedStops = parsedRows.map(({ sequence, ...stop }) => ({
     ...stop,
@@ -1018,6 +1104,8 @@ export function parseRouteRows(
     stopColumnDetected: stopColumnExists,
     stopColumnIgnored: stopColumnExists && !useShopeeStop,
     stopSummary,
+    packageColumnDetected,
+    packageSummary,
     totalRows: rows.length,
     totalDeliveries: grouped.totalDeliveries,
     groupedDeliveries: grouped.groupedDeliveries,

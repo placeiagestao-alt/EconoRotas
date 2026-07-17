@@ -429,6 +429,89 @@ describe("parseRouteRows", () => {
     expect(route.stops.map((stop) => stop.originalStop)).toEqual([2, 1]);
   });
 
+  it("recognizes extended Shopee STOP and package identity headers", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Route STOP No.": 1,
+          "Destination Address": "Rua Um, 10, Presidente Prudente, SP",
+          "SPX Tracking ID (Barcode)": "BR-TRACK-001",
+          "Package Count": 4,
+        },
+        {
+          "Route STOP No.": 2,
+          "Destination Address": "Rua Dois, 20, Presidente Prudente, SP",
+          "SPX Tracking ID (Barcode)": "BR-TRACK-002",
+          "Package Count": 2,
+        },
+      ],
+      "shopee-cabecalhos-estendidos.xlsx",
+      "generic"
+    );
+
+    expect(route.sourceProvider).toBe("shopee");
+    expect(route.stopSummary).toEqual({ numberedCount: 2, unsequencedCount: 0 });
+    expect(route.packageColumnDetected).toBe(true);
+    expect(route.packageSummary).toEqual({ identifiedCount: 2, missingCount: 0 });
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      "BR-TRACK-001",
+      "BR-TRACK-002",
+    ]);
+  });
+
+  it("uses a populated shipment identity when an earlier package column is blank", () => {
+    const route = parseRouteRows(
+      [
+        {
+          STOP: 1,
+          "Destination Address": "Rua Um, 10, Presidente Prudente, SP",
+          Waybill: "",
+          "Shipment ID": "SHIP-001",
+        },
+        {
+          STOP: 2,
+          "Destination Address": "Rua Dois, 20, Presidente Prudente, SP",
+          Waybill: "",
+          "Shipment ID": "SHIP-002",
+        },
+      ],
+      "shopee-shipment.xlsx",
+      "generic"
+    );
+
+    expect(route.packageSummary).toEqual({ identifiedCount: 2, missingCount: 0 });
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      "SHIP-001",
+      "SHIP-002",
+    ]);
+  });
+
+  it("does not mistake package quantity for package identity", () => {
+    const route = parseRouteRows(
+      [
+        {
+          STOP: 1,
+          "Destination Address": "Rua Um, 10, Presidente Prudente, SP",
+          "Package Count": 4,
+        },
+        {
+          STOP: 2,
+          "Destination Address": "Rua Dois, 20, Presidente Prudente, SP",
+          "Package Count": 2,
+        },
+      ],
+      "shopee-apenas-quantidade.xlsx",
+      "generic"
+    );
+
+    expect(route.packageColumnDetected).toBe(false);
+    expect(route.packageSummary).toEqual({ identifiedCount: 0, missingCount: 2 });
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
   it("uses a Codigo column as package identity only when STOP identifies Shopee", () => {
     const route = parseRouteRows(
       [

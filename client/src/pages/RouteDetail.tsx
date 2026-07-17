@@ -22,6 +22,7 @@ import {
   Zap,
 } from "lucide-react";
 import AddressInputSimple from "@/components/AddressInputSimple";
+import StopIdentityStrip from "@/components/StopIdentityStrip";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -3023,28 +3024,12 @@ export default function RouteDetail() {
                               <p className="font-medium leading-snug">
                                 {stop.address}
                               </p>
-                              <div className="flex flex-wrap gap-2">
-                                {identity.shopeeStopLabel && (
-                                  <p
-                                    className={
-                                      routeIsShopeeStopSequence
-                                        ? "inline-flex max-w-full rounded-lg bg-orange-500 px-3 py-1 text-base font-black text-white"
-                                        : "inline-flex max-w-full rounded-md border border-border bg-secondary/70 px-2 py-0.5 text-sm font-semibold text-foreground"
-                                    }
-                                  >
-                                    <span className="truncate">
-                                      {identity.shopeeStopLabel}
-                                    </span>
-                                  </p>
-                                )}
-                                {identity.packageLabel && (
-                                  <p className="inline-flex max-w-full rounded-md bg-primary/10 px-2 py-0.5 text-sm font-bold text-primary">
-                                    <span className="truncate">
-                                      {identity.packageLabel}
-                                    </span>
-                                  </p>
-                                )}
-                              </div>
+                              <StopIdentityStrip
+                                routePositionLabel={identity.routeStopLabel}
+                                stopLabel={identity.shopeeStopLabel}
+                                packageLabel={identity.packageLabel}
+                                className="mt-2"
+                              />
                               <p className="text-xs text-muted-foreground">
                                 {delivered
                                   ? "Entregue"
