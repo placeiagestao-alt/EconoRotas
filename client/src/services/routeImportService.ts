@@ -173,19 +173,6 @@ function normalizeImportedAddressKey(value: string) {
   return normalizeHeader(value);
 }
 
-function normalizeStopLocationKey(value: string) {
-  const parts = value
-    .split(",")
-    .map(normalizeHeader)
-    .filter(Boolean);
-
-  if (parts.length >= 2 && /^\d{1,6}[a-z]?$/.test(parts[1])) {
-    return `${parts[0]}|${parts[1]}`;
-  }
-
-  return normalizeImportedAddressKey(value);
-}
-
 function getImportedDeliveryCount(stop: Pick<ImportedStop, "deliveryCount">) {
   const count = Number(stop.deliveryCount);
   return Number.isFinite(count) && count > 0 ? Math.round(count) : 1;
@@ -243,7 +230,10 @@ function mergeGroupedStopNotes(
   return parts.join(" | ");
 }
 
-function mergeImportedStopsByAddress(stops: ImportedStop[]) {
+function mergeImportedStopsByAddress(
+  stops: ImportedStop[],
+  options: { usePositiveStopIdentity?: boolean } = {}
+) {
   type GroupState = {
     stop: ImportedStop;
     deliveryCount: number;
@@ -254,9 +244,20 @@ function mergeImportedStopsByAddress(stops: ImportedStop[]) {
 
   const groups = new Map<string, GroupState>();
   const orderedKeys: string[] = [];
+  const groupKeyByStop = new Map<number, string>();
 
   stops.forEach((stop) => {
-    const key = normalizeImportedAddressKey(stop.address) || `row-${stop.sourceRow}`;
+    const addressKey = normalizeImportedAddressKey(stop.address) || `row-${stop.sourceRow}`;
+    const stopNumber = Number(stop.originalStop ?? stop.routingStop);
+    const hasPositiveStop = Number.isFinite(stopNumber) && stopNumber > 0;
+    let key = addressKey;
+
+    if (options.usePositiveStopIdentity && hasPositiveStop) {
+      const normalizedStop = Math.round(stopNumber);
+      key = groupKeyByStop.get(normalizedStop) || addressKey;
+      groupKeyByStop.set(normalizedStop, key);
+    }
+
     let group = groups.get(key);
 
     if (!group) {
@@ -977,31 +978,6 @@ function assertValidStopValues(rows: ParsedRouteRow[]) {
       `Coluna STOP com valor invalido nas linhas ${formatSourceRows(invalidRows)}. Use numero inteiro positivo, 0, "-" ou vazio.`
     );
   }
-
-  const addressesByStop = new Map<number, Map<string, number[]>>();
-  rows.forEach((row) => {
-    if (row.stopValueStatus !== "sequenced" || !row.originalStop) return;
-    const addressKey = normalizeStopLocationKey(row.address);
-    const addressRows = addressesByStop.get(row.originalStop) ?? new Map<string, number[]>();
-    addressRows.set(addressKey, [...(addressRows.get(addressKey) ?? []), row.sourceRow]);
-    addressesByStop.set(row.originalStop, addressRows);
-  });
-
-  const conflicts = Array.from(addressesByStop.entries()).filter(
-    ([, addressRows]) => addressRows.size > 1
-  );
-  if (conflicts.length > 0) {
-    const details = conflicts
-      .slice(0, 5)
-      .map(([stop, addressRows]) => {
-        const sourceRows = Array.from(addressRows.values()).flat();
-        return `STOP ${stop} (linhas ${formatSourceRows(sourceRows)})`;
-      })
-      .join("; ");
-    throw new Error(
-      `STOP repetido em enderecos diferentes: ${details}. Corrija a planilha antes de criar a rota.`
-    );
-  }
 }
 
 function getRouteName(rows: RawSpreadsheetRow[], headerMap: Record<string, string>, fileName: string) {
@@ -1089,7 +1065,9 @@ export function parseRouteRows(
     ...stop,
     routingStop: useShopeeStop ? sequence : undefined,
   }));
-  const grouped = mergeImportedStopsByAddress(importedStops);
+  const grouped = mergeImportedStopsByAddress(importedStops, {
+    usePositiveStopIdentity: useShopeeStop,
+  });
   const stops = grouped.stops;
 
   if (stops.length < 2) {

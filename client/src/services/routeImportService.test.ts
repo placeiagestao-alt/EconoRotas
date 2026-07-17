@@ -582,26 +582,40 @@ describe("parseRouteRows", () => {
     ).toThrow("Coluna STOP com valor invalido nas linhas 3");
   });
 
-  it("rejects the same numbered STOP assigned to different addresses", () => {
-    expect(() =>
-      parseRouteRows(
-        [
-          {
-            "Destination Address": "Rua A, 10, Presidente Prudente",
-            STOP: 7,
-          },
-          {
-            "Destination Address": "Rua B, 20, Presidente Prudente",
-            STOP: 7,
-          },
-        ],
-        "stop-duplicado.xlsx",
-        "shopee"
-      )
-    ).toThrow("STOP repetido em enderecos diferentes: STOP 7");
+  it("groups a repeated STOP even when its address text varies", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua A, 10, Presidente Prudente",
+          "Tracking ID": "BR-PKG-053-A",
+          STOP: 53,
+        },
+        {
+          "Destination Address": "Rua A, 10, fundos, Presidente Prudente",
+          "Tracking ID": "BR-PKG-053-B",
+          STOP: 53,
+        },
+        {
+          "Destination Address": "Rua B, 20, Presidente Prudente",
+          "Tracking ID": "BR-PKG-054-A",
+          STOP: 54,
+        },
+      ],
+      "stop-repetido.xlsx",
+      "shopee"
+    );
+
+    expect(route.stops).toHaveLength(2);
+    expect(route.stops[0].originalStop).toBe(53);
+    expect(route.stops[0].deliveryCount).toBe(2);
+    expect(route.stops[0].metadata?.packageNumbers).toEqual([
+      "BR-PKG-053-A",
+      "BR-PKG-053-B",
+    ]);
+    expect(route.stops[0].notes).toContain("2x entregas neste endereco");
   });
 
-  it("allows the same STOP for units at the same street number", () => {
+  it("consolidates units at the same numbered STOP into one route stop", () => {
     const route = parseRouteRows(
       [
         {
@@ -612,13 +626,46 @@ describe("parseRouteRows", () => {
           "Destination Address": "Rua A, 10, apartamento 2, Presidente Prudente",
           STOP: 7,
         },
+        {
+          "Destination Address": "Rua B, 20, Presidente Prudente",
+          STOP: 8,
+        },
       ],
       "stop-mesmo-predio.xlsx",
       "shopee"
     );
 
     expect(route.stops).toHaveLength(2);
-    expect(route.stops.map((stop) => stop.originalStop)).toEqual([7, 7]);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([7, 8]);
+    expect(route.stops[0].deliveryCount).toBe(2);
+  });
+
+  it("accepts the repeated STOP pattern reported by the field spreadsheet", () => {
+    const route = parseRouteRows(
+      [
+        { "Destination Address": "Rua 53, 100", "Tracking ID": "P53-A", STOP: 53 },
+        { "Destination Address": "Rua 53, 100, casa 2", "Tracking ID": "P53-B", STOP: 53 },
+        { "Destination Address": "Rua 60, 200", "Tracking ID": "P60-A", STOP: 60 },
+        { "Destination Address": "Rua 60, 200, fundos", "Tracking ID": "P60-B", STOP: 60 },
+        { "Destination Address": "Rua 62, 300", "Tracking ID": "P62-A", STOP: 62 },
+        { "Destination Address": "Rua 62, 300, apto 1", "Tracking ID": "P62-B", STOP: 62 },
+        { "Destination Address": "Rua 62, 300, apto 2", "Tracking ID": "P62-C", STOP: 62 },
+        { "Destination Address": "Rua 65, 400", "Tracking ID": "P65-A", STOP: 65 },
+        { "Destination Address": "Rua 65, 400, bloco B", "Tracking ID": "P65-B", STOP: 65 },
+      ],
+      "rota-campo.xlsx",
+      "shopee"
+    );
+
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([53, 60, 62, 65]);
+    expect(route.stops.map((stop) => stop.deliveryCount)).toEqual([2, 2, 3, 2]);
+    expect(route.totalDeliveries).toBe(9);
+    expect(route.groupedDeliveries).toBe(5);
+    expect(route.stops[2].metadata?.packageNumbers).toEqual([
+      "P62-A",
+      "P62-B",
+      "P62-C",
+    ]);
   });
 
   it("does not treat a generic Codigo column as a package number", () => {
