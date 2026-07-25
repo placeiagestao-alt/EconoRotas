@@ -1167,7 +1167,7 @@ export default function CreateRoute() {
         importedRoute.stopSummary?.numberedCount === 0
       ) {
         toast.warning(
-          "A coluna STOP nao tem numeros positivos. A rota sera otimizada normalmente."
+          'A coluna STOP da planilha contem apenas 0, "-" ou celulas vazias. Nao ha numeros STOP para exibir; a rota sera otimizada por proximidade.'
         );
       } else if (importedRoute.sourceProvider !== "shopee") {
         toast.message("Origem sem regra STOP: a sequência será definida pela otimização da rota.");
@@ -2283,15 +2283,25 @@ export default function CreateRoute() {
                         )}
                       {importSummary.packageSummary && (
                         <span>
-                          {importSummary.packageSummary.identifiedCount} com pacote
+                          {importSummary.packageSummary.identifiedCount} entregas com pacote
                         </span>
                       )}
                       {(importSummary.packageSummary?.missingCount ?? 0) > 0 && (
                         <span>
-                          {importSummary.packageSummary?.missingCount} sem pacote
+                          {importSummary.packageSummary?.missingCount} entregas sem pacote
                         </span>
                       )}
                     </div>
+
+                    {(importSummary.stopSummary?.addressConflictCount ?? 0) > 0 && (
+                      <Alert className="border-amber-300 bg-amber-50 text-amber-950">
+                        <AlertDescription>
+                          {importSummary.stopSummary?.addressConflictCount} STOP(s) possuem
+                          enderecos diferentes na planilha. A rota pode ser criada, mas
+                          confira as paradas sinalizadas antes de sair.
+                        </AlertDescription>
+                      </Alert>
+                    )}
 
                     {importSummary.stopColumnIgnored && (
                       <Alert className="border-amber-300 bg-amber-50 text-amber-950">
@@ -2308,8 +2318,9 @@ export default function CreateRoute() {
                       !importSummary.hasStopSequence && (
                         <Alert className="border-amber-300 bg-amber-50 text-amber-950">
                           <AlertDescription>
-                            Nenhum STOP numerado foi encontrado. As paradas serao
-                            otimizadas por proximidade.
+                            A planilha nao contem nenhum STOP numerado: os valores
+                            sao 0, "-" ou vazios. O EconoRota nao inventara numeros;
+                            as paradas serao otimizadas por proximidade.
                           </AlertDescription>
                         </Alert>
                       )}

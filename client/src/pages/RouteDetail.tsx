@@ -1206,8 +1206,11 @@ export default function RouteDetail() {
         selectedStopIndex: currentIndex,
         selectedStopAddress: selectedStop?.address,
         selectedStopPackage: selectedStop
-          ? getStopDisplayLabel(selectedStop, currentIndex)
-          : undefined,
+          ? getStopPackageNumbers(
+              selectedStop.metadata,
+              selectedStop.packageNumber
+            ).join(", ") || null
+          : null,
         handledStopsExcluded: handledStopIds.length,
         locationStrategy,
         startCheckinLocation: routeStartPoint?.address ?? null,
