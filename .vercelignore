@@ -4,6 +4,8 @@
 !.env.*.example
 .data
 android
+infra/osrm/data
+ops/osrm/data
 node_modules
 coverage
 dist
