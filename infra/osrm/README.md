@@ -2,6 +2,89 @@
 
 Objetivo: hospedar OSRM proprio para remover dependencia do `router.project-osrm.org`.
 
+## Ambiente Local - Presidente Prudente
+
+O recorte local usa dados oficiais do Sudeste, Sul e Centro-Oeste. Ele cobre
+todo o raio operacional de 200 km a partir de `-51.407,-22.121`, incluindo o
+oeste paulista, o norte do Parana e o leste de Mato Grosso do Sul.
+
+O processamento usa 20 km de margem para nao cortar estradas junto a borda. O
+retangulo de extracao e `-53.540317,-24.097285,-49.273683,-20.144715`. O
+arquivo processado se chama `presidente-prudente-200km-latest.osrm` e usa o
+perfil de carro (`car.lua`).
+
+Arquivos de mapa e artefatos processados ficam em `infra/osrm/data` e nao sao
+versionados. Para subir o conjunto ja preparado no Windows/PowerShell:
+
+```powershell
+docker run -d `
+  --name econorota-osrm-presidente-prudente-200km `
+  --restart unless-stopped `
+  -p 127.0.0.1:5000:5000 `
+  -v "${PWD}/infra/osrm/data:/data:ro" `
+  osrm/osrm-backend:latest `
+  osrm-routed --algorithm mld /data/presidente-prudente-200km-latest.osrm
+```
+
+O bind em `127.0.0.1` e intencional: a porta 5000 nao deve ficar exposta na
+rede. Para reiniciar um container ja criado:
+
+```powershell
+docker restart econorota-osrm-presidente-prudente-200km
+```
+
+Como alternativa ao `docker run`, o compose aceita o recorte sem alterar o
+padrao Brasil usado no servidor. Use apenas uma das duas formas para criar o
+container:
+
+```powershell
+$env:OSRM_DATASET = "presidente-prudente-200km-latest"
+$env:OSRM_CONTAINER_NAME = "econorota-osrm-presidente-prudente-200km"
+docker compose -f infra/osrm/docker-compose.yml up -d
+```
+
+As fontes usadas para recriar esse recorte sao:
+
+```text
+https://download.geofabrik.de/south-america/brazil/sudeste-latest.osm.pbf
+https://download.geofabrik.de/south-america/brazil/sul-latest.osm.pbf
+https://download.geofabrik.de/south-america/brazil/centro-oeste-latest.osm.pbf
+```
+
+Valide os arquivos `.md5` publicados pela Geofabrik antes de processar. Depois,
+recorte cada fonte com `osmium extract --strategy=complete_ways`, usando o
+retangulo acima, mescle os tres resultados com `osmium merge` e execute:
+
+```powershell
+docker run --rm -t -v "${PWD}/infra/osrm/data:/data" osrm/osrm-backend:latest `
+  osrm-extract -p /opt/car.lua /data/presidente-prudente-200km-latest.osm.pbf
+docker run --rm -t -v "${PWD}/infra/osrm/data:/data" osrm/osrm-backend:latest `
+  osrm-partition /data/presidente-prudente-200km-latest.osrm
+docker run --rm -t -v "${PWD}/infra/osrm/data:/data" osrm/osrm-backend:latest `
+  osrm-customize /data/presidente-prudente-200km-latest.osrm
+```
+
+Validar os quatro servicos usados pelo motor:
+
+```powershell
+curl.exe "http://127.0.0.1:5000/nearest/v1/driving/-51.407,-22.121?number=1"
+curl.exe "http://127.0.0.1:5000/route/v1/driving/-51.407,-22.121;-51.395,-22.125?overview=false"
+curl.exe "http://127.0.0.1:5000/table/v1/driving/-51.407,-22.121;-51.406,-22.122;-51.395,-22.125?annotations=distance,duration"
+curl.exe "http://127.0.0.1:5000/match/v1/driving/-51.406371,-22.120858;-51.403876,-22.123135;-51.400302,-22.124113;-51.395005,-22.124998?overview=false&tidy=true"
+```
+
+Para apontar uma execucao local do backend para esse motor:
+
+```env
+OSRM_ENABLED=true
+OSRM_BASE_URL=http://127.0.0.1:5000
+OSRM_REQUIRED=true
+```
+
+Esse endereco funciona somente neste computador. A Vercel exige uma instancia
+OSRM em servidor proprio, acessivel por HTTPS; `localhost` nunca deve ser
+configurado como `OSRM_BASE_URL` de producao.
+
 ## Provisionamento Automatizado
 
 1. Criar servidor com pelo menos:
