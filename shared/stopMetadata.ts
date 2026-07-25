@@ -13,6 +13,8 @@ export type StopSourceProvider = (typeof STOP_SOURCE_PROVIDERS)[number];
 export type StopMetadata = {
   packageNumber?: string;
   packageNumbers?: string[];
+  sourceAddressVariants?: string[];
+  sourceAddressConflict?: boolean;
   trackingNumber?: string;
   recipientName?: string;
   recipientPhone?: string;
@@ -96,7 +98,13 @@ export function normalizeStopMetadata(value: unknown): StopMetadata {
 
   const metadata: StopMetadata = {};
   const stringKeys: Array<
-    keyof Omit<StopMetadata, "groupedDeliveryCount" | "packageNumbers">
+    keyof Omit<
+      StopMetadata,
+      | "groupedDeliveryCount"
+      | "packageNumbers"
+      | "sourceAddressVariants"
+      | "sourceAddressConflict"
+    >
   > = [
     "packageNumber",
     "trackingNumber",
@@ -123,6 +131,16 @@ export function normalizeStopMetadata(value: unknown): StopMetadata {
     metadata.packageNumber ??= packageNumbers[0];
   }
 
+  const sourceAddressVariants = normalizePackageNumbers(
+    input.sourceAddressVariants
+  );
+  if (sourceAddressVariants.length) {
+    metadata.sourceAddressVariants = sourceAddressVariants;
+  }
+  if (input.sourceAddressConflict === true) {
+    metadata.sourceAddressConflict = true;
+  }
+
   const groupedDeliveryCount = Number(input.groupedDeliveryCount);
   if (Number.isFinite(groupedDeliveryCount) && groupedDeliveryCount > 0) {
     metadata.groupedDeliveryCount = Math.round(groupedDeliveryCount);
@@ -146,11 +164,22 @@ export function mergeStopMetadata(
       normalized.packageNumbers,
       normalized.packageNumber
     );
+    const sourceAddressVariants = normalizePackageNumbers(
+      acc.sourceAddressVariants,
+      normalized.sourceAddressVariants
+    );
 
     return {
       ...merged,
       packageNumber: merged.packageNumber ?? packageNumbers[0],
       packageNumbers: packageNumbers.length ? packageNumbers : undefined,
+      sourceAddressVariants: sourceAddressVariants.length
+        ? sourceAddressVariants
+        : undefined,
+      sourceAddressConflict:
+        acc.sourceAddressConflict === true ||
+        normalized.sourceAddressConflict === true ||
+        undefined,
     };
   }, {});
 }

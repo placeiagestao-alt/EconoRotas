@@ -1100,6 +1100,64 @@ describe("Route endpoints", () => {
     expect(dashboard.optimizationJobs.queued).toBeGreaterThanOrEqual(1);
   });
 
+  it("processes a large preserved STOP route without depending on the queue", async () => {
+    ENV.maxSyncStops = 2;
+    ENV.bullmqRedisUrl = "";
+    const caller = appRouter.createCaller(createAuthContext(8271));
+
+    const result = await caller.routes.createAndOptimize({
+      name: "Shopee STOP acima do limite sincrono",
+      mode: "balanced",
+      respectInputSequence: true,
+      stops: [
+        {
+          address: "Rua STOP 3, Presidente Prudente - SP",
+          latitude: -22.123,
+          longitude: -51.39,
+          sequence: 0,
+          sourceProvider: "shopee",
+          originalStop: 3,
+          isUnsequencedStop: false,
+        },
+        {
+          address: "Rua STOP 1, Presidente Prudente - SP",
+          latitude: -22.121,
+          longitude: -51.389,
+          sequence: 1,
+          sourceProvider: "shopee",
+          originalStop: 1,
+          isUnsequencedStop: false,
+        },
+        {
+          address: "Rua STOP 2, Presidente Prudente - SP",
+          latitude: -22.122,
+          longitude: -51.3895,
+          sequence: 2,
+          sourceProvider: "shopee",
+          originalStop: 2,
+          isUnsequencedStop: false,
+        },
+        {
+          address: "Rua sem STOP perto da primeira, Presidente Prudente - SP",
+          latitude: -22.1212,
+          longitude: -51.3891,
+          sequence: 3,
+          sourceProvider: "shopee",
+          originalStop: 0,
+          isUnsequencedStop: true,
+        },
+      ],
+    });
+    const savedStops = await caller.stops.list({ routeId: result.route.id });
+
+    expect(result.route.status).toBe("optimized");
+    expect(result.optimization?.queued).not.toBe(true);
+    expect(result.optimization?.routingStrategy).toBe("shopee_stop_sequence");
+    expect(savedStops.map((stop: any) => Number(stop.originalStop))).toEqual([
+      1, 0, 2, 3,
+    ]);
+  });
+
   it("estimates commercial impact from corrected route metrics", async () => {
     await db.createRouteMetric({
       userId: 8220,

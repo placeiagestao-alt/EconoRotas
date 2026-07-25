@@ -32,6 +32,7 @@ export type ImportedRoute = {
   stopSummary?: {
     numberedCount: number;
     unsequencedCount: number;
+    addressConflictCount?: number;
   };
   packageColumnDetected?: boolean;
   packageSummary?: {
@@ -173,6 +174,25 @@ function normalizeImportedAddressKey(value: string) {
   return normalizeHeader(value);
 }
 
+function normalizeStopLocationKey(value: string) {
+  const parts = value
+    .split(",")
+    .map((part) => normalizeHeader(part))
+    .filter(Boolean);
+
+  if (parts.length >= 2 && /^\d{1,6}[a-z]?$/.test(parts[1])) {
+    const complementPattern =
+      /^(?:ap(?:to)?|apartamento|bloco|casa|complemento|edificio|fundos|frente|lote|loja|quadra|sala|torre|unidade)\b/;
+    const localityParts = parts
+      .slice(2)
+      .filter((part) => !complementPattern.test(part));
+
+    return [parts[0], parts[1], ...localityParts].join("|");
+  }
+
+  return normalizeImportedAddressKey(value);
+}
+
 function getImportedDeliveryCount(stop: Pick<ImportedStop, "deliveryCount">) {
   const count = Number(stop.deliveryCount);
   return Number.isFinite(count) && count > 0 ? Math.round(count) : 1;
@@ -213,9 +233,18 @@ function mergeGroupedStopNotes(
   deliveryCount: number,
   notes: string[],
   packageNumbers: string[],
-  stopLabels: string[]
+  stopLabels: string[],
+  sourceAddressConflict: boolean
 ) {
-  const parts = [`${deliveryCount}x entregas neste endereco`];
+  const parts: string[] = [];
+
+  if (deliveryCount > 1) {
+    parts.push(`${deliveryCount}x entregas neste endereco`);
+  }
+
+  if (sourceAddressConflict) {
+    parts.push("Conferir endereco: este STOP possui enderecos diferentes na planilha");
+  }
 
   if (packageNumbers.length > 1) {
     parts.push(`Pacotes: ${summarizeValues(packageNumbers)}`);
@@ -240,23 +269,42 @@ function mergeImportedStopsByAddress(
     notes: string[];
     packageNumbers: string[];
     stopLabels: string[];
+    sourceAddressVariants: string[];
+    sourceLocationKeys: Set<string>;
+    stopNumbers: Set<number>;
   };
 
   const groups = new Map<string, GroupState>();
   const orderedKeys: string[] = [];
-  const groupKeyByStop = new Map<number, string>();
+  const locationKeysByStop = new Map<number, Set<string>>();
+  const addressVariantsByStop = new Map<number, string[]>();
+
+  if (options.usePositiveStopIdentity) {
+    stops.forEach((stop) => {
+      const stopNumber = Number(stop.originalStop ?? stop.routingStop);
+      if (!Number.isFinite(stopNumber) || stopNumber <= 0) return;
+
+      const normalizedStop = Math.round(stopNumber);
+      const locationKey =
+        normalizeStopLocationKey(stop.address) ||
+        normalizeImportedAddressKey(stop.address) ||
+        `row-${stop.sourceRow}`;
+      const locationKeys = locationKeysByStop.get(normalizedStop) || new Set<string>();
+      const addressVariants = addressVariantsByStop.get(normalizedStop) || [];
+
+      locationKeys.add(locationKey);
+      pushUniqueText(addressVariants, stop.address);
+      locationKeysByStop.set(normalizedStop, locationKeys);
+      addressVariantsByStop.set(normalizedStop, addressVariants);
+    });
+  }
 
   stops.forEach((stop) => {
     const addressKey = normalizeImportedAddressKey(stop.address) || `row-${stop.sourceRow}`;
+    const locationKey = normalizeStopLocationKey(stop.address) || addressKey;
     const stopNumber = Number(stop.originalStop ?? stop.routingStop);
     const hasPositiveStop = Number.isFinite(stopNumber) && stopNumber > 0;
-    let key = addressKey;
-
-    if (options.usePositiveStopIdentity && hasPositiveStop) {
-      const normalizedStop = Math.round(stopNumber);
-      key = groupKeyByStop.get(normalizedStop) || addressKey;
-      groupKeyByStop.set(normalizedStop, key);
-    }
+    const key = locationKey;
 
     let group = groups.get(key);
 
@@ -270,6 +318,9 @@ function mergeImportedStopsByAddress(
         notes: [],
         packageNumbers: [],
         stopLabels: [],
+        sourceAddressVariants: [],
+        sourceLocationKeys: new Set<string>(),
+        stopNumbers: new Set<number>(),
       };
       groups.set(key, group);
       orderedKeys.push(key);
@@ -279,6 +330,13 @@ function mergeImportedStopsByAddress(
     pushUniqueText(group.notes, stop.notes);
     pushUniqueText(group.packageNumbers, getImportedPackageNumber(stop));
     pushUniqueText(group.stopLabels, getImportedStopLabel(stop));
+    pushUniqueText(group.sourceAddressVariants, stop.address);
+    if (locationKey) {
+      group.sourceLocationKeys.add(locationKey);
+    }
+    if (hasPositiveStop) {
+      group.stopNumbers.add(Math.round(stopNumber));
+    }
 
     if (!hasImportedCoordinates(group.stop) && hasImportedCoordinates(stop)) {
       group.stop.latitude = stop.latitude;
@@ -315,6 +373,20 @@ function mergeImportedStopsByAddress(
   const groupedStops = orderedKeys.map((key) => {
     const group = groups.get(key)!;
     const deliveryCount = Math.max(1, group.deliveryCount);
+    const conflictingStopNumbers = Array.from(group.stopNumbers).filter(
+      (stopNumber) => (locationKeysByStop.get(stopNumber)?.size || 0) > 1
+    );
+    const sourceAddressConflict =
+      group.sourceLocationKeys.size > 1 || conflictingStopNumbers.length > 0;
+    const conflictAddressVariants = conflictingStopNumbers.flatMap(
+      (stopNumber) => addressVariantsByStop.get(stopNumber) || []
+    );
+    const sourceAddressVariants: string[] = [];
+
+    (sourceAddressConflict ? conflictAddressVariants : group.sourceAddressVariants).forEach(
+      (address) => pushUniqueText(sourceAddressVariants, address)
+    );
+
     const stop = {
       ...group.stop,
       deliveryCount: deliveryCount > 1 ? deliveryCount : group.stop.deliveryCount,
@@ -329,14 +401,21 @@ function mergeImportedStopsByAddress(
           deliveryCount > 1
             ? deliveryCount
             : group.stop.metadata?.groupedDeliveryCount,
+        sourceAddressVariants:
+          sourceAddressVariants.length > 1
+            ? sourceAddressVariants
+            : group.stop.metadata?.sourceAddressVariants,
+        sourceAddressConflict:
+          sourceAddressConflict || group.stop.metadata?.sourceAddressConflict || undefined,
       },
       notes:
-        deliveryCount > 1
+        deliveryCount > 1 || sourceAddressConflict
           ? mergeGroupedStopNotes(
               deliveryCount,
               group.notes,
               group.packageNumbers,
-              group.stopLabels
+              group.stopLabels,
+              sourceAddressConflict
             )
           : group.notes[0] || group.stop.notes,
     };
@@ -1046,12 +1125,6 @@ export function parseRouteRows(
     assertValidStopValues(parsedRows);
   }
 
-  const stopSummary = {
-    numberedCount: parsedRows.filter((stop) => stop.stopValueStatus === "sequenced").length,
-    unsequencedCount: parsedRows.filter(
-      (stop) => stop.stopValueStatus === "unsequenced"
-    ).length,
-  };
   const packageSummary = {
     identifiedCount: parsedRows.filter(
       (stop) => getStopPackageNumbers(stop.metadata, stop.packageNumber).length > 0
@@ -1060,7 +1133,6 @@ export function parseRouteRows(
       (stop) => getStopPackageNumbers(stop.metadata, stop.packageNumber).length === 0
     ).length,
   };
-  const hasStopSequence = useShopeeStop && stopSummary.numberedCount > 0;
   const importedStops = parsedRows.map(({ sequence, ...stop }) => ({
     ...stop,
     routingStop: useShopeeStop ? sequence : undefined,
@@ -1069,6 +1141,19 @@ export function parseRouteRows(
     usePositiveStopIdentity: useShopeeStop,
   });
   const stops = grouped.stops;
+  const addressConflictCount = new Set(
+    stops
+      .filter((stop) => stop.metadata?.sourceAddressConflict === true)
+      .map((stop) => Number(stop.originalStop))
+      .filter((stopNumber) => Number.isFinite(stopNumber) && stopNumber > 0)
+      .map((stopNumber) => Math.round(stopNumber))
+  ).size;
+  const stopSummary = {
+    numberedCount: stops.filter((stop) => Number(stop.originalStop) > 0).length,
+    unsequencedCount: stops.filter((stop) => stop.isUnsequencedStop === true).length,
+    ...(addressConflictCount > 0 ? { addressConflictCount } : {}),
+  };
+  const hasStopSequence = useShopeeStop && stopSummary.numberedCount > 0;
 
   if (stops.length < 2) {
     throw new Error("A planilha precisa ter pelo menos 2 enderecos unicos validos.");

@@ -883,6 +883,15 @@ function normalizeStopMetadata(value) {
     metadata.packageNumbers = packageNumbers;
     metadata.packageNumber ??= packageNumbers[0];
   }
+  const sourceAddressVariants = normalizePackageNumbers(
+    input.sourceAddressVariants
+  );
+  if (sourceAddressVariants.length) {
+    metadata.sourceAddressVariants = sourceAddressVariants;
+  }
+  if (input.sourceAddressConflict === true) {
+    metadata.sourceAddressConflict = true;
+  }
   const groupedDeliveryCount = Number(input.groupedDeliveryCount);
   if (Number.isFinite(groupedDeliveryCount) && groupedDeliveryCount > 0) {
     metadata.groupedDeliveryCount = Math.round(groupedDeliveryCount);
@@ -2475,7 +2484,7 @@ async function createRoute(userId, data) {
     }
     requireConfiguredDatabase();
   }
-  await db.insert(routes).values({
+  const inserted = await db.insert(routes).values({
     userId,
     name: data.name,
     description: data.description ?? null,
@@ -2489,8 +2498,10 @@ async function createRoute(userId, data) {
     endLatitude: data.endLatitude !== void 0 ? String(data.endLatitude) : null,
     endLongitude: data.endLongitude !== void 0 ? String(data.endLongitude) : null,
     status: "draft"
-  });
-  const result = await db.select().from(routes).where(eq(routes.userId, userId)).orderBy(desc(routes.createdAt)).limit(1);
+  }).$returningId();
+  const insertedId = inserted[0]?.id;
+  if (!insertedId) return null;
+  const result = await db.select().from(routes).where(and(eq(routes.id, insertedId), eq(routes.userId, userId))).limit(1);
   return result[0] || null;
 }
 async function getRouteById(routeId, userId) {
@@ -12003,7 +12014,33 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       message: "A rota precisa ter pelo menos 2 paradas para otimizar."
     });
   }
-  if (!options?.allowLargeSync && routeStops.length > ENV.maxSyncStops) {
+  const exceedsSynchronousOptimizationLimit = !options?.allowLargeSync && routeStops.length > ENV.maxSyncStops;
+  if (exceedsSynchronousOptimizationLimit && preserveShopeeStopSequence) {
+    await createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "shopee_stop_sequence_sync_bypass",
+      severity: "info",
+      source: "routes.optimize",
+      title: "Sequencia STOP processada sem fila",
+      message: "A rota excede o limite da otimizacao sincrona, mas pode ser processada diretamente porque a sequencia STOP sera preservada.",
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        stopCount: routeStops.length,
+        maxSyncStops: ENV.maxSyncStops,
+        respectInputSequence: true,
+        auditPolicy,
+        routingStrategy: getRoutingStrategy(auditPolicy)
+      }
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record STOP sequence queue bypass:", error);
+    });
+  }
+  if (exceedsSynchronousOptimizationLimit && !preserveShopeeStopSequence) {
     const job = await createOptimizationJob({
       routeId,
       userId,

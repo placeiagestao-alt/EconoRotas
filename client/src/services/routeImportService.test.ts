@@ -612,7 +612,96 @@ describe("parseRouteRows", () => {
       "BR-PKG-053-A",
       "BR-PKG-053-B",
     ]);
+    expect(route.stops[0].metadata?.sourceAddressVariants).toEqual([
+      "Rua A, 10, Presidente Prudente",
+      "Rua A, 10, fundos, Presidente Prudente",
+    ]);
+    expect(route.stops[0].metadata?.sourceAddressConflict).toBeUndefined();
+    expect(route.stopSummary).toEqual({ numberedCount: 2, unsequencedCount: 0 });
     expect(route.stops[0].notes).toContain("2x entregas neste endereco");
+  });
+
+  it("flags a repeated STOP that points to genuinely different addresses", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua A, 10, Presidente Prudente",
+          "Tracking ID": "BR-PKG-007-A",
+          STOP: 7,
+        },
+        {
+          "Destination Address": "Rua B, 20, Presidente Prudente",
+          "Tracking ID": "BR-PKG-007-B",
+          STOP: 7,
+        },
+        {
+          "Destination Address": "Rua C, 30, Presidente Prudente",
+          "Tracking ID": "BR-PKG-008-A",
+          STOP: 8,
+        },
+      ],
+      "stop-enderecos-divergentes.xlsx",
+      "shopee"
+    );
+
+    expect(route.stops).toHaveLength(3);
+    expect(route.stops.map((stop) => stop.address)).toEqual([
+      "Rua A, 10, Presidente Prudente",
+      "Rua B, 20, Presidente Prudente",
+      "Rua C, 30, Presidente Prudente",
+    ]);
+    expect(route.stops[0].metadata?.sourceAddressConflict).toBe(true);
+    expect(route.stops[1].metadata?.sourceAddressConflict).toBe(true);
+    expect(route.stops[2].metadata?.sourceAddressConflict).toBeUndefined();
+    expect(route.stops[0].metadata?.sourceAddressVariants).toEqual([
+      "Rua A, 10, Presidente Prudente",
+      "Rua B, 20, Presidente Prudente",
+    ]);
+    expect(route.stops[1].metadata?.sourceAddressVariants).toEqual([
+      "Rua A, 10, Presidente Prudente",
+      "Rua B, 20, Presidente Prudente",
+    ]);
+    expect(route.stops[0].metadata?.packageNumbers).toEqual(["BR-PKG-007-A"]);
+    expect(route.stops[1].metadata?.packageNumbers).toEqual(["BR-PKG-007-B"]);
+    expect(route.stops[0].notes).toContain(
+      "Conferir endereco: este STOP possui enderecos diferentes na planilha"
+    );
+    expect(route.stops[1].notes).toContain(
+      "Conferir endereco: este STOP possui enderecos diferentes na planilha"
+    );
+    expect(route.stopSummary).toEqual({
+      numberedCount: 3,
+      unsequencedCount: 0,
+      addressConflictCount: 1,
+    });
+  });
+
+  it("preserves packages when the Shopee STOP column contains only dashes", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address": "Rua A, 10, Presidente Prudente",
+          "SPX TN": "BR-PKG-001",
+          Stop: "-",
+        },
+        {
+          "Destination Address": "Rua B, 20, Presidente Prudente",
+          "SPX TN": "BR-PKG-002",
+          Stop: "-",
+        },
+      ],
+      "shopee-sem-stop.xlsx",
+      "shopee"
+    );
+
+    expect(route.hasStopSequence).toBe(false);
+    expect(route.stopSummary).toEqual({ numberedCount: 0, unsequencedCount: 2 });
+    expect(route.packageSummary).toEqual({ identifiedCount: 2, missingCount: 0 });
+    expect(route.stops.map((stop) => stop.packageNumber)).toEqual([
+      "BR-PKG-001",
+      "BR-PKG-002",
+    ]);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([0, 0]);
   });
 
   it("consolidates units at the same numbered STOP into one route stop", () => {
@@ -661,6 +750,7 @@ describe("parseRouteRows", () => {
     expect(route.stops.map((stop) => stop.deliveryCount)).toEqual([2, 2, 3, 2]);
     expect(route.totalDeliveries).toBe(9);
     expect(route.groupedDeliveries).toBe(5);
+    expect(route.stopSummary).toEqual({ numberedCount: 4, unsequencedCount: 0 });
     expect(route.stops[2].metadata?.packageNumbers).toEqual([
       "P62-A",
       "P62-B",

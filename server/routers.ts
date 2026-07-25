@@ -1317,7 +1317,37 @@ export async function optimizeUserRoute(
     });
   }
 
-  if (!options?.allowLargeSync && routeStops.length > ENV.maxSyncStops) {
+  const exceedsSynchronousOptimizationLimit =
+    !options?.allowLargeSync && routeStops.length > ENV.maxSyncStops;
+
+  if (exceedsSynchronousOptimizationLimit && preserveShopeeStopSequence) {
+    await db.createOperationalEvent({
+      userId,
+      routeId,
+      stopId: null,
+      type: "shopee_stop_sequence_sync_bypass",
+      severity: "info",
+      source: "routes.optimize",
+      title: "Sequencia STOP processada sem fila",
+      message:
+        "A rota excede o limite da otimizacao sincrona, mas pode ser processada diretamente porque a sequencia STOP sera preservada.",
+      runtime: null,
+      url: null,
+      userAgent: null,
+      appVersion: null,
+      metadata: {
+        stopCount: routeStops.length,
+        maxSyncStops: ENV.maxSyncStops,
+        respectInputSequence: true,
+        auditPolicy,
+        routingStrategy: getRoutingStrategy(auditPolicy),
+      },
+    }).catch((error) => {
+      console.warn("[Routes] Failed to record STOP sequence queue bypass:", error);
+    });
+  }
+
+  if (exceedsSynchronousOptimizationLimit && !preserveShopeeStopSequence) {
     const job = await db.createOptimizationJob({
       routeId,
       userId,

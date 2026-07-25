@@ -2254,7 +2254,7 @@ export async function createRoute(
     requireConfiguredDatabase();
   }
 
-  await db.insert(routes).values({
+  const inserted = await db.insert(routes).values({
     userId,
     name: data.name,
     description: data.description ?? null,
@@ -2272,14 +2272,15 @@ export async function createRoute(
     endLongitude:
       data.endLongitude !== undefined ? String(data.endLongitude) : null,
     status: "draft",
-  });
+  }).$returningId();
 
-  // Fetch the latest created route for this user
+  const insertedId = inserted[0]?.id;
+  if (!insertedId) return null;
+
   const result = await db
     .select()
     .from(routes)
-    .where(eq(routes.userId, userId))
-    .orderBy(desc(routes.createdAt))
+    .where(and(eq(routes.id, insertedId), eq(routes.userId, userId)))
     .limit(1);
 
   return result[0] || null;
