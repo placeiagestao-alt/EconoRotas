@@ -180,14 +180,29 @@ function normalizeStopLocationKey(value: string) {
     .map((part) => normalizeHeader(part))
     .filter(Boolean);
 
-  if (parts.length >= 2 && /^\d{1,6}[a-z]?$/.test(parts[1])) {
+  const houseNumberMatch = parts[1]?.match(
+    /^(?:n(?:umero)?\s+)?(\d{1,6}[a-z]?)\b/
+  );
+
+  if (parts.length >= 2 && houseNumberMatch) {
+    const street = parts[0];
+    const houseNumber = houseNumberMatch[1];
+    const postalCode = parts
+      .slice(2)
+      .find((part) => /^\d{5}\s?\d{3}$/.test(part))
+      ?.replace(/\D/g, "");
+
+    if (postalCode) {
+      return [street, houseNumber, postalCode].join("|");
+    }
+
     const complementPattern =
-      /^(?:ap(?:to)?|apartamento|bloco|casa|complemento|edificio|fundos|frente|lote|loja|quadra|sala|torre|unidade)\b/;
+      /^(?:ap(?:artamento|to|ta)?\s*\d*|aparentemente\b|bl(?:oco)?\s*\d*|casa\b|complemento\b|cond(?:ominio)?\b|edificio\b|fundos\b|frente\b|lote\b|loja\b|quadra\b|res(?:idencial)?\b|sala\b|torre\b|unidade\b)/;
     const localityParts = parts
       .slice(2)
       .filter((part) => !complementPattern.test(part));
 
-    return [parts[0], parts[1], ...localityParts].join("|");
+    return [street, houseNumber, ...localityParts].join("|");
   }
 
   return normalizeImportedAddressKey(value);

@@ -116,11 +116,15 @@ function getRouteOperationalOutcome(
   const nearbyStopSkippedCount = audit
     ? countAuditIssues(audit, "nearby_stop_skipped")
     : 0;
+  const roadMetricsUnavailable =
+    !structuralAuditOnly && options.usedRoadMetrics === false;
   const status: RouteOperationalStatus = structuralAuditOnly
     ? "shopee_stop_sequence"
     : audit?.status === "critical"
       ? "blocked"
-      : remainingCoherenceIssues > 0 || nearbyStopSkippedCount > 0
+      : roadMetricsUnavailable ||
+          remainingCoherenceIssues > 0 ||
+          nearbyStopSkippedCount > 0
         ? "attention_strong"
         : audit?.status === "attention"
           ? "optimized_attention"
@@ -132,7 +136,9 @@ function getRouteOperationalOutcome(
       status === "shopee_stop_sequence"
         ? "Sequencia STOP Shopee"
         : status === "attention_strong"
-          ? "Atencao forte"
+          ? roadMetricsUnavailable
+            ? "Sem calculo por ruas"
+            : "Atencao forte"
           : status === "optimized_attention"
             ? "Otimizada com atencao"
             : status === "blocked"
@@ -148,6 +154,8 @@ function getRouteOperationalOutcome(
     auditScore: audit?.score ?? null,
     auditIssueCount: audit?.issueCount ?? null,
     usedRoadMetrics: options.usedRoadMetrics ?? null,
+    roadMetricsVerified:
+      structuralAuditOnly ? null : options.usedRoadMetrics ?? null,
     commerciallySatisfactory: status === "optimized" || status === "optimized_attention",
     sequenceCoherenceVerified: !coherenceAuditSkipped && remainingCoherenceIssues === 0,
   };
@@ -183,6 +191,10 @@ function getRouteOperationalOutcomeFromMetadata(
         readBooleanMetadata(metadata, "commerciallySatisfactory") ?? null,
       sequenceCoherenceVerified:
         readBooleanMetadata(metadata, "sequenceCoherenceVerified") ?? null,
+      roadMetricsVerified:
+        readBooleanMetadata(metadata, "roadMetricsVerified") ??
+        readBooleanMetadata(metadata, "auditUsedRoadMetrics") ??
+        null,
     };
   }
 
@@ -194,6 +206,7 @@ function getRouteOperationalOutcomeFromMetadata(
     coherenceAuditSkipped: false,
     commerciallySatisfactory: null,
     sequenceCoherenceVerified: null,
+    roadMetricsVerified: null,
   };
 }
 
@@ -1473,6 +1486,7 @@ export async function optimizeUserRoute(
         operationalStatusLabel: "Na fila de otimizacao",
         commerciallySatisfactory: false,
         sequenceCoherenceVerified: false,
+        roadMetricsVerified: null,
         remainingCoherenceIssues: null,
       };
     }
@@ -2380,6 +2394,7 @@ export async function optimizeUserRoute(
         operationalStatusLabel: finalOperationalOutcome.label,
         commerciallySatisfactory: finalOperationalOutcome.commerciallySatisfactory,
         sequenceCoherenceVerified: finalOperationalOutcome.sequenceCoherenceVerified,
+        roadMetricsVerified: finalOperationalOutcome.roadMetricsVerified,
         remainingCoherenceIssues: finalOperationalOutcome.remainingCoherenceIssues,
       },
     }).catch((error) => {
@@ -2522,6 +2537,7 @@ export async function optimizeUserRoute(
     operationalStatusLabel: finalOperationalOutcome.label,
     commerciallySatisfactory: finalOperationalOutcome.commerciallySatisfactory,
     sequenceCoherenceVerified: finalOperationalOutcome.sequenceCoherenceVerified,
+    roadMetricsVerified: finalOperationalOutcome.roadMetricsVerified,
     remainingCoherenceIssues: finalOperationalOutcome.remainingCoherenceIssues,
   };
 }
@@ -3427,6 +3443,7 @@ export const appRouter = router({
             operationalStatusLabel: operationalOutcome.label,
             commerciallySatisfactory: operationalOutcome.commerciallySatisfactory,
             sequenceCoherenceVerified: operationalOutcome.sequenceCoherenceVerified,
+            roadMetricsVerified: operationalOutcome.roadMetricsVerified,
             remainingCoherenceIssues: operationalOutcome.remainingCoherenceIssues,
             lastOptimizationEventId: latestOptimizationEvent?.id ?? null,
             staleOptimizationContext: !hasFreshOptimizationContext && Boolean(latestOptimizationEvent),
@@ -3511,6 +3528,7 @@ export const appRouter = router({
               operationalStatusLabel: optimized.operationalStatusLabel,
               commerciallySatisfactory: optimized.commerciallySatisfactory,
               sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
+              roadMetricsVerified: optimized.roadMetricsVerified,
               remainingCoherenceIssues: optimized.remainingCoherenceIssues,
             },
           });
@@ -3645,6 +3663,7 @@ export const appRouter = router({
             operationalStatusLabel: optimized.operationalStatusLabel,
             commerciallySatisfactory: optimized.commerciallySatisfactory,
             sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
+            roadMetricsVerified: optimized.roadMetricsVerified,
             remainingCoherenceIssues: optimized.remainingCoherenceIssues,
           },
         });
@@ -3730,6 +3749,7 @@ export const appRouter = router({
             operationalStatusLabel: optimized.operationalStatusLabel,
             commerciallySatisfactory: optimized.commerciallySatisfactory,
             sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
+            roadMetricsVerified: optimized.roadMetricsVerified,
             remainingCoherenceIssues: optimized.remainingCoherenceIssues,
           },
         });

@@ -409,6 +409,44 @@ describe("Route endpoints", () => {
     expect(outcome.remainingCoherenceIssues).toBe(0);
   });
 
+  it("does not approve a geographic fallback as a road-optimized route", () => {
+    const outcome = __routeOptimizationTestHooks.getRouteOperationalOutcome(
+      {
+        status: "attention" as const,
+        score: 82,
+        quality: "good" as const,
+        stopCount: 4,
+        issueCount: 1,
+        criticalCount: 0,
+        warningCount: 1,
+        totalDistanceKm: 4,
+        maxLegKm: 1,
+        clusterMetrics: {
+          clusterCount: 1,
+          averageRadiusKm: 1,
+          maxRadiusKm: 1,
+          spreadClusters: [],
+        },
+        issues: [
+          {
+            type: "osrm_fallback" as const,
+            severity: "high" as const,
+            title: "Metrica rodoviaria indisponivel",
+            message: "A rota foi estimada por distancia geografica.",
+          },
+        ],
+      },
+      null,
+      { usedRoadMetrics: false }
+    );
+
+    expect(outcome.status).toBe("attention_strong");
+    expect(outcome.label).toBe("Sem calculo por ruas");
+    expect(outcome.roadMetricsVerified).toBe(false);
+    expect(outcome.commerciallySatisfactory).toBe(false);
+    expect(outcome.sequenceCoherenceVerified).toBe(true);
+  });
+
   it("prioritizes high-impact regional issues before small nearby fixes in the global audit plan", () => {
     const plan = __routeOptimizationTestHooks.buildBatchAuditRepairPlan({
       status: "attention" as const,
@@ -1053,6 +1091,9 @@ describe("Route endpoints", () => {
     ).toBe(true);
     expect(result.optimization?.auditSource).toBe("geo-default");
     expect(result.optimization?.metadata?.partitioned).toBe(true);
+    expect(result.optimization?.operationalStatus).toBe("attention_strong");
+    expect(result.optimization?.commerciallySatisfactory).toBe(false);
+    expect(result.optimization?.sequenceCoherenceVerified).toBe(true);
   });
 
   it("queues large routes instead of optimizing them synchronously", async () => {

@@ -11199,10 +11199,11 @@ function getRouteOperationalOutcome(audit, auditPolicy, options = {}) {
   const coherenceAuditSkipped = structuralAuditOnly;
   const remainingCoherenceIssues = audit ? countRemainingCoherenceIssues(audit) : 0;
   const nearbyStopSkippedCount = audit ? countAuditIssues(audit, "nearby_stop_skipped") : 0;
-  const status = structuralAuditOnly ? "shopee_stop_sequence" : audit?.status === "critical" ? "blocked" : remainingCoherenceIssues > 0 || nearbyStopSkippedCount > 0 ? "attention_strong" : audit?.status === "attention" ? "optimized_attention" : "optimized";
+  const roadMetricsUnavailable = !structuralAuditOnly && options.usedRoadMetrics === false;
+  const status = structuralAuditOnly ? "shopee_stop_sequence" : audit?.status === "critical" ? "blocked" : roadMetricsUnavailable || remainingCoherenceIssues > 0 || nearbyStopSkippedCount > 0 ? "attention_strong" : audit?.status === "attention" ? "optimized_attention" : "optimized";
   return {
     status,
-    label: status === "shopee_stop_sequence" ? "Sequencia STOP Shopee" : status === "attention_strong" ? "Atencao forte" : status === "optimized_attention" ? "Otimizada com atencao" : status === "blocked" ? "Bloqueada pelo fiscal" : "Otimizada",
+    label: status === "shopee_stop_sequence" ? "Sequencia STOP Shopee" : status === "attention_strong" ? roadMetricsUnavailable ? "Sem calculo por ruas" : "Atencao forte" : status === "optimized_attention" ? "Otimizada com atencao" : status === "blocked" ? "Bloqueada pelo fiscal" : "Otimizada",
     routingStrategy,
     structuralAuditOnly,
     coherenceAuditSkipped,
@@ -11213,6 +11214,7 @@ function getRouteOperationalOutcome(audit, auditPolicy, options = {}) {
     auditScore: audit?.score ?? null,
     auditIssueCount: audit?.issueCount ?? null,
     usedRoadMetrics: options.usedRoadMetrics ?? null,
+    roadMetricsVerified: structuralAuditOnly ? null : options.usedRoadMetrics ?? null,
     commerciallySatisfactory: status === "optimized" || status === "optimized_attention",
     sequenceCoherenceVerified: !coherenceAuditSkipped && remainingCoherenceIssues === 0
   };
@@ -11229,7 +11231,8 @@ function getRouteOperationalOutcomeFromMetadata(route, metadata) {
       structuralAuditOnly: readBooleanMetadata(metadata, "structuralAuditOnly") ?? false,
       coherenceAuditSkipped: readBooleanMetadata(metadata, "coherenceAuditSkipped") ?? false,
       commerciallySatisfactory: readBooleanMetadata(metadata, "commerciallySatisfactory") ?? null,
-      sequenceCoherenceVerified: readBooleanMetadata(metadata, "sequenceCoherenceVerified") ?? null
+      sequenceCoherenceVerified: readBooleanMetadata(metadata, "sequenceCoherenceVerified") ?? null,
+      roadMetricsVerified: readBooleanMetadata(metadata, "roadMetricsVerified") ?? readBooleanMetadata(metadata, "auditUsedRoadMetrics") ?? null
     };
   }
   return {
@@ -11239,7 +11242,8 @@ function getRouteOperationalOutcomeFromMetadata(route, metadata) {
     structuralAuditOnly: false,
     coherenceAuditSkipped: false,
     commerciallySatisfactory: null,
-    sequenceCoherenceVerified: null
+    sequenceCoherenceVerified: null,
+    roadMetricsVerified: null
   };
 }
 var imileCredentialInput = z2.object({
@@ -12162,6 +12166,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         operationalStatusLabel: "Na fila de otimizacao",
         commerciallySatisfactory: false,
         sequenceCoherenceVerified: false,
+        roadMetricsVerified: null,
         remainingCoherenceIssues: null
       };
     }
@@ -12923,6 +12928,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         operationalStatusLabel: finalOperationalOutcome.label,
         commerciallySatisfactory: finalOperationalOutcome.commerciallySatisfactory,
         sequenceCoherenceVerified: finalOperationalOutcome.sequenceCoherenceVerified,
+        roadMetricsVerified: finalOperationalOutcome.roadMetricsVerified,
         remainingCoherenceIssues: finalOperationalOutcome.remainingCoherenceIssues
       }
     }).catch((error) => {
@@ -13048,6 +13054,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     operationalStatusLabel: finalOperationalOutcome.label,
     commerciallySatisfactory: finalOperationalOutcome.commerciallySatisfactory,
     sequenceCoherenceVerified: finalOperationalOutcome.sequenceCoherenceVerified,
+    roadMetricsVerified: finalOperationalOutcome.roadMetricsVerified,
     remainingCoherenceIssues: finalOperationalOutcome.remainingCoherenceIssues
   };
 }
@@ -13825,6 +13832,7 @@ var appRouter = router({
           operationalStatusLabel: operationalOutcome.label,
           commerciallySatisfactory: operationalOutcome.commerciallySatisfactory,
           sequenceCoherenceVerified: operationalOutcome.sequenceCoherenceVerified,
+          roadMetricsVerified: operationalOutcome.roadMetricsVerified,
           remainingCoherenceIssues: operationalOutcome.remainingCoherenceIssues,
           lastOptimizationEventId: latestOptimizationEvent?.id ?? null,
           staleOptimizationContext: !hasFreshOptimizationContext && Boolean(latestOptimizationEvent)
@@ -13905,6 +13913,7 @@ var appRouter = router({
             operationalStatusLabel: optimized.operationalStatusLabel,
             commerciallySatisfactory: optimized.commerciallySatisfactory,
             sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
+            roadMetricsVerified: optimized.roadMetricsVerified,
             remainingCoherenceIssues: optimized.remainingCoherenceIssues
           }
         });
@@ -14025,6 +14034,7 @@ var appRouter = router({
           operationalStatusLabel: optimized.operationalStatusLabel,
           commerciallySatisfactory: optimized.commerciallySatisfactory,
           sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
+          roadMetricsVerified: optimized.roadMetricsVerified,
           remainingCoherenceIssues: optimized.remainingCoherenceIssues
         }
       });
@@ -14102,6 +14112,7 @@ var appRouter = router({
           operationalStatusLabel: optimized.operationalStatusLabel,
           commerciallySatisfactory: optimized.commerciallySatisfactory,
           sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
+          roadMetricsVerified: optimized.roadMetricsVerified,
           remainingCoherenceIssues: optimized.remainingCoherenceIssues
         }
       });

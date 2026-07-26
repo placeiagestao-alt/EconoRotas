@@ -729,6 +729,94 @@ describe("parseRouteRows", () => {
     expect(route.stops[0].deliveryCount).toBe(2);
   });
 
+  it("consolidates condominium units by street, number and postal code", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address":
+            "Avenida Presidente Juscelino Kubitschek, 7664, Res. Atalaia BL 09 AP 903, Jardim Jabaquara, Presidente Prudente, 19033-390",
+          "Tracking ID": "BR-CONDO-079-A",
+          STOP: 79,
+        },
+        {
+          "Destination Address":
+            "Avenida Presidente Juscelino Kubitschek, 7664, Cond. Atalaia/Bloco 06/AP 624, Jardim Guanabara, Presidente Prudente, 19033-390",
+          "Tracking ID": "BR-CONDO-079-B",
+          STOP: 79,
+        },
+        {
+          "Destination Address":
+            "Avenida Presidente Juscelino Kubitschek, 7664, Apta1131, Jardim Guanabara, Presidente Prudente, 19033-390",
+          "Tracking ID": "BR-CONDO-079-C",
+          STOP: 79,
+        },
+        {
+          "Destination Address":
+            "Avenida Presidente Juscelino Kubitschek, 7899, Aparentemente 33 bloco 3, Jardim Guanabara, Presidente Prudente, 19033-390",
+          "Tracking ID": "BR-CONDO-078-A",
+          STOP: 78,
+        },
+        {
+          "Destination Address":
+            "Avenida Presidente Juscelino Kubitschek, 7899, BL 05 Apto 14 Res. Acacias, Jardim Guanabara, Presidente Prudente, 19033-390",
+          "Tracking ID": "BR-CONDO-078-B",
+          STOP: 78,
+        },
+        {
+          "Destination Address":
+            "Avenida Presidente Juscelino Kubitschek, 7899, Condominio Acacias BL 2 Apto 13, Jardim Guanabara, Presidente Prudente, 19033-390",
+          "Tracking ID": "BR-CONDO-078-C",
+          STOP: 78,
+        },
+      ],
+      "condominios-campo.xlsx",
+      "shopee"
+    );
+
+    expect(route.stops).toHaveLength(2);
+    expect(route.stops.map((stop) => stop.originalStop)).toEqual([79, 78]);
+    expect(route.stops.map((stop) => stop.deliveryCount)).toEqual([3, 3]);
+    expect(route.stops[0].metadata?.packageNumbers).toEqual([
+      "BR-CONDO-079-A",
+      "BR-CONDO-079-B",
+      "BR-CONDO-079-C",
+    ]);
+    expect(route.stops[1].metadata?.packageNumbers).toEqual([
+      "BR-CONDO-078-A",
+      "BR-CONDO-078-B",
+      "BR-CONDO-078-C",
+    ]);
+    expect(route.stops[0].metadata?.sourceAddressConflict).toBeUndefined();
+    expect(route.stops[1].metadata?.sourceAddressConflict).toBeUndefined();
+    expect(route.totalDeliveries).toBe(6);
+    expect(route.groupedDeliveries).toBe(4);
+  });
+
+  it("keeps equal street numbers separate when postal codes differ", () => {
+    const route = parseRouteRows(
+      [
+        {
+          "Destination Address":
+            "Rua das Flores, 100, Centro, Cidade A, 19000-001",
+          "Tracking ID": "BR-CIDADE-A",
+          STOP: 90,
+        },
+        {
+          "Destination Address":
+            "Rua das Flores, 100, Centro, Cidade B, 19000-002",
+          "Tracking ID": "BR-CIDADE-B",
+          STOP: 90,
+        },
+      ],
+      "enderecos-cidades-diferentes.xlsx",
+      "shopee"
+    );
+
+    expect(route.stops).toHaveLength(2);
+    expect(route.stops[0].metadata?.sourceAddressConflict).toBe(true);
+    expect(route.stops[1].metadata?.sourceAddressConflict).toBe(true);
+  });
+
   it("accepts the repeated STOP pattern reported by the field spreadsheet", () => {
     const route = parseRouteRows(
       [
