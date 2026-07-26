@@ -32,7 +32,7 @@ export default function StopIdentityStrip({
           <p className="text-xs font-semibold uppercase text-slate-500">
             Parada
           </p>
-          <p className="text-base font-black text-slate-950">
+          <p className="text-base font-black text-foreground">
             {routePositionLabel}
           </p>
         </div>
@@ -41,7 +41,7 @@ export default function StopIdentityStrip({
         <p className="text-xs font-semibold uppercase text-slate-500">
           STOP
         </p>
-        <p className="break-words text-base font-black text-slate-950">
+        <p className="break-words text-base font-black text-foreground">
           {stopLabel || "Não usado"}
         </p>
       </div>

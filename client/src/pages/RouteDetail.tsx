@@ -2738,7 +2738,7 @@ export default function RouteDetail() {
                             <p className="text-xs font-semibold uppercase opacity-80">
                               Parada
                             </p>
-                            <p className="mt-1 text-4xl font-black leading-none">
+                            <p className="mt-1 text-4xl font-black leading-none text-white">
                               {currentStopIdentity?.routeStopLabel}
                             </p>
                             <p className="mt-1 text-xs opacity-85">
@@ -2756,7 +2756,13 @@ export default function RouteDetail() {
                               <p className="text-xs font-semibold uppercase opacity-90">
                                 STOP
                               </p>
-                              <p className="mt-1 text-4xl font-black leading-none">
+                              <p
+                                className={`mt-1 text-4xl font-black leading-none ${
+                                  routeIsShopeeStopSequence
+                                    ? "text-white"
+                                    : "text-foreground"
+                                }`}
+                              >
                                 {currentStopIdentity.shopeeStopLabel.replace(
                                   "STOP ",
                                   ""
