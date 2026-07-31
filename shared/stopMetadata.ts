@@ -215,9 +215,10 @@ export function parseLegacyStopNotes(
       }
 
       if (key === "pacotes") {
+        const packageList = value.replace(/\s+\+\d+\s*$/, "");
         metadata.packageNumbers = normalizePackageNumbers(
           metadata.packageNumbers,
-          value.split(",")
+          packageList.split(",")
         );
         metadata.packageNumber ??= metadata.packageNumbers[0];
         return;

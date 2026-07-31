@@ -15,6 +15,11 @@ import {
   type RouteMode,
   type RouteObjective,
 } from "./routeObjective";
+import {
+  auditRouteSequence,
+  detectRouteCrossings,
+  type RouteAuditIssue,
+} from "./routeAudit";
 
 type MatrixValue = number[][];
 type MatrixMetric = "distance" | "duration";
@@ -58,25 +63,33 @@ function readPositiveIntegerEnv(name: string, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-function isPublicOsrmProvider() {
-  try {
-    return new URL(ENV.osrmBaseUrl).hostname.toLowerCase() === "router.project-osrm.org";
-  } catch {
-    return false;
-  }
-}
-
 function getRoadMatrixMaxNodes() {
   return readPositiveIntegerEnv(
     "OSRM_MAX_TABLE_NODES",
-    isPublicOsrmProvider() ? 50 : 100
+    100
   );
 }
 
 function getRoadMatrixPartitionSize(options: RouteOptimizationOptions = {}) {
-  if (options.maxPartitionSize) return options.maxPartitionSize;
-  const maxDeliveryNodes = Math.max(10, getRoadMatrixMaxNodes() - 2);
+  const maxDeliveryNodes = Math.max(1, getRoadMatrixMaxNodes() - 2);
+  if (options.maxPartitionSize) {
+    return Math.min(
+      Math.max(1, Math.floor(options.maxPartitionSize)),
+      maxDeliveryNodes
+    );
+  }
   return Math.min(ROAD_MATRIX_PARTITION_SIZE, maxDeliveryNodes);
+}
+
+function getRequiredRoadMatrixNodes(
+  locations: Location[],
+  options: RouteOptimizationOptions = {}
+) {
+  return (
+    locations.length +
+    Number(Boolean(options.startLocation)) +
+    Number(Boolean(options.endLocation))
+  );
 }
 
 type LocalitySettings = {
@@ -88,6 +101,7 @@ type LocalitySettings = {
   longJumpThreshold: number;
   penaltyMultiplier: number;
   prematureClusterSwitchPenalty: number;
+  routeCrossingPenalty: number;
 };
 
 function getLocalitySettings(
@@ -103,6 +117,7 @@ function getLocalitySettings(
       longJumpThreshold: 0.35,
       penaltyMultiplier: 4,
       prematureClusterSwitchPenalty: 30,
+      routeCrossingPenalty: 30,
     };
   }
 
@@ -116,6 +131,7 @@ function getLocalitySettings(
       longJumpThreshold: 1.25,
       penaltyMultiplier: 2,
       prematureClusterSwitchPenalty: 15,
+      routeCrossingPenalty: 15,
     };
   }
 
@@ -128,6 +144,7 @@ function getLocalitySettings(
     longJumpThreshold: 0.7,
     penaltyMultiplier: 3,
     prematureClusterSwitchPenalty: 20,
+    routeCrossingPenalty: 20,
   };
 }
 
@@ -705,6 +722,195 @@ function calculateAvoidableJumpPenalty(
   return penalty;
 }
 
+function getRouteCrossings(matrix: RoadMatrix, sequence: number[]) {
+  return detectRouteCrossings(
+    sequence.map((nodeIndex, sequenceIndex) => ({
+      ...matrix.nodes[nodeIndex].location,
+      sequence: sequenceIndex,
+    }))
+  );
+}
+
+function removeGeometricRouteCrossings(
+  matrix: RoadMatrix,
+  initialSequence: number[]
+) {
+  let sequence = [...initialSequence];
+  const maxPasses = Math.max(8, sequence.length * 2);
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    const crossing = getRouteCrossings(matrix, sequence)[0];
+    if (!crossing) break;
+
+    const firstLegIndex = crossing.fromSequence;
+    const secondLegIndex = crossing.crossingFromSequence;
+    if (
+      firstLegIndex < 0 ||
+      secondLegIndex <= firstLegIndex + 1 ||
+      secondLegIndex >= sequence.length - 1
+    ) {
+      break;
+    }
+
+    sequence = [
+      ...sequence.slice(0, firstLegIndex + 1),
+      ...sequence.slice(firstLegIndex + 1, secondLegIndex + 1).reverse(),
+      ...sequence.slice(secondLegIndex + 1),
+    ];
+  }
+
+  return sequence;
+}
+
+function calculateRouteCrossingPenalty(
+  matrix: RoadMatrix,
+  sequence: number[],
+  localityMode: RouteOptimizationOptions["localityMode"] = "local"
+) {
+  return (
+    getRouteCrossings(matrix, sequence).length *
+    getLocalitySettings(localityMode).routeCrossingPenalty
+  );
+}
+
+function moveSequenceNodesBefore(
+  sequence: number[],
+  movedNodes: number[],
+  beforeNode: number
+) {
+  if (!movedNodes.length || beforeNode === undefined || movedNodes.includes(beforeNode)) {
+    return sequence;
+  }
+
+  const movedSet = new Set(movedNodes);
+  const remaining = sequence.filter((nodeIndex) => !movedSet.has(nodeIndex));
+  const insertionIndex = remaining.indexOf(beforeNode);
+  if (insertionIndex < 0) return sequence;
+
+  remaining.splice(insertionIndex, 0, ...movedNodes);
+  return remaining;
+}
+
+function getSequenceAudit(
+  matrix: RoadMatrix,
+  sequence: number[],
+  startNodeIndex?: number,
+  endNodeIndex?: number
+) {
+  const totalDistanceKm = calculateSequenceMetric(
+    matrix,
+    sequence,
+    "distance",
+    startNodeIndex,
+    endNodeIndex
+  );
+
+  return auditRouteSequence(
+    sequence.map((nodeIndex, sequenceIndex) => ({
+      ...matrix.nodes[nodeIndex].location,
+      sequence: sequenceIndex,
+    })),
+    {
+      startLocation:
+        startNodeIndex === undefined
+          ? undefined
+          : matrix.nodes[startNodeIndex]?.location,
+      requireStartLocation: startNodeIndex !== undefined,
+      actualTotalDistanceKm: totalDistanceKm,
+      usedRoadMetrics: true,
+    }
+  );
+}
+
+function repairSequenceByAudit(
+  matrix: RoadMatrix,
+  initialSequence: number[],
+  startNodeIndex?: number,
+  endNodeIndex?: number
+) {
+  let sequence = [...initialSequence];
+  const seen = new Set([sequence.join(",")]);
+
+  for (let pass = 0; pass < 3; pass += 1) {
+    const issues = getSequenceAudit(
+      matrix,
+      sequence,
+      startNodeIndex,
+      endNodeIndex
+    ).issues
+      .filter((issue) =>
+        issue.type === "premature_region_exit" ||
+        issue.type === "region_revisited" ||
+        issue.type === "nearby_stop_skipped"
+      )
+      .sort((a, b) => {
+        const priority = (issue: RouteAuditIssue) =>
+          issue.type === "premature_region_exit"
+            ? 3
+            : issue.type === "region_revisited"
+              ? 2
+              : 1;
+        return priority(b) - priority(a);
+      });
+    let repaired = sequence;
+
+    for (const issue of issues) {
+      const movedPositions =
+        issue.type === "premature_region_exit" && issue.pendingSequences?.length
+          ? issue.pendingSequences
+          : issue.nearestSequence === undefined
+            ? []
+            : [issue.nearestSequence];
+      if (issue.toSequence === undefined || movedPositions.length === 0) continue;
+      const movedNodes = movedPositions
+        .map((position) => sequence[position])
+        .filter((nodeIndex): nodeIndex is number => nodeIndex !== undefined);
+      const beforeNode = sequence[issue.toSequence];
+      if (beforeNode === undefined) continue;
+      repaired = moveSequenceNodesBefore(
+        repaired,
+        movedNodes,
+        beforeNode
+      );
+    }
+
+    const signature = repaired.join(",");
+    if (signature === sequence.join(",") || seen.has(signature)) break;
+    seen.add(signature);
+    sequence = repaired;
+  }
+
+  return sequence;
+}
+
+function calculateRouteAuditPenalty(
+  matrix: RoadMatrix,
+  sequence: number[],
+  startNodeIndex?: number,
+  endNodeIndex?: number
+) {
+  return getSequenceAudit(
+    matrix,
+    sequence,
+    startNodeIndex,
+    endNodeIndex
+  ).issues.reduce(
+    (penalty, issue) => {
+      switch (issue.type) {
+        case "premature_region_exit":
+          return penalty + 60;
+        case "region_revisited":
+          return penalty + 50;
+        case "nearby_stop_skipped":
+          return penalty + 30;
+        default:
+          return penalty;
+      }
+    },
+    0
+  );
+}
+
 function buildClusteredDeliveryNodeSequence(
   locations: Location[],
   deliveryNodeIndexes: number[],
@@ -811,6 +1017,7 @@ async function optimizePartitionedRouteWithRoadMetrics(
   const partitions = partitionStopsForOptimization(locations, {
     ...options,
     maxPartitionSize,
+    forceMicrocluster: true,
   });
 
   if (partitions.length <= 1) return null;
@@ -881,6 +1088,64 @@ export async function buildSequentialRouteWithRoadMetrics(
   locations: Location[],
   options: RouteOptimizationOptions = {}
 ): Promise<OptimizedRoute | null> {
+  const maxTableNodes = getRoadMatrixMaxNodes();
+  const requiredNodes = getRequiredRoadMatrixNodes(locations, options);
+
+  if (requiredNodes > maxTableNodes) {
+    const maxSegmentDeliveries = Math.max(1, maxTableNodes - 2);
+    const finalWaypoints: OptimizedRoute["waypoints"] = [];
+    let totalDistance = 0;
+    let totalTime = 0;
+    let offset = 0;
+    let segmentCount = 0;
+
+    while (offset < locations.length) {
+      const segmentLocations = locations.slice(
+        offset,
+        offset + maxSegmentDeliveries
+      );
+      const isLastSegment =
+        offset + segmentLocations.length >= locations.length;
+      const segmentStart =
+        offset === 0 ? options.startLocation : locations[offset - 1];
+      const segmentResult = await buildSequentialRouteWithRoadMetrics(
+        segmentLocations,
+        {
+          ...options,
+          startLocation: segmentStart,
+          endLocation: isLastSegment ? options.endLocation : undefined,
+          partitionLargeRoutes: false,
+        }
+      );
+
+      if (!segmentResult) return null;
+
+      totalDistance += segmentResult.totalDistance;
+      totalTime += segmentResult.totalTime;
+      segmentLocations.forEach((location) => {
+        finalWaypoints.push({
+          ...location,
+          sequence: finalWaypoints.length,
+        });
+      });
+      offset += segmentLocations.length;
+      segmentCount += 1;
+    }
+
+    return {
+      sequence: locations.map((_, index) => index),
+      totalDistance: Math.round(totalDistance * 100) / 100,
+      totalTime: Math.round(totalTime),
+      waypoints: finalWaypoints,
+      metadata: {
+        partitioned: true,
+        partitionCount: segmentCount,
+        maxPartitionSize: maxSegmentDeliveries,
+        largestPartitionSize: Math.min(maxSegmentDeliveries, locations.length),
+      },
+    };
+  }
+
   const result = await fetchRoadMatrix(locations, options);
   if (!result) return null;
 
@@ -902,16 +1167,19 @@ export async function optimizeRouteWithRoadMetrics(
   startIndex: number = 0,
   options: RouteOptimizationOptions = {}
 ): Promise<OptimizedRoute | null> {
+  const exceedsProviderMatrixLimit =
+    getRequiredRoadMatrixNodes(locations, options) > getRoadMatrixMaxNodes();
   const partitions =
-    options.partitionLargeRoutes !== false && locations.length > 100
+    options.partitionLargeRoutes !== false && exceedsProviderMatrixLimit
       ? partitionStopsForOptimization(locations, {
           ...options,
           maxPartitionSize: getRoadMatrixPartitionSize(options),
+          forceMicrocluster: true,
         })
       : [];
   if (
     options.partitionLargeRoutes !== false &&
-    locations.length > 100 &&
+    exceedsProviderMatrixLimit &&
     partitions.length > 1
   ) {
     return optimizePartitionedRouteWithRoadMetrics(locations, mode, options);
@@ -960,9 +1228,24 @@ export async function optimizeRouteWithRoadMetrics(
         result.startNodeIndex,
         result.endNodeIndex
       );
+      const auditRepaired = repairSequenceByAudit(
+        result.matrix,
+        improved,
+        result.startNodeIndex,
+        result.endNodeIndex
+      );
       const candidateSequences = [
         seedSequence,
         improved,
+        repairSequenceByAudit(
+          result.matrix,
+          seedSequence,
+          result.startNodeIndex,
+          result.endNodeIndex
+        ),
+        removeGeometricRouteCrossings(result.matrix, improved),
+        auditRepaired,
+        removeGeometricRouteCrossings(result.matrix, auditRepaired),
         enforceLocalNearestRoadSequence(
           result.matrix,
           improved,
@@ -991,6 +1274,15 @@ export async function optimizeRouteWithRoadMetrics(
           locations,
           candidateSequence,
           options.localityMode
+        ) + calculateRouteCrossingPenalty(
+          result.matrix,
+          candidateSequence,
+          options.localityMode
+        ) + calculateRouteAuditPenalty(
+          result.matrix,
+          candidateSequence,
+          result.startNodeIndex,
+          result.endNodeIndex
         );
         const score = metric + penalty;
 

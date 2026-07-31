@@ -286,7 +286,14 @@ function buildOperationalReadiness(args: {
     });
   }
 
-  if (!args.queue?.configured) {
+  if (args.queue?.enabled === false) {
+    addCheck(
+      "queue",
+      "ready",
+      "Fila assincrona desativada explicitamente; beta opera em modo sincrono.",
+      { maxSyncStops: args.queue.maxSyncStops ?? ENV.maxSyncStops }
+    );
+  } else if (!args.queue?.configured) {
     addCheck(
       "queue",
       "attention",

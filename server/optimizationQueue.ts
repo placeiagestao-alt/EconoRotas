@@ -39,7 +39,7 @@ type WorkerHeartbeat = {
 };
 
 function getConnectionOptions() {
-  if (!ENV.bullmqRedisUrl) return null;
+  if (!ENV.optimizationQueueEnabled || !ENV.bullmqRedisUrl) return null;
   const parsed = new URL(ENV.bullmqRedisUrl);
   return {
     host: parsed.hostname,
@@ -83,7 +83,7 @@ function getHeartbeatRedis() {
 }
 
 export function isOptimizationQueueConfigured() {
-  return Boolean(ENV.bullmqRedisUrl);
+  return ENV.optimizationQueueEnabled && Boolean(ENV.bullmqRedisUrl);
 }
 
 export function getOptimizationQueue() {
@@ -110,8 +110,21 @@ export function getOptimizationQueue() {
 }
 
 export async function getOptimizationQueueHealth() {
+  if (!ENV.optimizationQueueEnabled) {
+    return {
+      enabled: false,
+      configured: false,
+      reachable: false,
+      queueName: OPTIMIZATION_QUEUE_NAME,
+      counts: null,
+      maxSyncStops: ENV.maxSyncStops,
+      error: null,
+    };
+  }
+
   if (!isOptimizationQueueConfigured()) {
     return {
+      enabled: true,
       configured: false,
       reachable: false,
       queueName: OPTIMIZATION_QUEUE_NAME,
@@ -124,6 +137,7 @@ export async function getOptimizationQueueHealth() {
     const optimizationQueue = getOptimizationQueue();
     if (!optimizationQueue) {
       return {
+        enabled: true,
         configured: true,
         reachable: false,
         queueName: OPTIMIZATION_QUEUE_NAME,
@@ -148,6 +162,7 @@ export async function getOptimizationQueueHealth() {
     await recordWorkerUnderReplicatedAlert(workerCount).catch(() => undefined);
 
     return {
+      enabled: true,
       configured: true,
       reachable: true,
       queueName: OPTIMIZATION_QUEUE_NAME,
@@ -168,6 +183,7 @@ export async function getOptimizationQueueHealth() {
     };
   } catch (error) {
     return {
+      enabled: true,
       configured: true,
       reachable: false,
       queueName: OPTIMIZATION_QUEUE_NAME,

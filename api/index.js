@@ -720,6 +720,7 @@ var init_env = __esm({
         readAtLeastOptimizedRouteStopLimit(process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS),
         OPTIMIZED_ROUTE_STOP_LIMIT
       ),
+      optimizationQueueEnabled: process.env.OPTIMIZATION_QUEUE_ENABLED !== "false",
       bullmqRedisUrl: firstEnvString(
         process.env.BULLMQ_REDIS_URL,
         process.env.ECONOROTAS_REDIS_URL,
@@ -918,9 +919,10 @@ function parseLegacyStopNotes(notes) {
       return;
     }
     if (key === "pacotes") {
+      const packageList = value.replace(/\s+\+\d+\s*$/, "");
       metadata.packageNumbers = normalizePackageNumbers(
         metadata.packageNumbers,
-        value.split(",")
+        packageList.split(",")
       );
       metadata.packageNumber ??= metadata.packageNumbers[0];
       return;
@@ -8453,678 +8455,6 @@ function validateLocations(locations) {
 init_env();
 init_db();
 import { createHash as createHash4 } from "node:crypto";
-var ROAD_MATRIX_PARTITION_SIZE = 70;
-function readPositiveIntegerEnv2(name, fallback) {
-  const parsed = Number(process.env[name]);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
-}
-function isPublicOsrmProvider() {
-  try {
-    return new URL(ENV.osrmBaseUrl).hostname.toLowerCase() === "router.project-osrm.org";
-  } catch {
-    return false;
-  }
-}
-function getRoadMatrixMaxNodes() {
-  return readPositiveIntegerEnv2(
-    "OSRM_MAX_TABLE_NODES",
-    isPublicOsrmProvider() ? 50 : 100
-  );
-}
-function getRoadMatrixPartitionSize(options = {}) {
-  if (options.maxPartitionSize) return options.maxPartitionSize;
-  const maxDeliveryNodes = Math.max(10, getRoadMatrixMaxNodes() - 2);
-  return Math.min(ROAD_MATRIX_PARTITION_SIZE, maxDeliveryNodes);
-}
-function getLocalitySettings2(localityMode = "local") {
-  if (localityMode === "strict") {
-    return {
-      immediateRadius: 0.25,
-      immediateExtraThreshold: 0.03,
-      localRadius: 2.5,
-      ratioThreshold: 1.12,
-      extraThreshold: 0.08,
-      longJumpThreshold: 0.35,
-      penaltyMultiplier: 4,
-      prematureClusterSwitchPenalty: 30
-    };
-  }
-  if (localityMode === "balanced") {
-    return {
-      immediateRadius: 0.08,
-      immediateExtraThreshold: 0.08,
-      localRadius: 1.5,
-      ratioThreshold: 1.55,
-      extraThreshold: 0.35,
-      longJumpThreshold: 1.25,
-      penaltyMultiplier: 2,
-      prematureClusterSwitchPenalty: 15
-    };
-  }
-  return {
-    immediateRadius: 0.12,
-    immediateExtraThreshold: 0.05,
-    localRadius: 2,
-    ratioThreshold: 1.28,
-    extraThreshold: 0.18,
-    longJumpThreshold: 0.7,
-    penaltyMultiplier: 3,
-    prematureClusterSwitchPenalty: 20
-  };
-}
-function isAvoidableLocalJump2(nearestMetric, plannedMetric, settings) {
-  if (nearestMetric <= settings.immediateRadius && plannedMetric - nearestMetric >= settings.immediateExtraThreshold) {
-    return true;
-  }
-  const significantlyCloser = plannedMetric > Math.max(
-    nearestMetric * settings.ratioThreshold,
-    nearestMetric + settings.extraThreshold
-  );
-  const nearbyContext = nearestMetric <= settings.localRadius || plannedMetric <= settings.localRadius * 2.5;
-  const longJump = plannedMetric - nearestMetric >= settings.longJumpThreshold;
-  return significantlyCloser && (nearbyContext || longJump);
-}
-function isValidCoordinate(location) {
-  return Number.isFinite(location.latitude) && Number.isFinite(location.longitude) && location.latitude >= -90 && location.latitude <= 90 && location.longitude >= -180 && location.longitude <= 180;
-}
-function buildNodes(locations, options = {}) {
-  const nodes = locations.map((location, deliveryIndex) => ({
-    location,
-    deliveryIndex,
-    role: "delivery"
-  }));
-  const startNodeIndex = options.startLocation && isValidCoordinate(options.startLocation) ? nodes.push({ location: options.startLocation, role: "start" }) - 1 : void 0;
-  const endNodeIndex = options.endLocation && isValidCoordinate(options.endLocation) ? nodes.push({ location: options.endLocation, role: "end" }) - 1 : void 0;
-  return { nodes, startNodeIndex, endNodeIndex };
-}
-function buildOsrmTableUrl(nodes) {
-  const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
-  const coordinates = nodes.map(({ location }) => `${location.longitude},${location.latitude}`).join(";");
-  return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
-}
-function hashText(value) {
-  return createHash4("sha256").update(value).digest("hex");
-}
-function coordinateKey(node) {
-  return [
-    node.role,
-    node.deliveryIndex ?? "",
-    Number(node.location.latitude).toFixed(6),
-    Number(node.location.longitude).toFixed(6)
-  ].join(":");
-}
-function buildMatrixHashes(nodes) {
-  const orderedCoordinates = nodes.map(coordinateKey).join("|");
-  const unorderedCoordinates = nodes.map(
-    (node) => [
-      node.role,
-      Number(node.location.latitude).toFixed(6),
-      Number(node.location.longitude).toFixed(6)
-    ].join(":")
-  ).sort().join("|");
-  const providerKey = ENV.osrmBaseUrl.replace(/\/+$/, "");
-  return {
-    matrixHash: hashText(["driving", providerKey, orderedCoordinates].join("|")),
-    clusterHash: hashText(["driving", unorderedCoordinates].join("|"))
-  };
-}
-function isMatrixValue(value, expectedSize) {
-  return Array.isArray(value) && value.length === expectedSize && value.every(
-    (row) => Array.isArray(row) && row.length === expectedSize && row.every((item) => typeof item === "number" && Number.isFinite(item))
-  );
-}
-function buildOsrmHealthUrl() {
-  const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
-  const coordinates = "-51.407,-22.121;-51.406,-22.122";
-  return `${baseUrl}/route/v1/driving/${coordinates}?overview=false&alternatives=false&steps=false`;
-}
-function normalizeMatrix(values, factor) {
-  if (!values?.length) return null;
-  const normalized = values.map(
-    (row) => row.map(
-      (value) => typeof value === "number" && Number.isFinite(value) ? value / factor : Infinity
-    )
-  );
-  return normalized.some((row) => row.some((value) => !Number.isFinite(value))) ? null : normalized;
-}
-async function fetchRoadMatrix(locations, options = {}) {
-  if (!ENV.osrmEnabled || locations.length === 0) return null;
-  const { nodes, startNodeIndex, endNodeIndex } = buildNodes(locations, options);
-  if (nodes.length < 2 || nodes.some((node) => !isValidCoordinate(node.location))) {
-    return null;
-  }
-  const startedAt = Date.now();
-  const provider = ENV.osrmBaseUrl.replace(/\/+$/, "");
-  const record = (success, failureReason = null, cacheHit = false) => {
-    const durationMs = Date.now() - startedAt;
-    if (!cacheHit) {
-      options.telemetry?.recordOsrmCall?.(durationMs, success);
-    }
-    options.telemetry?.recordOsrmMatrix?.({
-      nodeCount: nodes.length,
-      durationMs,
-      cacheHit,
-      success,
-      failureReason,
-      provider
-    });
-  };
-  const maxTableNodes = getRoadMatrixMaxNodes();
-  if (nodes.length > maxTableNodes) {
-    record(false, "matrix_too_large_for_provider");
-    return null;
-  }
-  const { matrixHash, clusterHash } = buildMatrixHashes(nodes);
-  const shouldUseMatrixCache = process.env.VITEST !== "true";
-  const cached = shouldUseMatrixCache ? await getOsrmMatrixCache(matrixHash).catch(() => null) : null;
-  if (cached && isMatrixValue(cached.distanceMatrix, nodes.length) && isMatrixValue(cached.durationMatrix, nodes.length)) {
-    record(true, null, true);
-    return {
-      matrix: {
-        nodes,
-        distancesKm: cached.distanceMatrix,
-        durationsMinutes: cached.durationMatrix
-      },
-      startNodeIndex,
-      endNodeIndex
-    };
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
-  try {
-    const response = await fetch(buildOsrmTableUrl(nodes), {
-      signal: controller.signal,
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) {
-      record(false, `http_${response.status}`);
-      return null;
-    }
-    const data = await response.json();
-    if (data.code !== "Ok") {
-      record(false, `osrm_${data.code || "not_ok"}`);
-      return null;
-    }
-    const distancesKm = normalizeMatrix(data.distances, 1e3);
-    const durationsMinutes = normalizeMatrix(data.durations, 60);
-    if (!distancesKm || !durationsMinutes) {
-      record(false, "invalid_matrix");
-      return null;
-    }
-    if (shouldUseMatrixCache) {
-      await upsertOsrmMatrixCache({
-        matrixHash,
-        clusterHash,
-        stopCount: nodes.length,
-        durationMatrix: durationsMinutes,
-        distanceMatrix: distancesKm,
-        provider: "osrm",
-        osrmBaseUrl: provider
-      }).catch(() => null);
-    }
-    record(true);
-    return {
-      matrix: { nodes, distancesKm, durationsMinutes },
-      startNodeIndex,
-      endNodeIndex
-    };
-  } catch (error) {
-    record(false, error instanceof Error ? error.name || error.message : "fetch_error");
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-async function getOsrmHealth() {
-  const baseUrl = ENV.osrmBaseUrl.trim().replace(/\/+$/, "");
-  const configured = Boolean(baseUrl);
-  const baseHealth = {
-    enabled: ENV.osrmEnabled,
-    required: ENV.osrmRequired,
-    configured,
-    reachable: false,
-    baseUrl: configured ? baseUrl : null,
-    timeoutMs: ENV.osrmHealthTimeoutMs,
-    error: null
-  };
-  if (!ENV.osrmEnabled) {
-    return {
-      ...baseHealth,
-      error: ENV.osrmRequired ? "OSRM_REQUIRED=true, mas OSRM_ENABLED=false." : null
-    };
-  }
-  if (!configured) {
-    return {
-      ...baseHealth,
-      error: "OSRM_BASE_URL nao configurado."
-    };
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ENV.osrmHealthTimeoutMs);
-  try {
-    const response = await fetch(buildOsrmHealthUrl(), {
-      signal: controller.signal,
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) {
-      return {
-        ...baseHealth,
-        error: `OSRM respondeu HTTP ${response.status}.`
-      };
-    }
-    const data = await response.json();
-    if (data.code !== "Ok") {
-      return {
-        ...baseHealth,
-        error: `OSRM respondeu code=${data.code ?? "indefinido"}.`
-      };
-    }
-    return {
-      ...baseHealth,
-      reachable: true
-    };
-  } catch (error) {
-    return {
-      ...baseHealth,
-      error: error instanceof Error ? error.message : "Falha ao consultar OSRM."
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-function getMetric(matrix, mode, from, to) {
-  return mode === "duration" ? matrix.durationsMinutes[from][to] : matrix.distancesKm[from][to];
-}
-function getObjectiveMetric(matrix, objective, from, to) {
-  return calculateObjectiveCost(
-    matrix.distancesKm[from][to],
-    matrix.durationsMinutes[from][to],
-    objective
-  );
-}
-function calculateSequenceMetric(matrix, sequence, mode, startNodeIndex, endNodeIndex) {
-  let total = 0;
-  if (sequence.length === 0) {
-    return startNodeIndex !== void 0 && endNodeIndex !== void 0 ? getMetric(matrix, mode, startNodeIndex, endNodeIndex) : 0;
-  }
-  if (startNodeIndex !== void 0) {
-    total += getMetric(matrix, mode, startNodeIndex, sequence[0]);
-  }
-  for (let index2 = 0; index2 < sequence.length - 1; index2 += 1) {
-    total += getMetric(matrix, mode, sequence[index2], sequence[index2 + 1]);
-  }
-  if (endNodeIndex !== void 0) {
-    total += getMetric(matrix, mode, sequence[sequence.length - 1], endNodeIndex);
-  }
-  return total;
-}
-function calculateSequenceObjective2(matrix, sequence, objective, startNodeIndex, endNodeIndex) {
-  const distanceKm = calculateSequenceMetric(
-    matrix,
-    sequence,
-    "distance",
-    startNodeIndex,
-    endNodeIndex
-  );
-  const durationMin = calculateSequenceMetric(
-    matrix,
-    sequence,
-    "duration",
-    startNodeIndex,
-    endNodeIndex
-  );
-  return calculateObjectiveCost(distanceKm, durationMin, objective);
-}
-function buildRoadRoute(matrix, sequence, startNodeIndex, endNodeIndex) {
-  return {
-    sequence: sequence.map((nodeIndex) => matrix.nodes[nodeIndex].deliveryIndex ?? nodeIndex),
-    totalDistance: Math.round(
-      calculateSequenceMetric(matrix, sequence, "distance", startNodeIndex, endNodeIndex) * 100
-    ) / 100,
-    totalTime: Math.round(
-      calculateSequenceMetric(matrix, sequence, "duration", startNodeIndex, endNodeIndex)
-    ),
-    waypoints: sequence.map((nodeIndex, sequenceIndex) => ({
-      ...matrix.nodes[nodeIndex].location,
-      sequence: sequenceIndex
-    }))
-  };
-}
-function buildNearestSequence(matrix, deliveryNodeIndexes, startIndex, objective, startNodeIndex) {
-  const available = new Set(deliveryNodeIndexes);
-  const sequence = [];
-  let currentNodeIndex = startNodeIndex ?? deliveryNodeIndexes[startIndex] ?? deliveryNodeIndexes[0];
-  if (startNodeIndex === void 0) {
-    available.delete(currentNodeIndex);
-    sequence.push(currentNodeIndex);
-  }
-  while (available.size > 0) {
-    let nearestIndex = -1;
-    let nearestMetric = Infinity;
-    for (const candidateIndex of Array.from(available)) {
-      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
-      if (metric < nearestMetric) {
-        nearestMetric = metric;
-        nearestIndex = candidateIndex;
-      }
-    }
-    if (nearestIndex === -1) break;
-    available.delete(nearestIndex);
-    sequence.push(nearestIndex);
-    currentNodeIndex = nearestIndex;
-  }
-  return sequence;
-}
-function improveSequenceWithTwoOpt2(matrix, initialSequence, objective, startNodeIndex, endNodeIndex) {
-  let sequence = [...initialSequence];
-  let bestMetric = calculateSequenceObjective2(
-    matrix,
-    sequence,
-    objective,
-    startNodeIndex,
-    endNodeIndex
-  );
-  let improved = true;
-  let passes = 0;
-  const firstMutableIndex = startNodeIndex !== void 0 ? 1 : 0;
-  while (improved && passes < 8) {
-    improved = false;
-    passes += 1;
-    for (let i = firstMutableIndex; i < sequence.length - 1; i += 1) {
-      for (let k = i + 1; k < sequence.length; k += 1) {
-        const candidate = [
-          ...sequence.slice(0, i),
-          ...sequence.slice(i, k + 1).reverse(),
-          ...sequence.slice(k + 1)
-        ];
-        const candidateMetric = calculateSequenceObjective2(
-          matrix,
-          candidate,
-          objective,
-          startNodeIndex,
-          endNodeIndex
-        );
-        if (candidateMetric + 1e-6 < bestMetric) {
-          sequence = candidate;
-          bestMetric = candidateMetric;
-          improved = true;
-        }
-      }
-    }
-  }
-  return sequence;
-}
-function enforceLocalNearestRoadSequence(matrix, initialSequence, objective, startNodeIndex, localityMode = "local") {
-  const remaining = new Set(initialSequence);
-  const sequence = [];
-  let currentNodeIndex = startNodeIndex ?? initialSequence[0];
-  const localitySettings = getLocalitySettings2(localityMode);
-  while (remaining.size > 0) {
-    const plannedNext = initialSequence.find((nodeIndex) => remaining.has(nodeIndex));
-    if (plannedNext === void 0) break;
-    let nearestIndex = plannedNext;
-    let nearestMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
-    for (const candidateIndex of Array.from(remaining)) {
-      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
-      if (metric < nearestMetric) {
-        nearestMetric = metric;
-        nearestIndex = candidateIndex;
-      }
-    }
-    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
-    const jumpIsOperationallyBad = nearestIndex !== plannedNext && isAvoidableLocalJump2(nearestMetric, plannedMetric, localitySettings);
-    const nextIndex = jumpIsOperationallyBad ? nearestIndex : plannedNext;
-    remaining.delete(nextIndex);
-    sequence.push(nextIndex);
-    currentNodeIndex = nextIndex;
-  }
-  return sequence;
-}
-function calculateAvoidableJumpPenalty2(matrix, sequence, objective, startNodeIndex, localityMode = "local") {
-  const settings = getLocalitySettings2(localityMode);
-  const remaining = new Set(sequence);
-  let currentNodeIndex = startNodeIndex ?? sequence[0];
-  let penalty = 0;
-  for (const plannedNext of sequence) {
-    remaining.delete(plannedNext);
-    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
-    let nearestMetric = plannedMetric;
-    for (const candidateIndex of [plannedNext, ...Array.from(remaining)]) {
-      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
-      if (metric < nearestMetric) {
-        nearestMetric = metric;
-      }
-    }
-    if (isAvoidableLocalJump2(nearestMetric, plannedMetric, settings)) {
-      penalty += (plannedMetric - nearestMetric) * settings.penaltyMultiplier;
-    }
-    currentNodeIndex = plannedNext;
-  }
-  return penalty;
-}
-function buildClusteredDeliveryNodeSequence(locations, deliveryNodeIndexes, options = {}) {
-  const clusters = clusterStops(locations, options);
-  if (clusters.length <= 1) return null;
-  const nodeByDeliveryIndex = /* @__PURE__ */ new Map();
-  deliveryNodeIndexes.forEach((nodeIndex, deliveryIndex) => {
-    nodeByDeliveryIndex.set(deliveryIndex, nodeIndex);
-  });
-  const sequence = clusters.flatMap(
-    (cluster) => cluster.stops.map((stop) => nodeByDeliveryIndex.get(stop.originalIndex)).filter((nodeIndex) => nodeIndex !== void 0)
-  );
-  return sequence.length === deliveryNodeIndexes.length ? sequence : null;
-}
-function calculateClusterSwitchPenalty(matrix, locations, sequence, localityMode = "local") {
-  const settings = getLocalitySettings2(localityMode);
-  const clusters = clusterStops(locations, { localityMode });
-  if (clusters.length <= 1) return 0;
-  const clusterByDeliveryIndex = /* @__PURE__ */ new Map();
-  for (const cluster of clusters) {
-    if (cluster.stops.length < 2) continue;
-    for (const stop of cluster.stops) {
-      clusterByDeliveryIndex.set(stop.originalIndex, cluster.clusterId);
-    }
-  }
-  const clusterByNodeIndex = /* @__PURE__ */ new Map();
-  matrix.nodes.forEach((node, nodeIndex) => {
-    if (node.deliveryIndex === void 0) return;
-    const clusterId = clusterByDeliveryIndex.get(node.deliveryIndex);
-    if (clusterId) clusterByNodeIndex.set(nodeIndex, clusterId);
-  });
-  let penalty = 0;
-  for (let sequenceIndex = 1; sequenceIndex < sequence.length; sequenceIndex += 1) {
-    const previousCluster = clusterByNodeIndex.get(sequence[sequenceIndex - 1]);
-    const currentCluster = clusterByNodeIndex.get(sequence[sequenceIndex]);
-    if (!previousCluster || !currentCluster || previousCluster === currentCluster) {
-      continue;
-    }
-    const pendingInPreviousCluster = sequence.slice(sequenceIndex + 1).filter((nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster);
-    if (pendingInPreviousCluster.length > 0) {
-      const fromNode = sequence[sequenceIndex - 1];
-      const toNode = sequence[sequenceIndex];
-      const switchDuration = matrix.durationsMinutes[fromNode]?.[toNode] ?? 0;
-      const averagePendingDuration = pendingInPreviousCluster.reduce(
-        (total, pendingNode) => total + (matrix.durationsMinutes[fromNode]?.[pendingNode] ?? 0),
-        0
-      ) / pendingInPreviousCluster.length;
-      penalty += settings.prematureClusterSwitchPenalty * pendingInPreviousCluster.length + switchDuration * settings.penaltyMultiplier + averagePendingDuration * settings.penaltyMultiplier;
-    }
-  }
-  return penalty;
-}
-function chooseNextPartition(partitions, currentLocation) {
-  let bestIndex = 0;
-  let bestDistance = Infinity;
-  partitions.forEach((partition, index2) => {
-    const distance = calculateDistance(currentLocation, partition.centroid);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestIndex = index2;
-    }
-  });
-  return bestIndex;
-}
-async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options = {}) {
-  const maxPartitionSize = getRoadMatrixPartitionSize(options);
-  const partitions = partitionStopsForOptimization(locations, {
-    ...options,
-    maxPartitionSize
-  });
-  if (partitions.length <= 1) return null;
-  const remaining = [...partitions];
-  const largestPartitionSize = Math.max(
-    0,
-    ...partitions.map((partition) => partition.stops.length)
-  );
-  const finalSequence = [];
-  const finalWaypoints = [];
-  let totalDistance = 0;
-  let totalTime = 0;
-  let currentLocation = options.startLocation ?? remaining[0].centroid;
-  while (remaining.length > 0) {
-    const partitionIndex = chooseNextPartition(remaining, currentLocation);
-    const [partition] = remaining.splice(partitionIndex, 1);
-    const isLastPartition = remaining.length === 0;
-    const partitionLocations = partition.stops.map(({ originalIndex, ...stop }) => stop);
-    const optimizedPartition = await optimizeRouteWithRoadMetrics(
-      partitionLocations,
-      mode,
-      0,
-      {
-        ...options,
-        startLocation: currentLocation,
-        endLocation: isLastPartition ? options.endLocation : void 0,
-        partitionLargeRoutes: false
-      }
-    );
-    if (!optimizedPartition) return null;
-    totalDistance += optimizedPartition.totalDistance;
-    totalTime += optimizedPartition.totalTime;
-    for (const localIndex of optimizedPartition.sequence) {
-      const originalStop = partition.stops[localIndex];
-      if (!originalStop) return null;
-      finalSequence.push(originalStop.originalIndex);
-      const { originalIndex, ...waypoint } = originalStop;
-      finalWaypoints.push({
-        ...waypoint,
-        sequence: finalWaypoints.length
-      });
-    }
-    const lastWaypoint = finalWaypoints[finalWaypoints.length - 1];
-    if (lastWaypoint) currentLocation = lastWaypoint;
-  }
-  return {
-    sequence: finalSequence,
-    totalDistance: Math.round(totalDistance * 100) / 100,
-    totalTime: Math.round(totalTime),
-    waypoints: finalWaypoints,
-    metadata: {
-      partitioned: true,
-      partitionCount: partitions.length,
-      maxPartitionSize,
-      largestPartitionSize
-    }
-  };
-}
-async function buildSequentialRouteWithRoadMetrics(locations, options = {}) {
-  const result = await fetchRoadMatrix(locations, options);
-  if (!result) return null;
-  const deliveryNodeIndexes = result.matrix.nodes.map((node, nodeIndex) => node.role === "delivery" ? nodeIndex : -1).filter((nodeIndex) => nodeIndex >= 0);
-  return buildRoadRoute(
-    result.matrix,
-    deliveryNodeIndexes,
-    result.startNodeIndex,
-    result.endNodeIndex
-  );
-}
-async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startIndex = 0, options = {}) {
-  const partitions = options.partitionLargeRoutes !== false && locations.length > 100 ? partitionStopsForOptimization(locations, {
-    ...options,
-    maxPartitionSize: getRoadMatrixPartitionSize(options)
-  }) : [];
-  if (options.partitionLargeRoutes !== false && locations.length > 100 && partitions.length > 1) {
-    return optimizePartitionedRouteWithRoadMetrics(locations, mode, options);
-  }
-  const result = await fetchRoadMatrix(locations, options);
-  if (!result) return null;
-  const deliveryNodeIndexes = result.matrix.nodes.map((node, nodeIndex) => node.role === "delivery" ? nodeIndex : -1).filter((nodeIndex) => nodeIndex >= 0);
-  const objective = chooseObjective(mode);
-  const clusteredSequence = buildClusteredDeliveryNodeSequence(
-    locations,
-    deliveryNodeIndexes,
-    options
-  );
-  const startCandidates = result.startNodeIndex !== void 0 || deliveryNodeIndexes.length > 40 ? [Math.min(Math.max(startIndex, 0), Math.max(deliveryNodeIndexes.length - 1, 0))] : deliveryNodeIndexes.map((_, index2) => index2);
-  let bestSequence = null;
-  let bestScore = Infinity;
-  for (const candidateStartIndex of startCandidates) {
-    const nearestSequence = buildNearestSequence(
-      result.matrix,
-      deliveryNodeIndexes,
-      candidateStartIndex,
-      objective,
-      result.startNodeIndex
-    );
-    const seedSequences = [
-      nearestSequence,
-      ...clusteredSequence ? [clusteredSequence] : [],
-      deliveryNodeIndexes,
-      [...deliveryNodeIndexes].reverse()
-    ];
-    for (const seedSequence of seedSequences) {
-      const improved = improveSequenceWithTwoOpt2(
-        result.matrix,
-        seedSequence,
-        objective,
-        result.startNodeIndex,
-        result.endNodeIndex
-      );
-      const candidateSequences = [
-        seedSequence,
-        improved,
-        enforceLocalNearestRoadSequence(
-          result.matrix,
-          improved,
-          objective,
-          result.startNodeIndex,
-          options.localityMode
-        )
-      ];
-      for (const candidateSequence of candidateSequences) {
-        const metric = calculateSequenceObjective2(
-          result.matrix,
-          candidateSequence,
-          objective,
-          result.startNodeIndex,
-          result.endNodeIndex
-        );
-        const penalty = calculateAvoidableJumpPenalty2(
-          result.matrix,
-          candidateSequence,
-          objective,
-          result.startNodeIndex,
-          options.localityMode
-        ) + calculateClusterSwitchPenalty(
-          result.matrix,
-          locations,
-          candidateSequence,
-          options.localityMode
-        );
-        const score = metric + penalty;
-        if (score < bestScore) {
-          bestScore = score;
-          bestSequence = candidateSequence;
-        }
-      }
-    }
-  }
-  return buildRoadRoute(
-    result.matrix,
-    bestSequence ?? deliveryNodeIndexes,
-    result.startNodeIndex,
-    result.endNodeIndex
-  );
-}
 
 // server/routeAudit.ts
 init_geocodingConfidence();
@@ -9194,7 +8524,7 @@ function describeExpectedPlacement(movedSequence, anchorSequence, beforeSequence
     skippedDistanceKm
   )} km.`;
 }
-function coordinateKey2(stop) {
+function coordinateKey(stop) {
   return `${stop.latitude.toFixed(COORDINATE_PRECISION)},${stop.longitude.toFixed(
     COORDINATE_PRECISION
   )}`;
@@ -9581,7 +8911,7 @@ function auditRouteSequence(stops2, options = {}) {
     if (!Number.isFinite(stop.latitude) || !Number.isFinite(stop.longitude)) {
       continue;
     }
-    const key = coordinateKey2(stop);
+    const key = coordinateKey(stop);
     coordinateGroups.set(key, [...coordinateGroups.get(key) || [], stop]);
   }
   for (const group of Array.from(coordinateGroups.values())) {
@@ -9636,6 +8966,880 @@ function auditRouteSequence(stops2, options = {}) {
     clusterMetrics,
     issues
   };
+}
+
+// server/osrm.ts
+var ROAD_MATRIX_PARTITION_SIZE = 70;
+function readPositiveIntegerEnv2(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+function getRoadMatrixMaxNodes() {
+  return readPositiveIntegerEnv2(
+    "OSRM_MAX_TABLE_NODES",
+    100
+  );
+}
+function getRoadMatrixPartitionSize(options = {}) {
+  const maxDeliveryNodes = Math.max(1, getRoadMatrixMaxNodes() - 2);
+  if (options.maxPartitionSize) {
+    return Math.min(
+      Math.max(1, Math.floor(options.maxPartitionSize)),
+      maxDeliveryNodes
+    );
+  }
+  return Math.min(ROAD_MATRIX_PARTITION_SIZE, maxDeliveryNodes);
+}
+function getRequiredRoadMatrixNodes(locations, options = {}) {
+  return locations.length + Number(Boolean(options.startLocation)) + Number(Boolean(options.endLocation));
+}
+function getLocalitySettings2(localityMode = "local") {
+  if (localityMode === "strict") {
+    return {
+      immediateRadius: 0.25,
+      immediateExtraThreshold: 0.03,
+      localRadius: 2.5,
+      ratioThreshold: 1.12,
+      extraThreshold: 0.08,
+      longJumpThreshold: 0.35,
+      penaltyMultiplier: 4,
+      prematureClusterSwitchPenalty: 30,
+      routeCrossingPenalty: 30
+    };
+  }
+  if (localityMode === "balanced") {
+    return {
+      immediateRadius: 0.08,
+      immediateExtraThreshold: 0.08,
+      localRadius: 1.5,
+      ratioThreshold: 1.55,
+      extraThreshold: 0.35,
+      longJumpThreshold: 1.25,
+      penaltyMultiplier: 2,
+      prematureClusterSwitchPenalty: 15,
+      routeCrossingPenalty: 15
+    };
+  }
+  return {
+    immediateRadius: 0.12,
+    immediateExtraThreshold: 0.05,
+    localRadius: 2,
+    ratioThreshold: 1.28,
+    extraThreshold: 0.18,
+    longJumpThreshold: 0.7,
+    penaltyMultiplier: 3,
+    prematureClusterSwitchPenalty: 20,
+    routeCrossingPenalty: 20
+  };
+}
+function isAvoidableLocalJump2(nearestMetric, plannedMetric, settings) {
+  if (nearestMetric <= settings.immediateRadius && plannedMetric - nearestMetric >= settings.immediateExtraThreshold) {
+    return true;
+  }
+  const significantlyCloser = plannedMetric > Math.max(
+    nearestMetric * settings.ratioThreshold,
+    nearestMetric + settings.extraThreshold
+  );
+  const nearbyContext = nearestMetric <= settings.localRadius || plannedMetric <= settings.localRadius * 2.5;
+  const longJump = plannedMetric - nearestMetric >= settings.longJumpThreshold;
+  return significantlyCloser && (nearbyContext || longJump);
+}
+function isValidCoordinate(location) {
+  return Number.isFinite(location.latitude) && Number.isFinite(location.longitude) && location.latitude >= -90 && location.latitude <= 90 && location.longitude >= -180 && location.longitude <= 180;
+}
+function buildNodes(locations, options = {}) {
+  const nodes = locations.map((location, deliveryIndex) => ({
+    location,
+    deliveryIndex,
+    role: "delivery"
+  }));
+  const startNodeIndex = options.startLocation && isValidCoordinate(options.startLocation) ? nodes.push({ location: options.startLocation, role: "start" }) - 1 : void 0;
+  const endNodeIndex = options.endLocation && isValidCoordinate(options.endLocation) ? nodes.push({ location: options.endLocation, role: "end" }) - 1 : void 0;
+  return { nodes, startNodeIndex, endNodeIndex };
+}
+function buildOsrmTableUrl(nodes) {
+  const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const coordinates = nodes.map(({ location }) => `${location.longitude},${location.latitude}`).join(";");
+  return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
+}
+function hashText(value) {
+  return createHash4("sha256").update(value).digest("hex");
+}
+function coordinateKey2(node) {
+  return [
+    node.role,
+    node.deliveryIndex ?? "",
+    Number(node.location.latitude).toFixed(6),
+    Number(node.location.longitude).toFixed(6)
+  ].join(":");
+}
+function buildMatrixHashes(nodes) {
+  const orderedCoordinates = nodes.map(coordinateKey2).join("|");
+  const unorderedCoordinates = nodes.map(
+    (node) => [
+      node.role,
+      Number(node.location.latitude).toFixed(6),
+      Number(node.location.longitude).toFixed(6)
+    ].join(":")
+  ).sort().join("|");
+  const providerKey = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  return {
+    matrixHash: hashText(["driving", providerKey, orderedCoordinates].join("|")),
+    clusterHash: hashText(["driving", unorderedCoordinates].join("|"))
+  };
+}
+function isMatrixValue(value, expectedSize) {
+  return Array.isArray(value) && value.length === expectedSize && value.every(
+    (row) => Array.isArray(row) && row.length === expectedSize && row.every((item) => typeof item === "number" && Number.isFinite(item))
+  );
+}
+function buildOsrmHealthUrl() {
+  const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const coordinates = "-51.407,-22.121;-51.406,-22.122";
+  return `${baseUrl}/route/v1/driving/${coordinates}?overview=false&alternatives=false&steps=false`;
+}
+function normalizeMatrix(values, factor) {
+  if (!values?.length) return null;
+  const normalized = values.map(
+    (row) => row.map(
+      (value) => typeof value === "number" && Number.isFinite(value) ? value / factor : Infinity
+    )
+  );
+  return normalized.some((row) => row.some((value) => !Number.isFinite(value))) ? null : normalized;
+}
+async function fetchRoadMatrix(locations, options = {}) {
+  if (!ENV.osrmEnabled || locations.length === 0) return null;
+  const { nodes, startNodeIndex, endNodeIndex } = buildNodes(locations, options);
+  if (nodes.length < 2 || nodes.some((node) => !isValidCoordinate(node.location))) {
+    return null;
+  }
+  const startedAt = Date.now();
+  const provider = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const record = (success, failureReason = null, cacheHit = false) => {
+    const durationMs = Date.now() - startedAt;
+    if (!cacheHit) {
+      options.telemetry?.recordOsrmCall?.(durationMs, success);
+    }
+    options.telemetry?.recordOsrmMatrix?.({
+      nodeCount: nodes.length,
+      durationMs,
+      cacheHit,
+      success,
+      failureReason,
+      provider
+    });
+  };
+  const maxTableNodes = getRoadMatrixMaxNodes();
+  if (nodes.length > maxTableNodes) {
+    record(false, "matrix_too_large_for_provider");
+    return null;
+  }
+  const { matrixHash, clusterHash } = buildMatrixHashes(nodes);
+  const shouldUseMatrixCache = process.env.VITEST !== "true";
+  const cached = shouldUseMatrixCache ? await getOsrmMatrixCache(matrixHash).catch(() => null) : null;
+  if (cached && isMatrixValue(cached.distanceMatrix, nodes.length) && isMatrixValue(cached.durationMatrix, nodes.length)) {
+    record(true, null, true);
+    return {
+      matrix: {
+        nodes,
+        distancesKm: cached.distanceMatrix,
+        durationsMinutes: cached.durationMatrix
+      },
+      startNodeIndex,
+      endNodeIndex
+    };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
+  try {
+    const response = await fetch(buildOsrmTableUrl(nodes), {
+      signal: controller.signal,
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) {
+      record(false, `http_${response.status}`);
+      return null;
+    }
+    const data = await response.json();
+    if (data.code !== "Ok") {
+      record(false, `osrm_${data.code || "not_ok"}`);
+      return null;
+    }
+    const distancesKm = normalizeMatrix(data.distances, 1e3);
+    const durationsMinutes = normalizeMatrix(data.durations, 60);
+    if (!distancesKm || !durationsMinutes) {
+      record(false, "invalid_matrix");
+      return null;
+    }
+    if (shouldUseMatrixCache) {
+      await upsertOsrmMatrixCache({
+        matrixHash,
+        clusterHash,
+        stopCount: nodes.length,
+        durationMatrix: durationsMinutes,
+        distanceMatrix: distancesKm,
+        provider: "osrm",
+        osrmBaseUrl: provider
+      }).catch(() => null);
+    }
+    record(true);
+    return {
+      matrix: { nodes, distancesKm, durationsMinutes },
+      startNodeIndex,
+      endNodeIndex
+    };
+  } catch (error) {
+    record(false, error instanceof Error ? error.name || error.message : "fetch_error");
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+async function getOsrmHealth() {
+  const baseUrl = ENV.osrmBaseUrl.trim().replace(/\/+$/, "");
+  const configured = Boolean(baseUrl);
+  const baseHealth = {
+    enabled: ENV.osrmEnabled,
+    required: ENV.osrmRequired,
+    configured,
+    reachable: false,
+    baseUrl: configured ? baseUrl : null,
+    timeoutMs: ENV.osrmHealthTimeoutMs,
+    error: null
+  };
+  if (!ENV.osrmEnabled) {
+    return {
+      ...baseHealth,
+      error: ENV.osrmRequired ? "OSRM_REQUIRED=true, mas OSRM_ENABLED=false." : null
+    };
+  }
+  if (!configured) {
+    return {
+      ...baseHealth,
+      error: "OSRM_BASE_URL nao configurado."
+    };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ENV.osrmHealthTimeoutMs);
+  try {
+    const response = await fetch(buildOsrmHealthUrl(), {
+      signal: controller.signal,
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) {
+      return {
+        ...baseHealth,
+        error: `OSRM respondeu HTTP ${response.status}.`
+      };
+    }
+    const data = await response.json();
+    if (data.code !== "Ok") {
+      return {
+        ...baseHealth,
+        error: `OSRM respondeu code=${data.code ?? "indefinido"}.`
+      };
+    }
+    return {
+      ...baseHealth,
+      reachable: true
+    };
+  } catch (error) {
+    return {
+      ...baseHealth,
+      error: error instanceof Error ? error.message : "Falha ao consultar OSRM."
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+function getMetric(matrix, mode, from, to) {
+  return mode === "duration" ? matrix.durationsMinutes[from][to] : matrix.distancesKm[from][to];
+}
+function getObjectiveMetric(matrix, objective, from, to) {
+  return calculateObjectiveCost(
+    matrix.distancesKm[from][to],
+    matrix.durationsMinutes[from][to],
+    objective
+  );
+}
+function calculateSequenceMetric(matrix, sequence, mode, startNodeIndex, endNodeIndex) {
+  let total = 0;
+  if (sequence.length === 0) {
+    return startNodeIndex !== void 0 && endNodeIndex !== void 0 ? getMetric(matrix, mode, startNodeIndex, endNodeIndex) : 0;
+  }
+  if (startNodeIndex !== void 0) {
+    total += getMetric(matrix, mode, startNodeIndex, sequence[0]);
+  }
+  for (let index2 = 0; index2 < sequence.length - 1; index2 += 1) {
+    total += getMetric(matrix, mode, sequence[index2], sequence[index2 + 1]);
+  }
+  if (endNodeIndex !== void 0) {
+    total += getMetric(matrix, mode, sequence[sequence.length - 1], endNodeIndex);
+  }
+  return total;
+}
+function calculateSequenceObjective2(matrix, sequence, objective, startNodeIndex, endNodeIndex) {
+  const distanceKm = calculateSequenceMetric(
+    matrix,
+    sequence,
+    "distance",
+    startNodeIndex,
+    endNodeIndex
+  );
+  const durationMin = calculateSequenceMetric(
+    matrix,
+    sequence,
+    "duration",
+    startNodeIndex,
+    endNodeIndex
+  );
+  return calculateObjectiveCost(distanceKm, durationMin, objective);
+}
+function buildRoadRoute(matrix, sequence, startNodeIndex, endNodeIndex) {
+  return {
+    sequence: sequence.map((nodeIndex) => matrix.nodes[nodeIndex].deliveryIndex ?? nodeIndex),
+    totalDistance: Math.round(
+      calculateSequenceMetric(matrix, sequence, "distance", startNodeIndex, endNodeIndex) * 100
+    ) / 100,
+    totalTime: Math.round(
+      calculateSequenceMetric(matrix, sequence, "duration", startNodeIndex, endNodeIndex)
+    ),
+    waypoints: sequence.map((nodeIndex, sequenceIndex) => ({
+      ...matrix.nodes[nodeIndex].location,
+      sequence: sequenceIndex
+    }))
+  };
+}
+function buildNearestSequence(matrix, deliveryNodeIndexes, startIndex, objective, startNodeIndex) {
+  const available = new Set(deliveryNodeIndexes);
+  const sequence = [];
+  let currentNodeIndex = startNodeIndex ?? deliveryNodeIndexes[startIndex] ?? deliveryNodeIndexes[0];
+  if (startNodeIndex === void 0) {
+    available.delete(currentNodeIndex);
+    sequence.push(currentNodeIndex);
+  }
+  while (available.size > 0) {
+    let nearestIndex = -1;
+    let nearestMetric = Infinity;
+    for (const candidateIndex of Array.from(available)) {
+      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
+        nearestIndex = candidateIndex;
+      }
+    }
+    if (nearestIndex === -1) break;
+    available.delete(nearestIndex);
+    sequence.push(nearestIndex);
+    currentNodeIndex = nearestIndex;
+  }
+  return sequence;
+}
+function improveSequenceWithTwoOpt2(matrix, initialSequence, objective, startNodeIndex, endNodeIndex) {
+  let sequence = [...initialSequence];
+  let bestMetric = calculateSequenceObjective2(
+    matrix,
+    sequence,
+    objective,
+    startNodeIndex,
+    endNodeIndex
+  );
+  let improved = true;
+  let passes = 0;
+  const firstMutableIndex = startNodeIndex !== void 0 ? 1 : 0;
+  while (improved && passes < 8) {
+    improved = false;
+    passes += 1;
+    for (let i = firstMutableIndex; i < sequence.length - 1; i += 1) {
+      for (let k = i + 1; k < sequence.length; k += 1) {
+        const candidate = [
+          ...sequence.slice(0, i),
+          ...sequence.slice(i, k + 1).reverse(),
+          ...sequence.slice(k + 1)
+        ];
+        const candidateMetric = calculateSequenceObjective2(
+          matrix,
+          candidate,
+          objective,
+          startNodeIndex,
+          endNodeIndex
+        );
+        if (candidateMetric + 1e-6 < bestMetric) {
+          sequence = candidate;
+          bestMetric = candidateMetric;
+          improved = true;
+        }
+      }
+    }
+  }
+  return sequence;
+}
+function enforceLocalNearestRoadSequence(matrix, initialSequence, objective, startNodeIndex, localityMode = "local") {
+  const remaining = new Set(initialSequence);
+  const sequence = [];
+  let currentNodeIndex = startNodeIndex ?? initialSequence[0];
+  const localitySettings = getLocalitySettings2(localityMode);
+  while (remaining.size > 0) {
+    const plannedNext = initialSequence.find((nodeIndex) => remaining.has(nodeIndex));
+    if (plannedNext === void 0) break;
+    let nearestIndex = plannedNext;
+    let nearestMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
+    for (const candidateIndex of Array.from(remaining)) {
+      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
+        nearestIndex = candidateIndex;
+      }
+    }
+    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
+    const jumpIsOperationallyBad = nearestIndex !== plannedNext && isAvoidableLocalJump2(nearestMetric, plannedMetric, localitySettings);
+    const nextIndex = jumpIsOperationallyBad ? nearestIndex : plannedNext;
+    remaining.delete(nextIndex);
+    sequence.push(nextIndex);
+    currentNodeIndex = nextIndex;
+  }
+  return sequence;
+}
+function calculateAvoidableJumpPenalty2(matrix, sequence, objective, startNodeIndex, localityMode = "local") {
+  const settings = getLocalitySettings2(localityMode);
+  const remaining = new Set(sequence);
+  let currentNodeIndex = startNodeIndex ?? sequence[0];
+  let penalty = 0;
+  for (const plannedNext of sequence) {
+    remaining.delete(plannedNext);
+    const plannedMetric = getObjectiveMetric(matrix, objective, currentNodeIndex, plannedNext);
+    let nearestMetric = plannedMetric;
+    for (const candidateIndex of [plannedNext, ...Array.from(remaining)]) {
+      const metric = getObjectiveMetric(matrix, objective, currentNodeIndex, candidateIndex);
+      if (metric < nearestMetric) {
+        nearestMetric = metric;
+      }
+    }
+    if (isAvoidableLocalJump2(nearestMetric, plannedMetric, settings)) {
+      penalty += (plannedMetric - nearestMetric) * settings.penaltyMultiplier;
+    }
+    currentNodeIndex = plannedNext;
+  }
+  return penalty;
+}
+function getRouteCrossings(matrix, sequence) {
+  return detectRouteCrossings(
+    sequence.map((nodeIndex, sequenceIndex) => ({
+      ...matrix.nodes[nodeIndex].location,
+      sequence: sequenceIndex
+    }))
+  );
+}
+function removeGeometricRouteCrossings(matrix, initialSequence) {
+  let sequence = [...initialSequence];
+  const maxPasses = Math.max(8, sequence.length * 2);
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    const crossing = getRouteCrossings(matrix, sequence)[0];
+    if (!crossing) break;
+    const firstLegIndex = crossing.fromSequence;
+    const secondLegIndex = crossing.crossingFromSequence;
+    if (firstLegIndex < 0 || secondLegIndex <= firstLegIndex + 1 || secondLegIndex >= sequence.length - 1) {
+      break;
+    }
+    sequence = [
+      ...sequence.slice(0, firstLegIndex + 1),
+      ...sequence.slice(firstLegIndex + 1, secondLegIndex + 1).reverse(),
+      ...sequence.slice(secondLegIndex + 1)
+    ];
+  }
+  return sequence;
+}
+function calculateRouteCrossingPenalty(matrix, sequence, localityMode = "local") {
+  return getRouteCrossings(matrix, sequence).length * getLocalitySettings2(localityMode).routeCrossingPenalty;
+}
+function moveSequenceNodesBefore(sequence, movedNodes, beforeNode) {
+  if (!movedNodes.length || beforeNode === void 0 || movedNodes.includes(beforeNode)) {
+    return sequence;
+  }
+  const movedSet = new Set(movedNodes);
+  const remaining = sequence.filter((nodeIndex) => !movedSet.has(nodeIndex));
+  const insertionIndex = remaining.indexOf(beforeNode);
+  if (insertionIndex < 0) return sequence;
+  remaining.splice(insertionIndex, 0, ...movedNodes);
+  return remaining;
+}
+function getSequenceAudit(matrix, sequence, startNodeIndex, endNodeIndex) {
+  const totalDistanceKm = calculateSequenceMetric(
+    matrix,
+    sequence,
+    "distance",
+    startNodeIndex,
+    endNodeIndex
+  );
+  return auditRouteSequence(
+    sequence.map((nodeIndex, sequenceIndex) => ({
+      ...matrix.nodes[nodeIndex].location,
+      sequence: sequenceIndex
+    })),
+    {
+      startLocation: startNodeIndex === void 0 ? void 0 : matrix.nodes[startNodeIndex]?.location,
+      requireStartLocation: startNodeIndex !== void 0,
+      actualTotalDistanceKm: totalDistanceKm,
+      usedRoadMetrics: true
+    }
+  );
+}
+function repairSequenceByAudit(matrix, initialSequence, startNodeIndex, endNodeIndex) {
+  let sequence = [...initialSequence];
+  const seen = /* @__PURE__ */ new Set([sequence.join(",")]);
+  for (let pass = 0; pass < 3; pass += 1) {
+    const issues = getSequenceAudit(
+      matrix,
+      sequence,
+      startNodeIndex,
+      endNodeIndex
+    ).issues.filter(
+      (issue) => issue.type === "premature_region_exit" || issue.type === "region_revisited" || issue.type === "nearby_stop_skipped"
+    ).sort((a, b) => {
+      const priority = (issue) => issue.type === "premature_region_exit" ? 3 : issue.type === "region_revisited" ? 2 : 1;
+      return priority(b) - priority(a);
+    });
+    let repaired = sequence;
+    for (const issue of issues) {
+      const movedPositions = issue.type === "premature_region_exit" && issue.pendingSequences?.length ? issue.pendingSequences : issue.nearestSequence === void 0 ? [] : [issue.nearestSequence];
+      if (issue.toSequence === void 0 || movedPositions.length === 0) continue;
+      const movedNodes = movedPositions.map((position) => sequence[position]).filter((nodeIndex) => nodeIndex !== void 0);
+      const beforeNode = sequence[issue.toSequence];
+      if (beforeNode === void 0) continue;
+      repaired = moveSequenceNodesBefore(
+        repaired,
+        movedNodes,
+        beforeNode
+      );
+    }
+    const signature = repaired.join(",");
+    if (signature === sequence.join(",") || seen.has(signature)) break;
+    seen.add(signature);
+    sequence = repaired;
+  }
+  return sequence;
+}
+function calculateRouteAuditPenalty(matrix, sequence, startNodeIndex, endNodeIndex) {
+  return getSequenceAudit(
+    matrix,
+    sequence,
+    startNodeIndex,
+    endNodeIndex
+  ).issues.reduce(
+    (penalty, issue) => {
+      switch (issue.type) {
+        case "premature_region_exit":
+          return penalty + 60;
+        case "region_revisited":
+          return penalty + 50;
+        case "nearby_stop_skipped":
+          return penalty + 30;
+        default:
+          return penalty;
+      }
+    },
+    0
+  );
+}
+function buildClusteredDeliveryNodeSequence(locations, deliveryNodeIndexes, options = {}) {
+  const clusters = clusterStops(locations, options);
+  if (clusters.length <= 1) return null;
+  const nodeByDeliveryIndex = /* @__PURE__ */ new Map();
+  deliveryNodeIndexes.forEach((nodeIndex, deliveryIndex) => {
+    nodeByDeliveryIndex.set(deliveryIndex, nodeIndex);
+  });
+  const sequence = clusters.flatMap(
+    (cluster) => cluster.stops.map((stop) => nodeByDeliveryIndex.get(stop.originalIndex)).filter((nodeIndex) => nodeIndex !== void 0)
+  );
+  return sequence.length === deliveryNodeIndexes.length ? sequence : null;
+}
+function calculateClusterSwitchPenalty(matrix, locations, sequence, localityMode = "local") {
+  const settings = getLocalitySettings2(localityMode);
+  const clusters = clusterStops(locations, { localityMode });
+  if (clusters.length <= 1) return 0;
+  const clusterByDeliveryIndex = /* @__PURE__ */ new Map();
+  for (const cluster of clusters) {
+    if (cluster.stops.length < 2) continue;
+    for (const stop of cluster.stops) {
+      clusterByDeliveryIndex.set(stop.originalIndex, cluster.clusterId);
+    }
+  }
+  const clusterByNodeIndex = /* @__PURE__ */ new Map();
+  matrix.nodes.forEach((node, nodeIndex) => {
+    if (node.deliveryIndex === void 0) return;
+    const clusterId = clusterByDeliveryIndex.get(node.deliveryIndex);
+    if (clusterId) clusterByNodeIndex.set(nodeIndex, clusterId);
+  });
+  let penalty = 0;
+  for (let sequenceIndex = 1; sequenceIndex < sequence.length; sequenceIndex += 1) {
+    const previousCluster = clusterByNodeIndex.get(sequence[sequenceIndex - 1]);
+    const currentCluster = clusterByNodeIndex.get(sequence[sequenceIndex]);
+    if (!previousCluster || !currentCluster || previousCluster === currentCluster) {
+      continue;
+    }
+    const pendingInPreviousCluster = sequence.slice(sequenceIndex + 1).filter((nodeIndex) => clusterByNodeIndex.get(nodeIndex) === previousCluster);
+    if (pendingInPreviousCluster.length > 0) {
+      const fromNode = sequence[sequenceIndex - 1];
+      const toNode = sequence[sequenceIndex];
+      const switchDuration = matrix.durationsMinutes[fromNode]?.[toNode] ?? 0;
+      const averagePendingDuration = pendingInPreviousCluster.reduce(
+        (total, pendingNode) => total + (matrix.durationsMinutes[fromNode]?.[pendingNode] ?? 0),
+        0
+      ) / pendingInPreviousCluster.length;
+      penalty += settings.prematureClusterSwitchPenalty * pendingInPreviousCluster.length + switchDuration * settings.penaltyMultiplier + averagePendingDuration * settings.penaltyMultiplier;
+    }
+  }
+  return penalty;
+}
+function chooseNextPartition(partitions, currentLocation) {
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+  partitions.forEach((partition, index2) => {
+    const distance = calculateDistance(currentLocation, partition.centroid);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index2;
+    }
+  });
+  return bestIndex;
+}
+async function optimizePartitionedRouteWithRoadMetrics(locations, mode, options = {}) {
+  const maxPartitionSize = getRoadMatrixPartitionSize(options);
+  const partitions = partitionStopsForOptimization(locations, {
+    ...options,
+    maxPartitionSize,
+    forceMicrocluster: true
+  });
+  if (partitions.length <= 1) return null;
+  const remaining = [...partitions];
+  const largestPartitionSize = Math.max(
+    0,
+    ...partitions.map((partition) => partition.stops.length)
+  );
+  const finalSequence = [];
+  const finalWaypoints = [];
+  let totalDistance = 0;
+  let totalTime = 0;
+  let currentLocation = options.startLocation ?? remaining[0].centroid;
+  while (remaining.length > 0) {
+    const partitionIndex = chooseNextPartition(remaining, currentLocation);
+    const [partition] = remaining.splice(partitionIndex, 1);
+    const isLastPartition = remaining.length === 0;
+    const partitionLocations = partition.stops.map(({ originalIndex, ...stop }) => stop);
+    const optimizedPartition = await optimizeRouteWithRoadMetrics(
+      partitionLocations,
+      mode,
+      0,
+      {
+        ...options,
+        startLocation: currentLocation,
+        endLocation: isLastPartition ? options.endLocation : void 0,
+        partitionLargeRoutes: false
+      }
+    );
+    if (!optimizedPartition) return null;
+    totalDistance += optimizedPartition.totalDistance;
+    totalTime += optimizedPartition.totalTime;
+    for (const localIndex of optimizedPartition.sequence) {
+      const originalStop = partition.stops[localIndex];
+      if (!originalStop) return null;
+      finalSequence.push(originalStop.originalIndex);
+      const { originalIndex, ...waypoint } = originalStop;
+      finalWaypoints.push({
+        ...waypoint,
+        sequence: finalWaypoints.length
+      });
+    }
+    const lastWaypoint = finalWaypoints[finalWaypoints.length - 1];
+    if (lastWaypoint) currentLocation = lastWaypoint;
+  }
+  return {
+    sequence: finalSequence,
+    totalDistance: Math.round(totalDistance * 100) / 100,
+    totalTime: Math.round(totalTime),
+    waypoints: finalWaypoints,
+    metadata: {
+      partitioned: true,
+      partitionCount: partitions.length,
+      maxPartitionSize,
+      largestPartitionSize
+    }
+  };
+}
+async function buildSequentialRouteWithRoadMetrics(locations, options = {}) {
+  const maxTableNodes = getRoadMatrixMaxNodes();
+  const requiredNodes = getRequiredRoadMatrixNodes(locations, options);
+  if (requiredNodes > maxTableNodes) {
+    const maxSegmentDeliveries = Math.max(1, maxTableNodes - 2);
+    const finalWaypoints = [];
+    let totalDistance = 0;
+    let totalTime = 0;
+    let offset = 0;
+    let segmentCount = 0;
+    while (offset < locations.length) {
+      const segmentLocations = locations.slice(
+        offset,
+        offset + maxSegmentDeliveries
+      );
+      const isLastSegment = offset + segmentLocations.length >= locations.length;
+      const segmentStart = offset === 0 ? options.startLocation : locations[offset - 1];
+      const segmentResult = await buildSequentialRouteWithRoadMetrics(
+        segmentLocations,
+        {
+          ...options,
+          startLocation: segmentStart,
+          endLocation: isLastSegment ? options.endLocation : void 0,
+          partitionLargeRoutes: false
+        }
+      );
+      if (!segmentResult) return null;
+      totalDistance += segmentResult.totalDistance;
+      totalTime += segmentResult.totalTime;
+      segmentLocations.forEach((location) => {
+        finalWaypoints.push({
+          ...location,
+          sequence: finalWaypoints.length
+        });
+      });
+      offset += segmentLocations.length;
+      segmentCount += 1;
+    }
+    return {
+      sequence: locations.map((_, index2) => index2),
+      totalDistance: Math.round(totalDistance * 100) / 100,
+      totalTime: Math.round(totalTime),
+      waypoints: finalWaypoints,
+      metadata: {
+        partitioned: true,
+        partitionCount: segmentCount,
+        maxPartitionSize: maxSegmentDeliveries,
+        largestPartitionSize: Math.min(maxSegmentDeliveries, locations.length)
+      }
+    };
+  }
+  const result = await fetchRoadMatrix(locations, options);
+  if (!result) return null;
+  const deliveryNodeIndexes = result.matrix.nodes.map((node, nodeIndex) => node.role === "delivery" ? nodeIndex : -1).filter((nodeIndex) => nodeIndex >= 0);
+  return buildRoadRoute(
+    result.matrix,
+    deliveryNodeIndexes,
+    result.startNodeIndex,
+    result.endNodeIndex
+  );
+}
+async function optimizeRouteWithRoadMetrics(locations, mode = "balanced", startIndex = 0, options = {}) {
+  const exceedsProviderMatrixLimit = getRequiredRoadMatrixNodes(locations, options) > getRoadMatrixMaxNodes();
+  const partitions = options.partitionLargeRoutes !== false && exceedsProviderMatrixLimit ? partitionStopsForOptimization(locations, {
+    ...options,
+    maxPartitionSize: getRoadMatrixPartitionSize(options),
+    forceMicrocluster: true
+  }) : [];
+  if (options.partitionLargeRoutes !== false && exceedsProviderMatrixLimit && partitions.length > 1) {
+    return optimizePartitionedRouteWithRoadMetrics(locations, mode, options);
+  }
+  const result = await fetchRoadMatrix(locations, options);
+  if (!result) return null;
+  const deliveryNodeIndexes = result.matrix.nodes.map((node, nodeIndex) => node.role === "delivery" ? nodeIndex : -1).filter((nodeIndex) => nodeIndex >= 0);
+  const objective = chooseObjective(mode);
+  const clusteredSequence = buildClusteredDeliveryNodeSequence(
+    locations,
+    deliveryNodeIndexes,
+    options
+  );
+  const startCandidates = result.startNodeIndex !== void 0 || deliveryNodeIndexes.length > 40 ? [Math.min(Math.max(startIndex, 0), Math.max(deliveryNodeIndexes.length - 1, 0))] : deliveryNodeIndexes.map((_, index2) => index2);
+  let bestSequence = null;
+  let bestScore = Infinity;
+  for (const candidateStartIndex of startCandidates) {
+    const nearestSequence = buildNearestSequence(
+      result.matrix,
+      deliveryNodeIndexes,
+      candidateStartIndex,
+      objective,
+      result.startNodeIndex
+    );
+    const seedSequences = [
+      nearestSequence,
+      ...clusteredSequence ? [clusteredSequence] : [],
+      deliveryNodeIndexes,
+      [...deliveryNodeIndexes].reverse()
+    ];
+    for (const seedSequence of seedSequences) {
+      const improved = improveSequenceWithTwoOpt2(
+        result.matrix,
+        seedSequence,
+        objective,
+        result.startNodeIndex,
+        result.endNodeIndex
+      );
+      const auditRepaired = repairSequenceByAudit(
+        result.matrix,
+        improved,
+        result.startNodeIndex,
+        result.endNodeIndex
+      );
+      const candidateSequences = [
+        seedSequence,
+        improved,
+        repairSequenceByAudit(
+          result.matrix,
+          seedSequence,
+          result.startNodeIndex,
+          result.endNodeIndex
+        ),
+        removeGeometricRouteCrossings(result.matrix, improved),
+        auditRepaired,
+        removeGeometricRouteCrossings(result.matrix, auditRepaired),
+        enforceLocalNearestRoadSequence(
+          result.matrix,
+          improved,
+          objective,
+          result.startNodeIndex,
+          options.localityMode
+        )
+      ];
+      for (const candidateSequence of candidateSequences) {
+        const metric = calculateSequenceObjective2(
+          result.matrix,
+          candidateSequence,
+          objective,
+          result.startNodeIndex,
+          result.endNodeIndex
+        );
+        const penalty = calculateAvoidableJumpPenalty2(
+          result.matrix,
+          candidateSequence,
+          objective,
+          result.startNodeIndex,
+          options.localityMode
+        ) + calculateClusterSwitchPenalty(
+          result.matrix,
+          locations,
+          candidateSequence,
+          options.localityMode
+        ) + calculateRouteCrossingPenalty(
+          result.matrix,
+          candidateSequence,
+          options.localityMode
+        ) + calculateRouteAuditPenalty(
+          result.matrix,
+          candidateSequence,
+          result.startNodeIndex,
+          result.endNodeIndex
+        );
+        const score = metric + penalty;
+        if (score < bestScore) {
+          bestScore = score;
+          bestSequence = candidateSequence;
+        }
+      }
+    }
+  }
+  return buildRoadRoute(
+    result.matrix,
+    bestSequence ?? deliveryNodeIndexes,
+    result.startNodeIndex,
+    result.endNodeIndex
+  );
 }
 
 // server/_core/llm.ts
@@ -10487,7 +10691,7 @@ var heartbeatRedis = null;
 var heartbeatRedisListenersAttached = false;
 var queueListenersAttached = false;
 function getConnectionOptions() {
-  if (!ENV.bullmqRedisUrl) return null;
+  if (!ENV.optimizationQueueEnabled || !ENV.bullmqRedisUrl) return null;
   const parsed = new URL(ENV.bullmqRedisUrl);
   return {
     host: parsed.hostname,
@@ -10526,7 +10730,7 @@ function getHeartbeatRedis() {
   return heartbeatRedis;
 }
 function isOptimizationQueueConfigured() {
-  return Boolean(ENV.bullmqRedisUrl);
+  return ENV.optimizationQueueEnabled && Boolean(ENV.bullmqRedisUrl);
 }
 function getOptimizationQueue() {
   const connection = getConnectionOptions();
@@ -10551,8 +10755,20 @@ function getOptimizationQueue() {
   return queue;
 }
 async function getOptimizationQueueHealth() {
+  if (!ENV.optimizationQueueEnabled) {
+    return {
+      enabled: false,
+      configured: false,
+      reachable: false,
+      queueName: OPTIMIZATION_QUEUE_NAME,
+      counts: null,
+      maxSyncStops: ENV.maxSyncStops,
+      error: null
+    };
+  }
   if (!isOptimizationQueueConfigured()) {
     return {
+      enabled: true,
       configured: false,
       reachable: false,
       queueName: OPTIMIZATION_QUEUE_NAME,
@@ -10564,6 +10780,7 @@ async function getOptimizationQueueHealth() {
     const optimizationQueue = getOptimizationQueue();
     if (!optimizationQueue) {
       return {
+        enabled: true,
         configured: true,
         reachable: false,
         queueName: OPTIMIZATION_QUEUE_NAME,
@@ -10586,6 +10803,7 @@ async function getOptimizationQueueHealth() {
     const redis = await getRedisPolicyHealth();
     await recordWorkerUnderReplicatedAlert(workerCount).catch(() => void 0);
     return {
+      enabled: true,
       configured: true,
       reachable: true,
       queueName: OPTIMIZATION_QUEUE_NAME,
@@ -10603,6 +10821,7 @@ async function getOptimizationQueueHealth() {
     };
   } catch (error) {
     return {
+      enabled: true,
       configured: true,
       reachable: false,
       queueName: OPTIMIZATION_QUEUE_NAME,
@@ -14824,7 +15043,14 @@ function buildOperationalReadiness(args) {
       required: Boolean(args.osrm.required)
     });
   }
-  if (!args.queue?.configured) {
+  if (args.queue?.enabled === false) {
+    addCheck(
+      "queue",
+      "ready",
+      "Fila assincrona desativada explicitamente; beta opera em modo sincrono.",
+      { maxSyncStops: args.queue.maxSyncStops ?? ENV.maxSyncStops }
+    );
+  } else if (!args.queue?.configured) {
     addCheck(
       "queue",
       "attention",

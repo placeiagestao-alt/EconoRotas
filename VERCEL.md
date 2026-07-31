@@ -37,7 +37,13 @@ VITE_ENABLE_DEV_LOGIN=false
 PUBLIC_APP_URL=https://econo-rotas.vercel.app
 ALLOWED_ORIGINS=https://econo-rotas.vercel.app,https://econo-rotas-bxso2tmdj-anderson-s-projects-ef32a938.vercel.app,capacitor://localhost,https://localhost,http://localhost
 NOMINATIM_CONTACT_EMAIL=placeiagestao@gmail.com
+OPTIMIZATION_QUEUE_ENABLED=false
 ```
+
+No beta de um usuario, `OPTIMIZATION_QUEUE_ENABLED=false` mantem rotas de ate
+`MAX_SYNC_STOPS` no fluxo sincrono e impede consumo desnecessario do Redis/BullMQ.
+Para ativar processamento assincrono, configure Redis, workers externos e altere
+essa variavel para `true` na mesma promocao operacional.
 
 `DATABASE_URL` e obrigatorio. O backend nao sobe em producao com banco temporario, porque isso apaga usuarios, rotas e historico em reinicios/cold starts.
 

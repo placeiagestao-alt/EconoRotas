@@ -4,10 +4,12 @@ import {
   getOsrmHealth,
   optimizeRouteWithRoadMetrics,
 } from "./osrm";
+import { detectRouteCrossings } from "./routeAudit";
 import { ENV } from "./_core/env";
 import type { Location } from "./optimization";
 
 const originalFetch = globalThis.fetch;
+const originalOsrmMaxTableNodes = process.env.OSRM_MAX_TABLE_NODES;
 
 function mockOsrmTable(distances: number[][], durations: number[][] = distances) {
   ENV.osrmEnabled = true;
@@ -62,6 +64,11 @@ describe("OSRM route metrics", () => {
     ENV.osrmEnabled = false;
     ENV.osrmRequired = false;
     ENV.osrmBaseUrl = "https://router.project-osrm.org";
+    if (originalOsrmMaxTableNodes === undefined) {
+      delete process.env.OSRM_MAX_TABLE_NODES;
+    } else {
+      process.env.OSRM_MAX_TABLE_NODES = originalOsrmMaxTableNodes;
+    }
     vi.restoreAllMocks();
   });
 
@@ -380,5 +387,103 @@ describe("OSRM route metrics", () => {
     expect(result?.sequence).toHaveLength(130);
     expect(coordinateCounts.length).toBeGreaterThan(1);
     expect(Math.max(...coordinateCounts)).toBeLessThan(120);
+  });
+
+  it("partitions optimized routes when provider node limit is below 100", async () => {
+    process.env.OSRM_MAX_TABLE_NODES = "50";
+    const coordinateCounts = mockDynamicOsrmTable();
+    const locations: Location[] = Array.from({ length: 60 }, (_, index) => ({
+      latitude: -22.12 + index * 0.0001,
+      longitude: -51.4 + index * 0.0001,
+      address: `Parada ${index + 1}`,
+    }));
+
+    const result = await optimizeRouteWithRoadMetrics(locations, "balanced", 0, {
+      startLocation: {
+        latitude: -22.13,
+        longitude: -51.41,
+        address: "Origem",
+      },
+      endLocation: {
+        latitude: -22.14,
+        longitude: -51.42,
+        address: "Destino",
+      },
+    });
+
+    expect(result?.sequence).toHaveLength(60);
+    expect(result?.metadata?.partitioned).toBe(true);
+    expect(coordinateCounts.length).toBeGreaterThan(1);
+    expect(Math.max(...coordinateCounts)).toBeLessThanOrEqual(50);
+  });
+
+  it("preserves STOP order while splitting sequential road matrices", async () => {
+    process.env.OSRM_MAX_TABLE_NODES = "50";
+    const coordinateCounts = mockDynamicOsrmTable();
+    const locations: Location[] = Array.from({ length: 60 }, (_, index) => ({
+      latitude: -22.12 + index * 0.0001,
+      longitude: -51.4 + index * 0.0001,
+      address: `STOP ${index + 1}`,
+    }));
+
+    const result = await buildSequentialRouteWithRoadMetrics(locations, {
+      startLocation: {
+        latitude: -22.13,
+        longitude: -51.41,
+        address: "Origem",
+      },
+      endLocation: {
+        latitude: -22.14,
+        longitude: -51.42,
+        address: "Destino",
+      },
+    });
+
+    expect(result?.sequence).toEqual(locations.map((_, index) => index));
+    expect(result?.waypoints.map((waypoint) => waypoint.address)).toEqual(
+      locations.map((location) => location.address)
+    );
+    expect(result?.metadata?.partitioned).toBe(true);
+    expect(coordinateCounts.length).toBeGreaterThan(1);
+    expect(Math.max(...coordinateCounts)).toBeLessThanOrEqual(50);
+  });
+
+  it("prefers a crossing-free candidate when road cost is similar", async () => {
+    mockOsrmTable([
+      [0, 1, 1.2, 2, 1],
+      [1, 0, 1, 1.2, 10],
+      [1.2, 1, 0, 1, 10],
+      [2, 1.2, 1, 0, 10],
+      [1, 10, 10, 10, 0],
+    ]);
+    const locations: Location[] = [
+      { latitude: 0, longitude: 0, address: "A" },
+      { latitude: 1, longitude: 1, address: "B" },
+      { latitude: 0, longitude: 1, address: "C" },
+      { latitude: 1, longitude: 0, address: "D" },
+    ];
+
+    const result = await optimizeRouteWithRoadMetrics(
+      locations,
+      "shortest_distance",
+      0,
+      {
+        startLocation: {
+          latitude: -1,
+          longitude: 0,
+          address: "Origem",
+        },
+        localityMode: "strict",
+      }
+    );
+    const crossings = detectRouteCrossings(
+      (result?.waypoints ?? []).map((waypoint, sequence) => ({
+        ...waypoint,
+        sequence,
+      }))
+    );
+
+    expect(result?.sequence).toHaveLength(4);
+    expect(crossings).toHaveLength(0);
   });
 });

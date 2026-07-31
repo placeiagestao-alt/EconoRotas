@@ -44,6 +44,7 @@ import {
 } from "./createRouteVoiceStops";
 import {
   getStopPackageNumbers,
+  mergeStopMetadata,
   normalizeStopMetadata,
   normalizeStopSourceProvider,
   parseLegacyStopNotes,
@@ -331,6 +332,7 @@ export default function CreateRoute() {
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const [pendingVoiceStopIndex, setPendingVoiceStopIndex] = useState<number | null>(null);
   const pendingVoiceStopIndexRef = useRef<number | null>(null);
+  const routeSubmissionRef = useRef(false);
   const [voiceAddressSuggestions, setVoiceAddressSuggestions] = useState<AddressSuggestion[]>([]);
   const [isLoadingVoiceSuggestions, setIsLoadingVoiceSuggestions] = useState(false);
   const [voiceSuggestionError, setVoiceSuggestionError] = useState<string | null>(null);
@@ -396,7 +398,7 @@ export default function CreateRoute() {
     return resolved;
   };
 
-  const createAndOptimizeWithNetworkRetry = async (
+  const createAndOptimizeSafely = async (
     payload: Parameters<typeof createAndOptimizeMutation.mutateAsync>[0]
   ) => {
     try {
@@ -406,20 +408,9 @@ export default function CreateRoute() {
         throw error;
       }
 
-      await assertApiReachable();
-      await wait(750);
-
-      try {
-        return await createAndOptimizeMutation.mutateAsync(payload);
-      } catch (retryError) {
-        if (isNetworkFetchError(retryError)) {
-          throw new Error(
-            "A conexão com o servidor caiu durante a criação da rota. Confira a internet do aparelho e tente novamente."
-          );
-        }
-
-        throw retryError;
-      }
+      throw new Error(
+        "A conexão caiu durante a criação. Para evitar duplicar a rota, confira Minhas Rotas antes de tentar novamente."
+      );
     }
   };
 
@@ -1117,10 +1108,10 @@ export default function CreateRoute() {
           isUnsequencedStop: stop.isUnsequencedStop,
           rawStop: stop.rawStop,
           stopValueStatus: stop.stopValueStatus,
-          metadata: normalizeStopMetadata({
-            ...stop.metadata,
-            ...parseStopNotes(stop.notes).metadata,
-          }),
+          metadata: mergeStopMetadata(
+            stop.metadata,
+            parseStopNotes(stop.notes).metadata
+          ),
           notes: stop.notes,
           sourceRow: stop.sourceRow,
         };
@@ -1687,6 +1678,13 @@ export default function CreateRoute() {
       return;
     }
 
+    if (routeSubmissionRef.current) {
+      toast.message("A rota já está sendo criada.");
+      return;
+    }
+
+    routeSubmissionRef.current = true;
+
     try {
       let startPayload = getRoutePointPayload(validStartPoint);
       const endPayload = getRoutePointPayload(validEndPoint);
@@ -1728,7 +1726,7 @@ export default function CreateRoute() {
           stop.geocodingSuspect ??
           getDefaultStopConfidence(stop).suspect,
       }));
-      const result = await createAndOptimizeWithNetworkRetry({
+      const result = await createAndOptimizeSafely({
         name,
         description,
         mode,
@@ -1760,6 +1758,8 @@ export default function CreateRoute() {
       navigate(`/routes/${route.id}`);
     } catch (error: any) {
       toast.error(error.message || "Erro ao criar rota");
+    } finally {
+      routeSubmissionRef.current = false;
     }
   };
 

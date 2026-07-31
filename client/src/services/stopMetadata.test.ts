@@ -3,6 +3,7 @@ import {
   getStopPackageNumbers,
   mergeStopMetadata,
   normalizeStopMetadata,
+  parseLegacyStopNotes,
 } from "@shared/stopMetadata";
 
 describe("stop metadata", () => {
@@ -48,5 +49,27 @@ describe("stop metadata", () => {
 
     expect(metadata.sourceAddressVariants).toEqual(["Rua A, 10", "Rua B, 20"]);
     expect(metadata.sourceAddressConflict).toBe(true);
+  });
+
+  it("preserves every package when legacy notes contain a visual +N summary", () => {
+    const packageNumbers = Array.from(
+      { length: 10 },
+      (_, index) => `BR-PKG-${String(index + 1).padStart(3, "0")}`
+    );
+    const legacy = parseLegacyStopNotes(
+      `10x entregas neste endereco | Pacotes: ${packageNumbers
+        .slice(0, 8)
+        .join(", ")} +2`
+    );
+    const metadata = mergeStopMetadata(
+      {
+        packageNumber: packageNumbers[0],
+        packageNumbers,
+      },
+      legacy.metadata
+    );
+
+    expect(legacy.metadata.packageNumbers).not.toContain("+2");
+    expect(metadata.packageNumbers).toEqual(packageNumbers);
   });
 });

@@ -111,6 +111,7 @@ export const ENV = {
     readAtLeastOptimizedRouteStopLimit(process.env.MAX_GEOGRAPHIC_FALLBACK_STOPS),
     OPTIMIZED_ROUTE_STOP_LIMIT
   ),
+  optimizationQueueEnabled: process.env.OPTIMIZATION_QUEUE_ENABLED !== "false",
   bullmqRedisUrl: firstEnvString(
     process.env.BULLMQ_REDIS_URL,
     process.env.ECONOROTAS_REDIS_URL,

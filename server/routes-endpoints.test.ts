@@ -39,6 +39,7 @@ describe("Route endpoints", () => {
     ENV.maxSyncStops = 160;
     ENV.maxRouteStops = 160;
     ENV.maxGeographicFallbackStops = 160;
+    ENV.optimizationQueueEnabled = true;
     ENV.bullmqRedisUrl = "";
     ENV.adminEmails = "";
   });
