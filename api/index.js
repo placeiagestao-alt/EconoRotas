@@ -649,6 +649,14 @@ function readPositiveInt(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
 }
+function readNonNegativeInt(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : fallback;
+}
+function readPositiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 function readAtLeastOptimizedRouteStopLimit(value) {
   const parsed = readPositiveInt(value, OPTIMIZED_ROUTE_STOP_LIMIT);
   return Math.max(parsed, OPTIMIZED_ROUTE_STOP_LIMIT);
@@ -706,6 +714,15 @@ var init_env = __esm({
       osrmBaseUrl: process.env.OSRM_BASE_URL ?? "https://router.project-osrm.org",
       osrmRequestTimeoutMs: Number(process.env.OSRM_REQUEST_TIMEOUT_MS || 8e3),
       osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3e3),
+      osrmMaxRetries: Math.min(
+        readNonNegativeInt(process.env.OSRM_MAX_RETRIES, 2),
+        4
+      ),
+      osrmRetryBaseDelayMs: Math.min(
+        readNonNegativeInt(process.env.OSRM_RETRY_BASE_DELAY_MS, 200),
+        2e3
+      ),
+      osrmFallbackSpeed: readPositiveNumber(process.env.OSRM_FALLBACK_SPEED, 8.33),
       osrmRequired: process.env.OSRM_REQUIRED === "true",
       osrmRequiredMinStops: readPositiveInt(process.env.OSRM_REQUIRED_MIN_STOPS, 101),
       maxSyncStops: Math.min(
@@ -9060,7 +9077,12 @@ function buildNodes(locations, options = {}) {
 function buildOsrmTableUrl(nodes) {
   const baseUrl = ENV.osrmBaseUrl.replace(/\/+$/, "");
   const coordinates = nodes.map(({ location }) => `${location.longitude},${location.latitude}`).join(";");
-  return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
+  const params = new URLSearchParams({
+    annotations: "duration,distance",
+    fallback_speed: String(ENV.osrmFallbackSpeed),
+    fallback_coordinate: "input"
+  });
+  return `${baseUrl}/table/v1/driving/${coordinates}?${params.toString()}`;
 }
 function hashText(value) {
   return createHash4("sha256").update(value).digest("hex");
@@ -9083,8 +9105,11 @@ function buildMatrixHashes(nodes) {
     ].join(":")
   ).sort().join("|");
   const providerKey = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const fallbackKey = `fallback_speed:${ENV.osrmFallbackSpeed}`;
   return {
-    matrixHash: hashText(["driving", providerKey, orderedCoordinates].join("|")),
+    matrixHash: hashText(
+      ["driving", providerKey, fallbackKey, orderedCoordinates].join("|")
+    ),
     clusterHash: hashText(["driving", unorderedCoordinates].join("|"))
   };
 }
@@ -9107,6 +9132,16 @@ function normalizeMatrix(values, factor) {
   );
   return normalized.some((row) => row.some((value) => !Number.isFinite(value))) ? null : normalized;
 }
+var RETRYABLE_OSRM_STATUSES = /* @__PURE__ */ new Set([408, 425, 429, 500, 502, 503, 504]);
+function waitForRetry(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+function getOsrmFailureReason(error) {
+  return error instanceof Error ? error.name || error.message : "fetch_error";
+}
+function isRetryableOsrmError(error) {
+  return !(error instanceof Error && error.name === "AbortError");
+}
 async function fetchRoadMatrix(locations, options = {}) {
   if (!ENV.osrmEnabled || locations.length === 0) return null;
   const { nodes, startNodeIndex, endNodeIndex } = buildNodes(locations, options);
@@ -9115,16 +9150,15 @@ async function fetchRoadMatrix(locations, options = {}) {
   }
   const startedAt = Date.now();
   const provider = ENV.osrmBaseUrl.replace(/\/+$/, "");
-  const record = (success, failureReason = null, cacheHit = false) => {
+  const record = (success, failureReason = null, cacheHit = false, attemptCount = 0, estimatedCellCount = 0) => {
     const durationMs = Date.now() - startedAt;
-    if (!cacheHit) {
-      options.telemetry?.recordOsrmCall?.(durationMs, success);
-    }
     options.telemetry?.recordOsrmMatrix?.({
       nodeCount: nodes.length,
       durationMs,
       cacheHit,
       success,
+      attemptCount,
+      estimatedCellCount,
       failureReason,
       provider
     });
@@ -9149,51 +9183,85 @@ async function fetchRoadMatrix(locations, options = {}) {
       endNodeIndex
     };
   }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
-  try {
-    const response = await fetch(buildOsrmTableUrl(nodes), {
-      signal: controller.signal,
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) {
-      record(false, `http_${response.status}`);
+  const maxAttempts = ENV.osrmMaxRetries + 1;
+  let lastFailureReason = "fetch_error";
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptStartedAt = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
+    try {
+      const response = await fetch(buildOsrmTableUrl(nodes), {
+        signal: controller.signal,
+        headers: { Accept: "application/json" }
+      });
+      if (!response.ok) {
+        lastFailureReason = `http_${response.status}`;
+        options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, false);
+        if (attempt < maxAttempts && RETRYABLE_OSRM_STATUSES.has(response.status)) {
+          await waitForRetry(ENV.osrmRetryBaseDelayMs * 2 ** (attempt - 1));
+          continue;
+        }
+        record(false, lastFailureReason, false, attempt);
+        return null;
+      }
+      const data = await response.json();
+      if (data.code !== "Ok") {
+        lastFailureReason = `osrm_${data.code || "not_ok"}`;
+        options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, false);
+        record(false, lastFailureReason, false, attempt);
+        return null;
+      }
+      const distancesKm = normalizeMatrix(data.distances, 1e3);
+      const durationsMinutes = normalizeMatrix(data.durations, 60);
+      if (!distancesKm || !durationsMinutes) {
+        lastFailureReason = "invalid_matrix";
+        options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, false);
+        record(false, lastFailureReason, false, attempt);
+        return null;
+      }
+      const estimatedCellCount = Array.isArray(data.fallback_speed_cells) ? data.fallback_speed_cells.filter(
+        (cell) => Array.isArray(cell) && cell.length === 2 && cell.every((value) => Number.isInteger(value) && value >= 0)
+      ).length : 0;
+      options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, true);
+      if (shouldUseMatrixCache && estimatedCellCount === 0) {
+        await upsertOsrmMatrixCache({
+          matrixHash,
+          clusterHash,
+          stopCount: nodes.length,
+          durationMatrix: durationsMinutes,
+          distanceMatrix: distancesKm,
+          provider: "osrm",
+          osrmBaseUrl: provider
+        }).catch(() => null);
+      }
+      const completionReason = estimatedCellCount > 0 ? `fallback_speed_cells:${estimatedCellCount}` : attempt > 1 ? `recovered_after_retry:${attempt - 1}` : null;
+      record(
+        true,
+        completionReason,
+        false,
+        attempt,
+        estimatedCellCount
+      );
+      return {
+        matrix: { nodes, distancesKm, durationsMinutes },
+        startNodeIndex,
+        endNodeIndex
+      };
+    } catch (error) {
+      lastFailureReason = getOsrmFailureReason(error);
+      options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, false);
+      if (attempt < maxAttempts && isRetryableOsrmError(error)) {
+        await waitForRetry(ENV.osrmRetryBaseDelayMs * 2 ** (attempt - 1));
+        continue;
+      }
+      record(false, lastFailureReason, false, attempt);
       return null;
+    } finally {
+      clearTimeout(timeout);
     }
-    const data = await response.json();
-    if (data.code !== "Ok") {
-      record(false, `osrm_${data.code || "not_ok"}`);
-      return null;
-    }
-    const distancesKm = normalizeMatrix(data.distances, 1e3);
-    const durationsMinutes = normalizeMatrix(data.durations, 60);
-    if (!distancesKm || !durationsMinutes) {
-      record(false, "invalid_matrix");
-      return null;
-    }
-    if (shouldUseMatrixCache) {
-      await upsertOsrmMatrixCache({
-        matrixHash,
-        clusterHash,
-        stopCount: nodes.length,
-        durationMatrix: durationsMinutes,
-        distanceMatrix: distancesKm,
-        provider: "osrm",
-        osrmBaseUrl: provider
-      }).catch(() => null);
-    }
-    record(true);
-    return {
-      matrix: { nodes, distancesKm, durationsMinutes },
-      startNodeIndex,
-      endNodeIndex
-    };
-  } catch (error) {
-    record(false, error instanceof Error ? error.name || error.message : "fetch_error");
-    return null;
-  } finally {
-    clearTimeout(timeout);
   }
+  record(false, lastFailureReason, false, maxAttempts);
+  return null;
 }
 async function getOsrmHealth() {
   const baseUrl = ENV.osrmBaseUrl.trim().replace(/\/+$/, "");
@@ -11419,10 +11487,10 @@ function getRouteOperationalOutcome(audit, auditPolicy, options = {}) {
   const remainingCoherenceIssues = audit ? countRemainingCoherenceIssues(audit) : 0;
   const nearbyStopSkippedCount = audit ? countAuditIssues(audit, "nearby_stop_skipped") : 0;
   const roadMetricsUnavailable = !structuralAuditOnly && options.usedRoadMetrics === false;
-  const status = structuralAuditOnly ? "shopee_stop_sequence" : audit?.status === "critical" ? "blocked" : roadMetricsUnavailable || remainingCoherenceIssues > 0 || nearbyStopSkippedCount > 0 ? "attention_strong" : audit?.status === "attention" ? "optimized_attention" : "optimized";
+  const status = structuralAuditOnly ? "shopee_stop_sequence" : audit?.status === "critical" ? "blocked" : roadMetricsUnavailable || remainingCoherenceIssues > 0 || nearbyStopSkippedCount > 0 ? "attention_strong" : options.roadMetricsDegraded || audit?.status === "attention" ? "optimized_attention" : "optimized";
   return {
     status,
-    label: status === "shopee_stop_sequence" ? "Sequencia STOP Shopee" : status === "attention_strong" ? roadMetricsUnavailable ? "Sem calculo por ruas" : "Atencao forte" : status === "optimized_attention" ? "Otimizada com atencao" : status === "blocked" ? "Bloqueada pelo fiscal" : "Otimizada",
+    label: status === "shopee_stop_sequence" ? "Sequencia STOP Shopee" : status === "attention_strong" ? roadMetricsUnavailable ? "Sem calculo por ruas" : "Atencao forte" : status === "optimized_attention" ? options.roadMetricsDegraded ? "Otimizada com estimativas parciais" : "Otimizada com atencao" : status === "blocked" ? "Bloqueada pelo fiscal" : "Otimizada",
     routingStrategy,
     structuralAuditOnly,
     coherenceAuditSkipped,
@@ -11433,8 +11501,9 @@ function getRouteOperationalOutcome(audit, auditPolicy, options = {}) {
     auditScore: audit?.score ?? null,
     auditIssueCount: audit?.issueCount ?? null,
     usedRoadMetrics: options.usedRoadMetrics ?? null,
-    roadMetricsVerified: structuralAuditOnly ? null : options.usedRoadMetrics ?? null,
-    commerciallySatisfactory: status === "optimized" || status === "optimized_attention",
+    roadMetricsDegraded: options.roadMetricsDegraded ?? false,
+    roadMetricsVerified: structuralAuditOnly ? null : options.roadMetricsDegraded ? false : options.usedRoadMetrics ?? null,
+    commerciallySatisfactory: !options.roadMetricsDegraded && (status === "optimized" || status === "optimized_attention"),
     sequenceCoherenceVerified: !coherenceAuditSkipped && remainingCoherenceIssues === 0
   };
 }
@@ -11451,7 +11520,8 @@ function getRouteOperationalOutcomeFromMetadata(route, metadata) {
       coherenceAuditSkipped: readBooleanMetadata(metadata, "coherenceAuditSkipped") ?? false,
       commerciallySatisfactory: readBooleanMetadata(metadata, "commerciallySatisfactory") ?? null,
       sequenceCoherenceVerified: readBooleanMetadata(metadata, "sequenceCoherenceVerified") ?? null,
-      roadMetricsVerified: readBooleanMetadata(metadata, "roadMetricsVerified") ?? readBooleanMetadata(metadata, "auditUsedRoadMetrics") ?? null
+      roadMetricsVerified: readBooleanMetadata(metadata, "roadMetricsVerified") ?? readBooleanMetadata(metadata, "auditUsedRoadMetrics") ?? null,
+      roadMetricsDegraded: readBooleanMetadata(metadata, "roadMetricsDegraded") ?? false
     };
   }
   return {
@@ -11462,7 +11532,8 @@ function getRouteOperationalOutcomeFromMetadata(route, metadata) {
     coherenceAuditSkipped: false,
     commerciallySatisfactory: null,
     sequenceCoherenceVerified: null,
-    roadMetricsVerified: null
+    roadMetricsVerified: null,
+    roadMetricsDegraded: false
   };
 }
 var imileCredentialInput = z2.object({
@@ -12175,6 +12246,8 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     osrmLatencyMs: 0,
     osrmMatrixCount: 0,
     osrmMatrixSize: 0,
+    osrmRetryCount: 0,
+    osrmEstimatedCellCount: 0,
     osrmFailureReason: null,
     matrixCacheHit: 0,
     matrixCacheMiss: 0,
@@ -12201,13 +12274,23 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
       runtimeBreakdown.osrmProvider = args.provider ?? runtimeBreakdown.osrmProvider;
       runtimeBreakdown.osrmMatrixCount += 1;
       runtimeBreakdown.osrmMatrixSize += Math.max(0, args.nodeCount) ** 2;
+      runtimeBreakdown.osrmRetryCount += Math.max(0, (args.attemptCount ?? 0) - 1);
+      runtimeBreakdown.osrmEstimatedCellCount += Math.max(
+        0,
+        args.estimatedCellCount ?? 0
+      );
       runtimeBreakdown.matrixGenerationMs += safeDuration;
       if (args.cacheHit) {
         runtimeBreakdown.matrixCacheHit += 1;
       } else {
         runtimeBreakdown.matrixCacheMiss += 1;
       }
-      if (!args.success && args.failureReason) {
+      if (args.estimatedCellCount && args.estimatedCellCount > 0) {
+        runtimeBreakdown.osrmAvailability = "degraded";
+        runtimeBreakdown.osrmFailureReason = args.failureReason ?? "fallback_speed_cells";
+      } else if ((args.attemptCount ?? 0) > 1) {
+        runtimeBreakdown.osrmFailureReason = args.failureReason ?? `recovered_after_retry:${(args.attemptCount ?? 1) - 1}`;
+      } else if (!args.success && args.failureReason) {
         runtimeBreakdown.osrmFailureReason = args.failureReason;
       }
     }
@@ -12386,6 +12469,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         commerciallySatisfactory: false,
         sequenceCoherenceVerified: false,
         roadMetricsVerified: null,
+        roadMetricsDegraded: false,
         remainingCoherenceIssues: null
       };
     }
@@ -13044,7 +13128,10 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
   const finalOperationalOutcome = getRouteOperationalOutcome(
     optimizationAttempt.audit,
     optimizationAttempt.auditPolicy,
-    { usedRoadMetrics: optimizationAttempt.usedRoadMetrics }
+    {
+      usedRoadMetrics: optimizationAttempt.usedRoadMetrics,
+      roadMetricsDegraded: runtimeBreakdown.osrmEstimatedCellCount > 0
+    }
   );
   if (finalOperationalOutcome.status === "attention_strong") {
     await createOperationalEvent({
@@ -13148,6 +13235,9 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
         commerciallySatisfactory: finalOperationalOutcome.commerciallySatisfactory,
         sequenceCoherenceVerified: finalOperationalOutcome.sequenceCoherenceVerified,
         roadMetricsVerified: finalOperationalOutcome.roadMetricsVerified,
+        roadMetricsDegraded: finalOperationalOutcome.roadMetricsDegraded,
+        osrmRetryCount: runtimeBreakdown.osrmRetryCount,
+        osrmEstimatedCellCount: runtimeBreakdown.osrmEstimatedCellCount,
         remainingCoherenceIssues: finalOperationalOutcome.remainingCoherenceIssues
       }
     }).catch((error) => {
@@ -13274,6 +13364,7 @@ async function optimizeUserRoute(routeId, userId, requestedMode, options) {
     commerciallySatisfactory: finalOperationalOutcome.commerciallySatisfactory,
     sequenceCoherenceVerified: finalOperationalOutcome.sequenceCoherenceVerified,
     roadMetricsVerified: finalOperationalOutcome.roadMetricsVerified,
+    roadMetricsDegraded: finalOperationalOutcome.roadMetricsDegraded,
     remainingCoherenceIssues: finalOperationalOutcome.remainingCoherenceIssues
   };
 }
@@ -14007,6 +14098,10 @@ var appRouter = router({
         latestMetadata,
         "auditUsedRoadMetrics"
       ) ?? (auditSource ? auditSource.startsWith("road-") : void 0);
+      const roadMetricsDegraded = readBooleanMetadata(
+        latestMetadata,
+        "roadMetricsDegraded"
+      ) ?? false;
       const respectInputSequence = readBooleanMetadata(
         latestMetadata,
         "respectInputSequence"
@@ -14034,13 +14129,15 @@ var appRouter = router({
         auditPolicy
       );
       const operationalOutcome = getRouteOperationalOutcome(report, auditPolicy, {
-        usedRoadMetrics
+        usedRoadMetrics,
+        roadMetricsDegraded
       });
       return {
         ...report,
         context: {
           auditSource: auditSource ?? null,
           usedRoadMetrics: usedRoadMetrics ?? null,
+          roadMetricsDegraded,
           respectInputSequence: respectInputSequence ?? null,
           requireStartLocation,
           auditPolicy,
@@ -14133,6 +14230,7 @@ var appRouter = router({
             commerciallySatisfactory: optimized.commerciallySatisfactory,
             sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
             roadMetricsVerified: optimized.roadMetricsVerified,
+            roadMetricsDegraded: optimized.roadMetricsDegraded,
             remainingCoherenceIssues: optimized.remainingCoherenceIssues
           }
         });
@@ -14254,6 +14352,7 @@ var appRouter = router({
           commerciallySatisfactory: optimized.commerciallySatisfactory,
           sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
           roadMetricsVerified: optimized.roadMetricsVerified,
+          roadMetricsDegraded: optimized.roadMetricsDegraded,
           remainingCoherenceIssues: optimized.remainingCoherenceIssues
         }
       });
@@ -14332,6 +14431,7 @@ var appRouter = router({
           commerciallySatisfactory: optimized.commerciallySatisfactory,
           sequenceCoherenceVerified: optimized.sequenceCoherenceVerified,
           roadMetricsVerified: optimized.roadMetricsVerified,
+          roadMetricsDegraded: optimized.roadMetricsDegraded,
           remainingCoherenceIssues: optimized.remainingCoherenceIssues
         }
       });

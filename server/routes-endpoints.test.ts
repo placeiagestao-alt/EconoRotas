@@ -448,6 +448,37 @@ describe("Route endpoints", () => {
     expect(outcome.sequenceCoherenceVerified).toBe(true);
   });
 
+  it("marks a road matrix with estimated cells as partial instead of verified", () => {
+    const outcome = __routeOptimizationTestHooks.getRouteOperationalOutcome(
+      {
+        status: "approved" as const,
+        score: 100,
+        quality: "excellent" as const,
+        stopCount: 2,
+        issueCount: 0,
+        criticalCount: 0,
+        warningCount: 0,
+        totalDistanceKm: 2.5,
+        maxLegKm: 2.5,
+        clusterMetrics: {
+          clusterCount: 1,
+          averageRadiusKm: 1,
+          maxRadiusKm: 1,
+          spreadClusters: [],
+        },
+        issues: [],
+      },
+      null,
+      { usedRoadMetrics: true, roadMetricsDegraded: true }
+    );
+
+    expect(outcome.status).toBe("optimized_attention");
+    expect(outcome.label).toBe("Otimizada com estimativas parciais");
+    expect(outcome.roadMetricsDegraded).toBe(true);
+    expect(outcome.roadMetricsVerified).toBe(false);
+    expect(outcome.commerciallySatisfactory).toBe(false);
+  });
+
   it("prioritizes high-impact regional issues before small nearby fixes in the global audit plan", () => {
     const plan = __routeOptimizationTestHooks.buildBatchAuditRepairPlan({
       status: "attention" as const,

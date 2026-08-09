@@ -64,6 +64,9 @@ describe("OSRM route metrics", () => {
     ENV.osrmEnabled = false;
     ENV.osrmRequired = false;
     ENV.osrmBaseUrl = "https://router.project-osrm.org";
+    ENV.osrmMaxRetries = 2;
+    ENV.osrmRetryBaseDelayMs = 200;
+    ENV.osrmFallbackSpeed = 8.33;
     if (originalOsrmMaxTableNodes === undefined) {
       delete process.env.OSRM_MAX_TABLE_NODES;
     } else {
@@ -227,6 +230,9 @@ describe("OSRM route metrics", () => {
   });
 
   it("returns null when OSRM is unavailable so callers can use fallback", async () => {
+    ENV.osrmEnabled = true;
+    ENV.osrmMaxRetries = 2;
+    ENV.osrmRetryBaseDelayMs = 0;
     globalThis.fetch = vi.fn(async () => new Response("erro", { status: 503 })) as any;
 
     const result = await optimizeRouteWithRoadMetrics([
@@ -235,6 +241,116 @@ describe("OSRM route metrics", () => {
     ]);
 
     expect(result).toBeNull();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries a transient table failure and returns the road matrix", async () => {
+    ENV.osrmEnabled = true;
+    ENV.osrmMaxRetries = 2;
+    ENV.osrmRetryBaseDelayMs = 0;
+    const recordOsrmMatrix = vi.fn();
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("indisponivel", { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: "Ok",
+            distances: [
+              [0, 7000],
+              [7000, 0],
+            ],
+            durations: [
+              [0, 420],
+              [420, 0],
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      ) as any;
+
+    const result = await optimizeRouteWithRoadMetrics(
+      [
+        { latitude: -22.12, longitude: -51.4 },
+        { latitude: -22.13, longitude: -51.41 },
+      ],
+      "shortest_distance",
+      0,
+      { telemetry: { recordOsrmMatrix } }
+    );
+
+    expect(result?.totalDistance).toBe(7);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(recordOsrmMatrix).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        attemptCount: 2,
+        failureReason: "recovered_after_retry:1",
+      })
+    );
+  });
+
+  it("does not retry a permanent table request error", async () => {
+    ENV.osrmEnabled = true;
+    ENV.osrmMaxRetries = 2;
+    ENV.osrmRetryBaseDelayMs = 0;
+    globalThis.fetch = vi.fn(async () => new Response("invalido", { status: 400 })) as any;
+
+    const result = await optimizeRouteWithRoadMetrics([
+      { latitude: -22.12, longitude: -51.4 },
+      { latitude: -22.13, longitude: -51.41 },
+    ]);
+
+    expect(result).toBeNull();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("requests disconnected-pair estimates and reports them as degraded", async () => {
+    ENV.osrmEnabled = true;
+    ENV.osrmFallbackSpeed = 8.33;
+    const recordOsrmMatrix = vi.fn();
+    globalThis.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          code: "Ok",
+          distances: [
+            [0, 2500],
+            [2500, 0],
+          ],
+          durations: [
+            [0, 300],
+            [300, 0],
+          ],
+          fallback_speed_cells: [
+            [0, 1],
+            [1, 0],
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    ) as any;
+
+    const result = await optimizeRouteWithRoadMetrics(
+      [
+        { latitude: -22.12, longitude: -51.4 },
+        { latitude: -22.13, longitude: -51.41 },
+      ],
+      "shortest_distance",
+      0,
+      { telemetry: { recordOsrmMatrix } }
+    );
+
+    expect(result?.totalDistance).toBe(2.5);
+    const requestedUrl = String(vi.mocked(globalThis.fetch).mock.calls[0]?.[0]);
+    expect(requestedUrl).toContain("fallback_speed=8.33");
+    expect(requestedUrl).toContain("fallback_coordinate=input");
+    expect(recordOsrmMatrix).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        estimatedCellCount: 2,
+        failureReason: "fallback_speed_cells:2",
+      })
+    );
   });
 
   it("keeps the road-nearest first stop when current driver location is provided", async () => {

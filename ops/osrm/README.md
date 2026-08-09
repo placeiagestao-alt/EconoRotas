@@ -47,8 +47,16 @@ OSRM_ENABLED=true
 OSRM_BASE_URL=https://seu-osrm-proprio.example.com
 OSRM_REQUEST_TIMEOUT_MS=8000
 OSRM_HEALTH_TIMEOUT_MS=3000
+OSRM_MAX_RETRIES=2
+OSRM_RETRY_BASE_DELAY_MS=200
+OSRM_FALLBACK_SPEED=8.33
 OSRM_REQUIRED=true
 ```
+
+`OSRM_FALLBACK_SPEED` e expresso em metros por segundo e so estima pares sem
+conexao dentro de uma matriz OSRM valida. Ele nao substitui o servico quando o
+OSRM esta indisponivel. Matrizes com celulas estimadas nao sao armazenadas no
+cache e ficam marcadas como degradadas na telemetria da rota.
 
 `OSRM_REQUIRED=true` e proposital: se o motor por ruas cair, o backend bloqueia a
 otimizacao em vez de salvar uma rota por estimativa geografica.

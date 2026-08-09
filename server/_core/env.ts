@@ -37,6 +37,16 @@ function readPositiveInt(value: string | undefined, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
 }
 
+function readNonNegativeInt(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : fallback;
+}
+
+function readPositiveNumber(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 const OPTIMIZED_ROUTE_STOP_LIMIT = 160;
 
 function readAtLeastOptimizedRouteStopLimit(value: string | undefined) {
@@ -97,6 +107,15 @@ export const ENV = {
   osrmBaseUrl: process.env.OSRM_BASE_URL ?? "https://router.project-osrm.org",
   osrmRequestTimeoutMs: Number(process.env.OSRM_REQUEST_TIMEOUT_MS || 8000),
   osrmHealthTimeoutMs: Number(process.env.OSRM_HEALTH_TIMEOUT_MS || 3000),
+  osrmMaxRetries: Math.min(
+    readNonNegativeInt(process.env.OSRM_MAX_RETRIES, 2),
+    4
+  ),
+  osrmRetryBaseDelayMs: Math.min(
+    readNonNegativeInt(process.env.OSRM_RETRY_BASE_DELAY_MS, 200),
+    2000
+  ),
+  osrmFallbackSpeed: readPositiveNumber(process.env.OSRM_FALLBACK_SPEED, 8.33),
   osrmRequired: process.env.OSRM_REQUIRED === "true",
   osrmRequiredMinStops: readPositiveInt(process.env.OSRM_REQUIRED_MIN_STOPS, 101),
   maxSyncStops: Math.min(

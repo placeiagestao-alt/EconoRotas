@@ -30,6 +30,7 @@ type OsrmTableResponse = {
   code: string;
   distances?: Array<Array<number | null>>;
   durations?: Array<Array<number | null>>;
+  fallback_speed_cells?: Array<[number, number]>;
 };
 
 type OsrmRouteResponse = {
@@ -208,7 +209,12 @@ function buildOsrmTableUrl(nodes: MatrixNode[]) {
   const coordinates = nodes
     .map(({ location }) => `${location.longitude},${location.latitude}`)
     .join(";");
-  return `${baseUrl}/table/v1/driving/${coordinates}?annotations=duration,distance`;
+  const params = new URLSearchParams({
+    annotations: "duration,distance",
+    fallback_speed: String(ENV.osrmFallbackSpeed),
+    fallback_coordinate: "input",
+  });
+  return `${baseUrl}/table/v1/driving/${coordinates}?${params.toString()}`;
 }
 
 function hashText(value: string) {
@@ -237,9 +243,12 @@ function buildMatrixHashes(nodes: MatrixNode[]) {
     .sort()
     .join("|");
   const providerKey = ENV.osrmBaseUrl.replace(/\/+$/, "");
+  const fallbackKey = `fallback_speed:${ENV.osrmFallbackSpeed}`;
 
   return {
-    matrixHash: hashText(["driving", providerKey, orderedCoordinates].join("|")),
+    matrixHash: hashText(
+      ["driving", providerKey, fallbackKey, orderedCoordinates].join("|")
+    ),
     clusterHash: hashText(["driving", unorderedCoordinates].join("|")),
   };
 }
@@ -280,6 +289,20 @@ function normalizeMatrix(
     : normalized;
 }
 
+const RETRYABLE_OSRM_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+function waitForRetry(delayMs: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+}
+
+function getOsrmFailureReason(error: unknown) {
+  return error instanceof Error ? error.name || error.message : "fetch_error";
+}
+
+function isRetryableOsrmError(error: unknown) {
+  return !(error instanceof Error && error.name === "AbortError");
+}
+
 async function fetchRoadMatrix(
   locations: Location[],
   options: RouteOptimizationOptions = {}
@@ -300,17 +323,18 @@ async function fetchRoadMatrix(
   const record = (
     success: boolean,
     failureReason: string | null = null,
-    cacheHit = false
+    cacheHit = false,
+    attemptCount = 0,
+    estimatedCellCount = 0
   ) => {
     const durationMs = Date.now() - startedAt;
-    if (!cacheHit) {
-      options.telemetry?.recordOsrmCall?.(durationMs, success);
-    }
     options.telemetry?.recordOsrmMatrix?.({
       nodeCount: nodes.length,
       durationMs,
       cacheHit,
       success,
+      attemptCount,
+      estimatedCellCount,
       failureReason,
       provider,
     });
@@ -344,56 +368,102 @@ async function fetchRoadMatrix(
     };
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
+  const maxAttempts = ENV.osrmMaxRetries + 1;
+  let lastFailureReason = "fetch_error";
 
-  try {
-    const response = await fetch(buildOsrmTableUrl(nodes), {
-      signal: controller.signal,
-      headers: { Accept: "application/json" },
-    });
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptStartedAt = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ENV.osrmRequestTimeoutMs);
 
-    if (!response.ok) {
-      record(false, `http_${response.status}`);
+    try {
+      const response = await fetch(buildOsrmTableUrl(nodes), {
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      });
+
+      if (!response.ok) {
+        lastFailureReason = `http_${response.status}`;
+        options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, false);
+        if (attempt < maxAttempts && RETRYABLE_OSRM_STATUSES.has(response.status)) {
+          await waitForRetry(ENV.osrmRetryBaseDelayMs * 2 ** (attempt - 1));
+          continue;
+        }
+        record(false, lastFailureReason, false, attempt);
+        return null;
+      }
+
+      const data = (await response.json()) as OsrmTableResponse;
+      if (data.code !== "Ok") {
+        lastFailureReason = `osrm_${data.code || "not_ok"}`;
+        options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, false);
+        record(false, lastFailureReason, false, attempt);
+        return null;
+      }
+
+      const distancesKm = normalizeMatrix(data.distances, 1000);
+      const durationsMinutes = normalizeMatrix(data.durations, 60);
+      if (!distancesKm || !durationsMinutes) {
+        lastFailureReason = "invalid_matrix";
+        options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, false);
+        record(false, lastFailureReason, false, attempt);
+        return null;
+      }
+
+      const estimatedCellCount = Array.isArray(data.fallback_speed_cells)
+        ? data.fallback_speed_cells.filter(
+            (cell) =>
+              Array.isArray(cell) &&
+              cell.length === 2 &&
+              cell.every((value) => Number.isInteger(value) && value >= 0)
+          ).length
+        : 0;
+
+      options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, true);
+      if (shouldUseMatrixCache && estimatedCellCount === 0) {
+        await db.upsertOsrmMatrixCache({
+          matrixHash,
+          clusterHash,
+          stopCount: nodes.length,
+          durationMatrix: durationsMinutes,
+          distanceMatrix: distancesKm,
+          provider: "osrm",
+          osrmBaseUrl: provider,
+        }).catch(() => null);
+      }
+      const completionReason = estimatedCellCount > 0
+        ? `fallback_speed_cells:${estimatedCellCount}`
+        : attempt > 1
+          ? `recovered_after_retry:${attempt - 1}`
+          : null;
+      record(
+        true,
+        completionReason,
+        false,
+        attempt,
+        estimatedCellCount
+      );
+      return {
+        matrix: { nodes, distancesKm, durationsMinutes },
+        startNodeIndex,
+        endNodeIndex,
+      };
+    } catch (error) {
+      lastFailureReason = getOsrmFailureReason(error);
+      options.telemetry?.recordOsrmCall?.(Date.now() - attemptStartedAt, false);
+      if (attempt < maxAttempts && isRetryableOsrmError(error)) {
+        await waitForRetry(ENV.osrmRetryBaseDelayMs * 2 ** (attempt - 1));
+        continue;
+      }
+      record(false, lastFailureReason, false, attempt);
       return null;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const data = (await response.json()) as OsrmTableResponse;
-    if (data.code !== "Ok") {
-      record(false, `osrm_${data.code || "not_ok"}`);
-      return null;
-    }
-
-    const distancesKm = normalizeMatrix(data.distances, 1000);
-    const durationsMinutes = normalizeMatrix(data.durations, 60);
-    if (!distancesKm || !durationsMinutes) {
-      record(false, "invalid_matrix");
-      return null;
-    }
-
-    if (shouldUseMatrixCache) {
-      await db.upsertOsrmMatrixCache({
-        matrixHash,
-        clusterHash,
-        stopCount: nodes.length,
-        durationMatrix: durationsMinutes,
-        distanceMatrix: distancesKm,
-        provider: "osrm",
-        osrmBaseUrl: provider,
-      }).catch(() => null);
-    }
-    record(true);
-    return {
-      matrix: { nodes, distancesKm, durationsMinutes },
-      startNodeIndex,
-      endNodeIndex,
-    };
-  } catch (error) {
-    record(false, error instanceof Error ? error.name || error.message : "fetch_error");
-    return null;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  record(false, lastFailureReason, false, maxAttempts);
+  return null;
 }
 
 export async function getOsrmHealth(): Promise<OsrmHealth> {

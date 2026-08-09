@@ -59,6 +59,8 @@ export interface RouteOptimizationOptions {
       durationMs: number;
       cacheHit: boolean;
       success: boolean;
+      attemptCount?: number;
+      estimatedCellCount?: number;
       failureReason?: string | null;
       provider?: string | null;
     }) => void;
