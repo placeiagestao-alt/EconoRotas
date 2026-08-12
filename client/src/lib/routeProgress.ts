@@ -28,6 +28,20 @@ export type LastRouteProgress = {
 
 export const LAST_ROUTE_PROGRESS_KEY = "econorotas:last-route-progress";
 
+export function getFirstPendingStopIndex(
+  stopCount: number,
+  delivered: readonly number[],
+  failed: readonly number[]
+) {
+  const handled = new Set([...delivered, ...failed]);
+
+  for (let index = 0; index < stopCount; index += 1) {
+    if (!handled.has(index)) return index;
+  }
+
+  return -1;
+}
+
 export function getDeliveryStorageKey(routeId: number) {
   return `routing-pwa:route-delivery:${routeId}`;
 }
