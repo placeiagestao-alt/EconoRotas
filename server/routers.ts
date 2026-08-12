@@ -1023,6 +1023,18 @@ function isAuditAttemptBetter(
     audit: RouteAuditReport;
   }
 ) {
+  const currentBlocking = getBlockingAuditIssues(current.audit).length;
+  const candidateBlocking = getBlockingAuditIssues(candidate.audit).length;
+  if (candidateBlocking !== currentBlocking) {
+    return candidateBlocking < currentBlocking;
+  }
+
+  const currentRemaining = countRemainingCoherenceIssues(current.audit);
+  const candidateRemaining = countRemainingCoherenceIssues(candidate.audit);
+  if (candidateRemaining !== currentRemaining) {
+    return candidateRemaining < currentRemaining;
+  }
+
   const currentCrossings = countAuditIssues(current.audit, "route_crossing");
   const candidateCrossings = countAuditIssues(candidate.audit, "route_crossing");
   if (candidateCrossings > currentCrossings) {
@@ -1030,12 +1042,6 @@ function isAuditAttemptBetter(
   }
   if (candidate.audit.issueCount > current.audit.issueCount) {
     return false;
-  }
-
-  const currentRemaining = countRemainingCoherenceIssues(current.audit);
-  const candidateRemaining = countRemainingCoherenceIssues(candidate.audit);
-  if (candidateRemaining !== currentRemaining) {
-    return candidateRemaining < currentRemaining;
   }
 
   const currentNearby = countAuditIssues(current.audit, "nearby_stop_skipped");

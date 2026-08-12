@@ -35,6 +35,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { buildNavigationUrl } from "@/lib/navigationPreference";
 import {
   getFirstPendingStopIndex,
+  isRouteExecutionCoherenceBlocked,
   readDeliveryProgress,
   saveDeliveryProgress,
   saveLastRouteProgress,
@@ -1091,6 +1092,13 @@ export default function RouteDetail() {
   const routeIsShopeeStopSequence = isShopeeStopSequenceRoute(routeQuery.data);
   const routeNeedsStrongAttention =
     routeOperationalStatus === "attention_strong";
+  const routeExecutionCoherenceBlocked = isRouteExecutionCoherenceBlocked({
+    routingStrategy: (routeQuery.data as any)?.routingStrategy,
+    operationalStatus: routeOperationalStatus,
+    sequenceCoherenceVerified: (routeQuery.data as any)
+      ?.sequenceCoherenceVerified,
+    auditIssues: auditQuery.data?.issues,
+  });
 
   const completeRoute = async (counts: {
     deliveredCount: number;
@@ -1172,6 +1180,31 @@ export default function RouteDetail() {
       toast.error(
         `${firstIssue.title}: corrija as paradas com problema antes de iniciar.`
       );
+      return;
+    }
+
+    if (routeExecutionCoherenceBlocked) {
+      const firstIssue = auditQuery.data?.issues.find((issue: any) =>
+        [
+          "nearby_stop_skipped",
+          "region_revisited",
+          "premature_region_exit",
+        ].includes(issue.type)
+      );
+      reportRouteExecutionEvent({
+        type: "route_start_blocked",
+        severity: "error",
+        title: "Início bloqueado por incoerência da rota",
+        message: firstIssue?.title ?? "A sequência ainda não foi aprovada.",
+        metadata: {
+          reason: "route_sequence_not_approved",
+          operationalStatus: routeOperationalStatus,
+          sequenceCoherenceVerified: (routeQuery.data as any)
+            ?.sequenceCoherenceVerified,
+          issue: firstIssue ?? null,
+        },
+      });
+      toast.error("Rota ainda não está coerente. Reotimize antes de iniciar.");
       return;
     }
 
@@ -2241,7 +2274,8 @@ export default function RouteDetail() {
                   isComplete ||
                   isLocatingForReoptimization ||
                   auditQuery.isLoading ||
-                  hasStructuralAuditIssues
+                  hasStructuralAuditIssues ||
+                  routeExecutionCoherenceBlocked
                 }
               >
                 <Play className="mr-2 h-4 w-4" />
@@ -2258,8 +2292,8 @@ export default function RouteDetail() {
               <div className="space-y-1">
                 <p className="font-semibold">Sequência precisa de atenção.</p>
                 <p className="text-sm">
-                  Se der tempo, toque em Reotimizar. Se precisar sair agora,
-                  siga a próxima parada destacada.
+                  Rota ainda não liberada. Reotimize até a sequência ser
+                  aprovada antes de iniciar.
                 </p>
               </div>
             </AlertDescription>
@@ -2337,7 +2371,7 @@ export default function RouteDetail() {
                   <p className="text-sm font-semibold">
                     {hasStructuralAuditIssues
                       ? "Corrija os problemas de endereço ou coordenada antes de otimizar ou iniciar a rota."
-                      : "A validação encontrou incoerência de sequência. Ao iniciar, o sistema vai refazer a rota para nova validação; você também pode usar Reotimizar restantes ou Não gostei da sequência."}
+                      : "A validação encontrou incoerência de sequência. Use Reotimizar restantes ou Não gostei da sequência antes de iniciar."}
                   </p>
                 ) : null}
                 {auditQuery.data.issues.length ? (
@@ -2943,7 +2977,8 @@ export default function RouteDetail() {
                               isComplete ||
                               isLocatingForReoptimization ||
                               auditQuery.isLoading ||
-                              hasStructuralAuditIssues
+                              hasStructuralAuditIssues ||
+                              routeExecutionCoherenceBlocked
                             }
                           >
                             <Play className="h-5 w-5" />

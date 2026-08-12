@@ -204,7 +204,7 @@ describe("Route endpoints", () => {
     ).toBe(false);
   });
 
-  it("rejects a sweep candidate that reduces coherence issues by adding visual crossings", () => {
+  it("accepts a sweep candidate that resolves coherence despite visual crossings", () => {
     const current = {
       optimized: {
         sequence: [0, 1, 2],
@@ -265,10 +265,10 @@ describe("Route endpoints", () => {
 
     expect(
       __routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("rejects a sweep candidate that reduces coherence issues by increasing total alerts", () => {
+  it("accepts a sweep candidate that resolves coherence despite more non-blocking alerts", () => {
     const current = {
       optimized: {
         sequence: [0, 1, 2],
@@ -336,7 +336,7 @@ describe("Route endpoints", () => {
 
     expect(
       __routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("classifies residual nearby skipped stops as strong attention instead of clean optimization", () => {

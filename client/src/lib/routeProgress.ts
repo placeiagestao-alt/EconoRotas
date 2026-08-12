@@ -28,6 +28,39 @@ export type LastRouteProgress = {
 
 export const LAST_ROUTE_PROGRESS_KEY = "econorotas:last-route-progress";
 
+const BLOCKING_COHERENCE_ISSUE_TYPES = new Set([
+  "nearby_stop_skipped",
+  "region_revisited",
+  "premature_region_exit",
+]);
+
+export function isRouteExecutionCoherenceBlocked(input: {
+  routingStrategy?: string | null;
+  operationalStatus?: string | null;
+  sequenceCoherenceVerified?: boolean | null;
+  auditIssues?: ReadonlyArray<{ type?: string; severity?: string }>;
+}) {
+  if (input.routingStrategy === "shopee_stop_sequence") return false;
+  if (
+    input.operationalStatus === "blocked" ||
+    input.sequenceCoherenceVerified === false ||
+    (input.operationalStatus === "attention_strong" &&
+      input.sequenceCoherenceVerified !== true)
+  ) {
+    return true;
+  }
+
+  return Boolean(
+    input.auditIssues?.some(
+      issue =>
+        BLOCKING_COHERENCE_ISSUE_TYPES.has(String(issue.type)) &&
+        (issue.type !== "nearby_stop_skipped" ||
+          issue.severity === "high" ||
+          issue.severity === "critical")
+    )
+  );
+}
+
 export function getFirstPendingStopIndex(
   stopCount: number,
   delivered: readonly number[],
