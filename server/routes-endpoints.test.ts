@@ -339,6 +339,167 @@ describe("Route endpoints", () => {
     ).toBe(true);
   });
 
+  it("rejects a coherence repair that lowers the audit score", () => {
+    const current = {
+      optimized: {
+        sequence: [0, 1, 2],
+        totalDistance: 10,
+        totalTime: 10,
+        waypoints: [],
+      },
+      audit: {
+        status: "attention" as const,
+        score: 65,
+        quality: "attention" as const,
+        stopCount: 3,
+        issueCount: 1,
+        criticalCount: 0,
+        warningCount: 1,
+        totalDistanceKm: 10,
+        maxLegKm: 5,
+        clusterMetrics: {
+          clusterCount: 1,
+          averageRadiusKm: 1,
+          maxRadiusKm: 1,
+          spreadClusters: [],
+        },
+        issues: [
+          {
+            type: "nearby_stop_skipped" as const,
+            severity: "high" as const,
+            title: "Parada proxima pulada",
+            message: "A rota pulou uma parada proxima.",
+          },
+        ],
+      },
+    };
+    const candidate = {
+      optimized: {
+        ...current.optimized,
+        totalDistance: 9,
+      },
+      audit: {
+        ...current.audit,
+        score: 55,
+        issues: [
+          {
+            type: "long_jump" as const,
+            severity: "medium" as const,
+            title: "Salto longo",
+            message: "O reparo criou um salto longo.",
+          },
+        ],
+      },
+    };
+
+    expect(
+      __routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)
+    ).toBe(false);
+  });
+
+  it("rejects a coherence repair that inflates distance beyond tolerance", () => {
+    const current = {
+      optimized: {
+        sequence: [0, 1, 2],
+        totalDistance: 10,
+        totalTime: 10,
+        waypoints: [],
+      },
+      audit: {
+        status: "attention" as const,
+        score: 65,
+        quality: "attention" as const,
+        stopCount: 3,
+        issueCount: 1,
+        criticalCount: 0,
+        warningCount: 1,
+        totalDistanceKm: 10,
+        maxLegKm: 5,
+        clusterMetrics: {
+          clusterCount: 1,
+          averageRadiusKm: 1,
+          maxRadiusKm: 1,
+          spreadClusters: [],
+        },
+        issues: [
+          {
+            type: "nearby_stop_skipped" as const,
+            severity: "high" as const,
+            title: "Parada proxima pulada",
+            message: "A rota pulou uma parada proxima.",
+          },
+        ],
+      },
+    };
+    const candidate = {
+      optimized: {
+        ...current.optimized,
+        totalDistance: 12,
+      },
+      audit: {
+        ...current.audit,
+        score: 80,
+        issues: [],
+      },
+    };
+
+    expect(
+      __routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)
+    ).toBe(false);
+  });
+
+  it("rejects a coherence repair that creates a much larger leg", () => {
+    const current = {
+      optimized: {
+        sequence: [0, 1, 2],
+        totalDistance: 10,
+        totalTime: 10,
+        waypoints: [],
+      },
+      audit: {
+        status: "attention" as const,
+        score: 65,
+        quality: "attention" as const,
+        stopCount: 3,
+        issueCount: 1,
+        criticalCount: 0,
+        warningCount: 1,
+        totalDistanceKm: 10,
+        maxLegKm: 2,
+        clusterMetrics: {
+          clusterCount: 1,
+          averageRadiusKm: 1,
+          maxRadiusKm: 1,
+          spreadClusters: [],
+        },
+        issues: [
+          {
+            type: "nearby_stop_skipped" as const,
+            severity: "high" as const,
+            title: "Parada proxima pulada",
+            message: "A rota pulou uma parada proxima.",
+          },
+        ],
+      },
+    };
+    const candidate = {
+      optimized: {
+        ...current.optimized,
+        totalDistance: 10.5,
+      },
+      audit: {
+        ...current.audit,
+        score: 80,
+        maxLegKm: 3,
+        issues: [],
+      },
+    };
+
+    expect(
+      __routeOptimizationTestHooks.isAuditAttemptBetter(current, candidate)
+    ).toBe(false);
+  });
+
   it("classifies residual nearby skipped stops as strong attention instead of clean optimization", () => {
     const outcome = __routeOptimizationTestHooks.getRouteOperationalOutcome(
       {

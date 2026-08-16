@@ -11467,6 +11467,10 @@ var MAX_NEARBY_FIXES = 100;
 var MAX_REVISIT_FIXES = 50;
 var MAX_PREMATURE_EXIT_FIXES = 50;
 var MAX_BATCH_AUDIT_REPAIR_PASSES = 3;
+var MAX_AUDIT_REPAIR_DISTANCE_INCREASE_RATIO = 0.1;
+var MIN_AUDIT_REPAIR_DISTANCE_TOLERANCE_KM = 1;
+var MAX_AUDIT_REPAIR_LEG_INCREASE_RATIO = 0.2;
+var MIN_AUDIT_REPAIR_LEG_TOLERANCE_KM = 0.5;
 var OSRM_CIRCUIT_MIN_CALLS = 20;
 var OSRM_CIRCUIT_FAILURE_RATE = 0.8;
 var SHOPEE_STOP_AUDIT_POLICY = "shopee_stop_preserved";
@@ -12086,6 +12090,26 @@ function isAuditAttemptBetter(current, candidate) {
   const candidateBlocking = getBlockingAuditIssues(candidate.audit).length;
   if (candidateBlocking !== currentBlocking) {
     return candidateBlocking < currentBlocking;
+  }
+  if (candidate.audit.criticalCount > current.audit.criticalCount) {
+    return false;
+  }
+  if (candidate.audit.score < current.audit.score) {
+    return false;
+  }
+  const allowedDistanceIncrease = Math.max(
+    MIN_AUDIT_REPAIR_DISTANCE_TOLERANCE_KM,
+    current.optimized.totalDistance * MAX_AUDIT_REPAIR_DISTANCE_INCREASE_RATIO
+  );
+  if (candidate.optimized.totalDistance > current.optimized.totalDistance + allowedDistanceIncrease) {
+    return false;
+  }
+  const allowedMaxLegIncrease = Math.max(
+    MIN_AUDIT_REPAIR_LEG_TOLERANCE_KM,
+    current.audit.maxLegKm * MAX_AUDIT_REPAIR_LEG_INCREASE_RATIO
+  );
+  if (candidate.audit.maxLegKm > current.audit.maxLegKm + allowedMaxLegIncrease) {
+    return false;
   }
   const currentRemaining = countRemainingCoherenceIssues(current.audit);
   const candidateRemaining = countRemainingCoherenceIssues(candidate.audit);
